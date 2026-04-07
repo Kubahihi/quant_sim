@@ -1,0 +1,21 @@
+data:
+  cache_dir: "data/cache"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  exports_dir: "data/exports"
+  cache_expiry_hours: 24
+
+risk_free_rate: 0.03
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/quant_platform.log"
+
+optimization:
+  max_iterations: 1000
+  tolerance: 1e-8
+
+simulation:
+  n_simulations: 1000
+  trading_days_per_year: 252
