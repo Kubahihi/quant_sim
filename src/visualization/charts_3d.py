@@ -162,7 +162,7 @@ def plot_portfolio_tradeoff_3d(
             "x": 0.01,
             "bgcolor": "rgba(255,255,255,0.78)",
         },
-        paper_bgcolor="white",
+        paper_bgcolor="#0f172a",
         scene=_base_scene({
             "x": "Volatility",
             "y": "Expected Return",
@@ -260,7 +260,7 @@ def plot_monte_carlo_percentile_surface(
             "y": 1.02,
             "xanchor": "left",
             "x": 0.01,
-            "bgcolor": "rgba(255,255,255,0.78)",
+            "bgcolor": "rgba(15,23,42,0.95)",
         },
         paper_bgcolor="#0f172a",
         scene={
@@ -271,7 +271,7 @@ def plot_monte_carlo_percentile_surface(
             "xaxis": {
                 "title": "Days",
                 "showbackground": True,
-                "backgroundcolor": "rgba(244,247,251,0.92)",
+                "backgroundcolor": "rgba(15,23,42,0.95)",
                 "gridcolor": "rgba(148,163,184,0.25)",
                 "zerolinecolor": "rgba(71,85,105,0.15)",
                 "showspikes": False,
@@ -279,7 +279,7 @@ def plot_monte_carlo_percentile_surface(
             "yaxis": {
                 "title": "Percentile",
                 "showbackground": True,
-                "backgroundcolor": "rgba(244,247,251,0.92)",
+                "backgroundcolor": "rgba(15,23,42,0.95)",
                 "gridcolor": "rgba(148,163,184,0.25)",
                 "zerolinecolor": "rgba(71,85,105,0.15)",
                 "ticksuffix": "%",
@@ -288,7 +288,7 @@ def plot_monte_carlo_percentile_surface(
             "zaxis": {
                 "title": "Portfolio Value",
                 "showbackground": True,
-                "backgroundcolor": "rgba(244,247,251,0.92)",
+                "backgroundcolor": "rgba(15,23,42,0.95)",
                 "gridcolor": "rgba(148,163,184,0.25)",
                 "zerolinecolor": "rgba(71,85,105,0.15)",
                 "tickprefix": "$",
