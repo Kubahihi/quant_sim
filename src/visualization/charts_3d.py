@@ -151,7 +151,7 @@ def plot_portfolio_tradeoff_3d(
 
     fig.update_layout(
         title={"text": title, "x": 0.02},
-        template="plotly_white",
+        template="plotly_dark",
         height=680,
         margin={"l": 0, "r": 0, "t": 70, "b": 0},
         legend={
