@@ -167,7 +167,7 @@ def plot_portfolio_tradeoff_3d(
             "y": 1.02,
             "xanchor": "left",
             "x": 0.01,
-            "bgcolor": "rgba(255,255,255,0.78)",
+            "bgcolor": "rgba(15,23,42,0.95)",
         },
         paper_bgcolor="#0f172a",
         scene=_base_scene({
