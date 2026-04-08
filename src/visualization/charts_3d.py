@@ -16,7 +16,7 @@ def _base_scene(axis_titles: Dict[str, str]) -> Dict[str, Dict]:
     """Shared 3D scene styling for a polished dashboard look."""
     axis_style = {
         "showbackground": True,
-        "backgroundcolor": "rgba(244,247,251,0.92)",
+        "backgroundcolor": "rgba(15,23,42,0.95)",
         "gridcolor": "rgba(148,163,184,0.25)",
         "zerolinecolor": "rgba(71,85,105,0.15)",
         "showspikes": False,
@@ -262,7 +262,7 @@ def plot_monte_carlo_percentile_surface(
             "x": 0.01,
             "bgcolor": "rgba(255,255,255,0.78)",
         },
-        paper_bgcolor="white",
+        paper_bgcolor="#0f172a",
         scene={
             "camera": {
                 "eye": {"x": 1.5, "y": 1.45, "z": 0.88},
