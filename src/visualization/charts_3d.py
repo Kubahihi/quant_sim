@@ -265,7 +265,7 @@ def plot_monte_carlo_percentile_surface(
         "size": 20           
             }
         },
-        template="plotly_white",
+        template="plotly_dark",
         height=680,
         margin={"l": 0, "r": 0, "t": 70, "b": 0},
         legend={
