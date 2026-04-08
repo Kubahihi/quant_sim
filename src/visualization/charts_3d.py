@@ -150,7 +150,14 @@ def plot_portfolio_tradeoff_3d(
         )
 
     fig.update_layout(
-        title={"text": title, "x": 0.02},
+        title={
+    "text": title,
+    "x": 0.02,
+    "font": {
+        "color": "#e5e7eb", 
+        "size": 20          
+            }
+        },
         template="plotly_dark",
         height=680,
         margin={"l": 0, "r": 0, "t": 70, "b": 0},
