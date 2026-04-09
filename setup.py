@@ -19,6 +19,7 @@ setup(
         "cvxpy>=1.3.0",
         "sqlalchemy>=2.0.0",
         "loguru>=0.7.0",
+        "openai>=1.30.0",
     ],
     python_requires=">=3.10",
 )
