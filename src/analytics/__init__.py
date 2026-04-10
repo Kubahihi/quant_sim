@@ -9,6 +9,7 @@ from .portfolio_metrics import (
     build_portfolio_timeseries,
 )
 from .scoring import evaluate_portfolio_score, build_deterministic_fallback_review
+from .advanced import run_advanced_models
 
 __all__ = [
     "calculate_returns",
@@ -25,4 +26,5 @@ __all__ = [
     "build_portfolio_timeseries",
     "evaluate_portfolio_score",
     "build_deterministic_fallback_review",
+    "run_advanced_models",
 ]
