@@ -50,6 +50,7 @@ def evaluate_portfolio_score(
     avg_correlation: float,
     n_assets: int,
     risk_profile: str = "balanced",
+    model_signals: Dict[str, float] | None = None,
 ) -> Dict[str, object]:
     """Build deterministic score and flags from portfolio metrics."""
     thresholds = _profile_thresholds(risk_profile)
@@ -132,6 +133,52 @@ def evaluate_portfolio_score(
             "rule": "correlation",
             "penalty": round(penalty, 2),
             "detail": f"Average correlation {avg_correlation:.2f}",
+        })
+
+    # Optional V0.3/V0.4 model layer integration (heuristic, non-breaking).
+    signals = model_signals or {}
+    lr_annual = float(signals.get("lr_expected_annual_return", 0.0))
+    arima_next = float(signals.get("arima_next_return", 0.0))
+    garch_ann_vol = float(signals.get("garch_annualized_volatility", 0.0))
+
+    if lr_annual < 0:
+        penalty = min(10.0, abs(lr_annual) * 60.0)
+        score -= penalty
+        flags.append("Linear trend model indicates negative expected annual return.")
+        breakdown.append({
+            "rule": "lr_trend",
+            "penalty": round(penalty, 2),
+            "detail": f"LR expected annual return {lr_annual:.1%}",
+        })
+
+    if arima_next < 0:
+        penalty = min(8.0, abs(arima_next) * 400.0)
+        score -= penalty
+        flags.append("ARIMA short-term forecast is negative.")
+        breakdown.append({
+            "rule": "arima_forecast",
+            "penalty": round(penalty, 2),
+            "detail": f"ARIMA next return {arima_next:.3%}",
+        })
+
+    base_vol = float(metrics.get("volatility", 0.0))
+    if base_vol > 0 and garch_ann_vol > base_vol * 1.15:
+        penalty = min(10.0, (garch_ann_vol - base_vol) * 40.0)
+        score -= penalty
+        flags.append("GARCH indicates elevated forward volatility.")
+        breakdown.append({
+            "rule": "garch_volatility",
+            "penalty": round(penalty, 2),
+            "detail": f"GARCH annualized vol {garch_ann_vol:.1%}",
+        })
+
+    if lr_annual > 0.08 and arima_next > 0 and (base_vol <= 0 or garch_ann_vol <= base_vol):
+        bonus = min(6.0, lr_annual * 20.0)
+        score += bonus
+        breakdown.append({
+            "rule": "model_alignment_bonus",
+            "penalty": round(-bonus, 2),
+            "detail": "LR/ARIMA positive with stable forward volatility",
         })
 
     final_score = int(max(0, min(100, round(score))))
