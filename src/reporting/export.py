@@ -173,12 +173,12 @@ def generate_pdf_report(
         _add_text_page(pdf, "Simulation Summary", simulation_lines)
 
         figure_titles = {
-            "cumulative": "Portfolio and Asset Cumulative Returns",
-            "assets": "Asset Cumulative Returns",
-            "drawdown": "Portfolio Drawdown",
-            "correlation": "Correlation Heatmap",
-            "frontier": "Efficient Frontier",
-            "monte_carlo": "Monte Carlo Fan Chart",
+            "cumulative": "",
+            "assets": "",
+            "drawdown": "",
+            "correlation": "",
+            "frontier": "",
+            "monte_carlo": "",
         }
         for key, title in figure_titles.items():
             fig = figures.get(key)

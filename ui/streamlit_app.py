@@ -576,7 +576,7 @@ with st.sidebar:
         step=250,
     )
 
-    run_clicked = st.button("Vyhodnotit portfolio", type="primary", use_container_width=True)
+    run_clicked = st.button("Evaluate Portfolio", type="primary", use_container_width=True)
 
 
 if run_clicked:
@@ -617,7 +617,7 @@ if run_clicked:
 analysis_result = st.session_state.get("analysis_result")
 
 if analysis_result is None:
-    st.info("Configure portfolio in the sidebar and click 'Vyhodnotit portfolio'.")
+    st.info("Configure the portfolio in the sidebar and click 'Evaluate Portfolio'.")
     st.stop()
 
 
@@ -655,26 +655,37 @@ if score_result["flags"]:
 else:
     st.success("No critical deterministic flags detected.")
 
+if score_result["breakdown"]:
+    score_breakdown_df = pd.DataFrame(score_result["breakdown"]).rename(columns={
+        "rule": "Rule",
+        "penalty": "Penalty",
+        "detail": "Detail",
+    })
+    st.caption("Score breakdown")
+    st.dataframe(score_breakdown_df, use_container_width=True, hide_index=True)
+else:
+    st.caption("No score penalties were triggered.")
+
 st.markdown("---")
 
 
-st.header("Metriky")
+st.header("Metrics overview")
 metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-metric_col1.metric("Anualizovany vynos", f"{metrics['annualized_return']:.2%}")
-metric_col2.metric("Volatilita", f"{metrics['volatility']:.2%}")
-metric_col3.metric("Sharpe ratio", f"{metrics['sharpe_ratio']:.3f}")
-metric_col4.metric("Max drawdown", f"{metrics['max_drawdown']:.2%}")
+metric_col1.metric("Annualized Return", f"{metrics['annualized_return']:.2%}")
+metric_col2.metric("Volatility", f"{metrics['volatility']:.2%}")
+metric_col3.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.3f}")
+metric_col4.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
 
 metric_col5, metric_col6, metric_col7, metric_col8 = st.columns(4)
-metric_col5.metric("Prumerny denni vynos", f"{metrics['daily_return_mean']:.3%}")
-metric_col6.metric("Koncentrace (HHI)", f"{metrics['hhi']:.3f}")
-metric_col7.metric("Effective holdings", f"{metrics['effective_holdings']:.2f}")
-metric_col8.metric("Prumerna korelace", f"{metrics['avg_correlation']:.3f}")
+metric_col5.metric("Average Daily Return", f"{metrics['daily_return_mean']:.3%}")
+metric_col6.metric("Concentration (HHI)", f"{metrics['hhi']:.3f}")
+metric_col7.metric("Effective Holdings", f"{metrics['effective_holdings']:.2f}")
+metric_col8.metric("Average Correlation", f"{metrics['avg_correlation']:.3f}")
 
 st.markdown("---")
 
 
-st.header("Graf vyvoje portfolia")
+st.header("Portfolio performance")
 portfolio_cumulative_fig = plot_cumulative_returns(
     pd.DataFrame({"Portfolio": portfolio_returns}),
     title="Portfolio Cumulative Return",
@@ -691,7 +702,7 @@ drawdown_fig = plot_drawdown(portfolio_returns, title="Portfolio Drawdown")
 st.pyplot(drawdown_fig)
 
 
-st.header("Korelace")
+st.header("Correlation matrix")
 corr_fig = plot_correlation_heatmap(corr_matrix, title="Correlation Matrix")
 st.pyplot(corr_fig)
 st.dataframe(corr_matrix.round(3), use_container_width=True)
@@ -791,16 +802,24 @@ st.dataframe(asset_metrics_view, use_container_width=True)
 st.markdown("---")
 
 
-st.header("AI komentar")
+st.header("AI Commentary")
 if ai_review.get("available", False):
     st.success("Groq AI review generated successfully.")
+    if ai_review.get("json_mode_error"):
+        st.caption(f"JSON mode fallback used: {ai_review['json_mode_error']}")
 else:
     st.info("AI review unavailable. Showing deterministic fallback text.")
+    if ai_review.get("source_detail"):
+        st.error(f"AI detail: {ai_review['source_detail']}")
 
-st.markdown(f"**Shrnuti:** {ai_review.get('summary', '-')}")
-st.markdown(f"**Hlavni rizika:** {ai_review.get('risks', '-')}")
-st.markdown(f"**Navrhy zlepseni:** {ai_review.get('improvements', '-')}")
-st.markdown(f"**Zaverecne hodnoceni:** {ai_review.get('verdict', '-')}")
+st.markdown(f"**Summary:** {ai_review.get('summary', '-')}")
+st.markdown(f"**Main Risks:** {ai_review.get('risks', '-')}")
+st.markdown(f"**Improvement Suggestions:** {ai_review.get('improvements', '-')}")
+st.markdown(f"**Final Evaluation:** {ai_review.get('verdict', '-')}")
+
+if ai_review.get("available", False) and ai_review.get("raw_response"):
+    with st.expander("AI raw response", expanded=False):
+        st.code(ai_review["raw_response"], language="json")
 
 st.markdown("---")
 
@@ -834,7 +853,7 @@ export_col1, export_col2, export_col3 = st.columns(3)
 with export_col1:
     if pdf_bytes is not None:
         st.download_button(
-            "\U0001F4C4 Export PDF",
+            "Export PDF",
             data=pdf_bytes,
             file_name=f"portfolio_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             mime="application/pdf",
@@ -843,7 +862,7 @@ with export_col1:
 with export_col2:
     if csv_bytes is not None:
         st.download_button(
-            "\U0001F9FE Export data",
+            "Export Data (CSV)",
             data=csv_bytes,
             file_name=f"portfolio_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
@@ -852,7 +871,7 @@ with export_col2:
 with export_col3:
     if json_bytes is not None:
         st.download_button(
-            "\U0001F5C2\ufe0f Export full report",
+            "Export Full Report (JSON)",
             data=json_bytes,
             file_name=f"portfolio_full_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
             mime="application/json",
