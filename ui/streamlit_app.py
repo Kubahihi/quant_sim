@@ -67,7 +67,7 @@ DEFAULT_TICKERS = [
 
 
 st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_chart:")
-st.title("Quant Platform v0.2")
+st.title("Quant Platform v0.3")
 st.caption(
     "Portfolio evaluator with deterministic scoring, AI review via Groq, "
     "and multi-page PDF export."
