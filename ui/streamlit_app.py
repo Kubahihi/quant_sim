@@ -22,6 +22,7 @@ from src.analytics import (
     calculate_portfolio_core_metrics,
     calculate_portfolio_daily_returns,
     evaluate_portfolio_score,
+    run_advanced_models,
 )
 from src.analytics.risk_metrics import (
     calculate_max_drawdown,
@@ -231,6 +232,18 @@ def _create_simulation_percentiles(price_paths: np.ndarray) -> pd.DataFrame:
     })
 
 
+def _model_signals_from_outputs(model_outputs: Dict[str, Any]) -> Dict[str, float]:
+    lr_metrics = model_outputs.get("linear_regression", {}).get("metrics", {})
+    arima_metrics = model_outputs.get("arima", {}).get("metrics", {})
+    garch_metrics = model_outputs.get("garch", {}).get("metrics", {})
+
+    return {
+        "lr_expected_annual_return": float(lr_metrics.get("expected_annual_return", 0.0) or 0.0),
+        "arima_next_return": float(arima_metrics.get("next_period_return_forecast", 0.0) or 0.0),
+        "garch_annualized_volatility": float(garch_metrics.get("volatility_annualized", 0.0) or 0.0),
+    }
+
+
 def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
     serialized_frontier = []
     for point in result["frontier"]:
@@ -270,6 +283,7 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "simulation_percentiles": result["simulation_percentiles"],
         "frontier_points": serialized_frontier,
         "ai_review": result["ai_review"],
+        "advanced_models": result.get("advanced_models", {}),
         "recommendation": result["ai_review"].get("verdict", ""),
     }
 
@@ -337,12 +351,19 @@ def _compute_analysis(
         "avg_correlation": avg_corr,
     }
 
+    advanced_models = run_advanced_models(
+        returns=portfolio_returns,
+        forecast_periods=min(10, max(3, horizon_days // 63)),
+    )
+    model_signals = _model_signals_from_outputs(advanced_models)
+
     score_result = evaluate_portfolio_score(
         metrics=metrics,
         concentration=concentration,
         avg_correlation=avg_corr,
         n_assets=returns.shape[1],
         risk_profile=risk_profile,
+        model_signals=model_signals,
     )
     fallback_review = build_deterministic_fallback_review(score_result, metrics)
 
@@ -505,6 +526,7 @@ def _compute_analysis(
         "simulation_stats": simulation_stats,
         "simulation_percentiles": simulation_percentiles,
         "asset_metrics_df": asset_metrics_df,
+        "advanced_models": advanced_models,
         "warnings": alignment_warnings,
         "missing_tickers": missing_tickers,
     }
@@ -640,6 +662,7 @@ simulation_stats = analysis_result["simulation_stats"]
 ai_review = analysis_result["ai_review"]
 returns = analysis_result["returns"]
 asset_metrics_df = analysis_result["asset_metrics_df"]
+advanced_models = analysis_result.get("advanced_models", {})
 
 
 st.header("Portfolio score")
@@ -681,6 +704,35 @@ metric_col5.metric("Average Daily Return", f"{metrics['daily_return_mean']:.3%}"
 metric_col6.metric("Concentration (HHI)", f"{metrics['hhi']:.3f}")
 metric_col7.metric("Effective Holdings", f"{metrics['effective_holdings']:.2f}")
 metric_col8.metric("Average Correlation", f"{metrics['avg_correlation']:.3f}")
+
+st.markdown("---")
+
+
+st.header("Advanced Models (V0.3 / V0.4)")
+advanced_rows: List[Dict[str, Any]] = []
+for model_name, result in advanced_models.items():
+    if result.get("available", False):
+        metrics_map = result.get("metrics", {})
+        advanced_rows.append({
+            "Model": model_name,
+            "Status": "ok",
+            "Signal 1": round(float(metrics_map.get("expected_annual_return", metrics_map.get("next_period_return_forecast", metrics_map.get("conditional_volatility", 0.0))) or 0.0), 6),
+            "Signal 2": round(float(metrics_map.get("trend_slope_daily", metrics_map.get("forecast_confidence", metrics_map.get("volatility_annualized", 0.0))) or 0.0), 6),
+            "Confidence": round(float(metrics_map.get("confidence", 0.0) or 0.0), 4),
+            "Error": "",
+        })
+    else:
+        advanced_rows.append({
+            "Model": model_name,
+            "Status": "unavailable",
+            "Signal 1": np.nan,
+            "Signal 2": np.nan,
+            "Confidence": np.nan,
+            "Error": result.get("error", ""),
+        })
+
+if advanced_rows:
+    st.dataframe(pd.DataFrame(advanced_rows), use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
