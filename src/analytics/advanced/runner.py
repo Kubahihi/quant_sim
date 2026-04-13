@@ -4,53 +4,41 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from .arima_model import ARIMAModel
-from .garch_model import GARCHModel
-from .linear_regression_model import LinearRegressionModel
+from ..modular import run_model_bundle
 
 
-def _safe_run_model(model: Any, series: pd.Series, periods: int) -> Dict[str, Any]:
-    try:
-        model.fit(series)
-        prediction = model.predict(periods=periods)
-        metrics = model.get_metrics()
-        return {
-            "available": True,
-            "prediction": prediction,
-            "metrics": metrics,
-            "error": "",
-        }
-    except Exception as exc:
-        return {
-            "available": False,
-            "prediction": {},
-            "metrics": {},
-            "error": str(exc),
-        }
+def _to_legacy_output(name: str, result: Any) -> Dict[str, Any]:
+    metrics = dict(getattr(result, "metrics", {}) or {})
+    prediction: Dict[str, Any] = {}
+
+    if "expected_daily_return" in metrics:
+        prediction["next_return"] = float(metrics["expected_daily_return"])
+    elif "next_period_return_forecast" in metrics:
+        prediction["next_return"] = float(metrics["next_period_return_forecast"])
+    elif "conditional_volatility" in metrics:
+        prediction["next_volatility"] = float(metrics["conditional_volatility"])
+
+    return {
+        "available": bool(getattr(result, "available", False)),
+        "prediction": prediction,
+        "metrics": metrics,
+        "error": str(getattr(result, "error", "") or ""),
+        "family": getattr(result, "family", "unknown"),
+        "name": name,
+    }
 
 
 def run_advanced_models(
     returns: pd.Series,
     forecast_periods: int = 5,
+    returns_df: pd.DataFrame | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Run advanced model layer with unified outputs for scoring/UI."""
+    """Run modular model layer with legacy-compatible dictionary outputs."""
     clean_returns = pd.Series(returns).dropna().astype(float)
-
-    outputs = {
-        "linear_regression": _safe_run_model(
-            LinearRegressionModel(),
-            clean_returns,
-            periods=forecast_periods,
-        ),
-        "arima": _safe_run_model(
-            ARIMAModel(order=(1, 0, 1)),
-            clean_returns,
-            periods=forecast_periods,
-        ),
-        "garch": _safe_run_model(
-            GARCHModel(p=1, q=1),
-            clean_returns,
-            periods=forecast_periods,
-        ),
+    context = {
+        "forecast_periods": int(forecast_periods),
+        "returns_df": returns_df if returns_df is not None else pd.DataFrame({"portfolio": clean_returns}),
     }
-    return outputs
+
+    outputs = run_model_bundle(clean_returns, context=context)
+    return {name: _to_legacy_output(name, result) for name, result in outputs.items()}
