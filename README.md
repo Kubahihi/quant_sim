@@ -201,3 +201,49 @@ requirements.txt
 - Pridat automatizovane testy (unit/integration) pro scoring, validace vstupu a exporty.
 - Volitelne pridat fallback model switch v AI vrstve.
 - Volitelne rozsirit data export o ZIP bundle (vice CSV souboru).
+
+## 9) Modular dashboard vrstva (nove)
+
+Aplikace nyni obsahuje modularni quant stack v `src/analytics/modular/`:
+- pluggable model framework (bayesian/classical/ml registry)
+- portfolio model template: Black-Litterman (`black_litterman`)
+- pluggable signal framework
+- additional signals: `black_litterman_tilt`, `sentiment_adjusted`
+- summary engine nad modely + signaly
+- news relevance vrstvu (provider je zamenitelny) + sentiment scoring
+- deterministic no-look-ahead backtest vrstvu
+- persistence run history (`data/run_history/*.json`) + compare
+
+V UI pribyly taby:
+- Data
+- Models
+- Signals
+- Backtest
+- News
+- Summary
+- History
+- Compare
+
+Kazdy run uklada:
+- timestamp, config, universe, date range
+- model/signal outputs
+- metrics + summary + news relevance + sentiment aggregate
+
+## 10) Testy
+
+Spusteni testu:
+
+```bash
+python -m pytest -q
+```
+
+Aktualni testy pokryvaji:
+- interface consistency
+- no-look-ahead behavior
+- news relevance scoring
+- sentiment scoring
+- black-litterman output consistency
+- summary aggregation
+- persistence round-trip
+- failure isolation
+- deterministic backtest example
