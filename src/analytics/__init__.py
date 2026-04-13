@@ -10,6 +10,17 @@ from .portfolio_metrics import (
 )
 from .scoring import evaluate_portfolio_score, build_deterministic_fallback_review
 from .advanced import run_advanced_models
+from .modular import (
+    build_news_analysis,
+    build_news_rows_for_ui,
+    build_summary,
+    compare_runs,
+    list_run_records,
+    load_run_record,
+    run_model_bundle,
+    run_quant_stack,
+    run_signal_bundle,
+)
 
 __all__ = [
     "calculate_returns",
@@ -27,4 +38,13 @@ __all__ = [
     "evaluate_portfolio_score",
     "build_deterministic_fallback_review",
     "run_advanced_models",
+    "run_model_bundle",
+    "run_signal_bundle",
+    "build_summary",
+    "build_news_analysis",
+    "build_news_rows_for_ui",
+    "run_quant_stack",
+    "list_run_records",
+    "load_run_record",
+    "compare_runs",
 ]

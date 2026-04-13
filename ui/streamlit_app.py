@@ -15,14 +15,19 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.ai import generate_ai_review, resolve_groq_api_key
 from src.analytics import (
     build_deterministic_fallback_review,
+    build_news_rows_for_ui,
     build_portfolio_timeseries,
+    compare_runs,
     calculate_average_correlation,
     calculate_concentration_metrics,
     calculate_correlation_matrix,
+    list_run_records,
+    load_run_record,
     calculate_portfolio_core_metrics,
     calculate_portfolio_daily_returns,
     evaluate_portfolio_score,
     run_advanced_models,
+    run_quant_stack,
 )
 from src.analytics.risk_metrics import (
     calculate_max_drawdown,
@@ -67,7 +72,7 @@ DEFAULT_TICKERS = [
 
 
 st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_chart:")
-st.title("Quant Platform v0.3")
+st.title("Quant Platform v0.4")
 st.caption(
     "Portfolio evaluator with deterministic scoring, AI review via Groq, "
     "and multi-page PDF export."
@@ -284,6 +289,18 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "frontier_points": serialized_frontier,
         "ai_review": result["ai_review"],
         "advanced_models": result.get("advanced_models", {}),
+        "models": {
+            name: item.to_dict() for name, item in result.get("model_results", {}).items()
+        },
+        "signals": {
+            name: item.to_dict() for name, item in result.get("signal_results", {}).items()
+        },
+        "summary_layer": result.get("summary_result").to_dict() if result.get("summary_result") else {},
+        "news_layer": result.get("news_result").to_dict() if result.get("news_result") else {},
+        "backtest_layer": {
+            "metrics": result.get("backtest_result", {}).get("metrics", {}),
+            "lookahead_safe": bool(result.get("backtest_result", {}).get("lookahead_safe", False)),
+        },
         "recommendation": result["ai_review"].get("verdict", ""),
     }
 
@@ -354,6 +371,7 @@ def _compute_analysis(
     advanced_models = run_advanced_models(
         returns=portfolio_returns,
         forecast_periods=min(10, max(3, horizon_days // 63)),
+        returns_df=returns,
     )
     model_signals = _model_signals_from_outputs(advanced_models)
 
@@ -383,6 +401,16 @@ def _compute_analysis(
         streamlit_secrets = None
 
     api_key = resolve_groq_api_key(streamlit_secrets)
+    news_api_key = ""
+    if streamlit_secrets is not None:
+        try:
+            news_api_key = str(
+                streamlit_secrets.get("NEWSAPI_KEY")
+                or streamlit_secrets.get("NEWS_API_KEY")
+                or ""
+            ).strip()
+        except Exception:
+            news_api_key = ""
     ai_review = generate_ai_review(ai_payload, api_key=api_key)
     ai_messages: List[str] = []
     if not ai_review.get("available", False):
@@ -500,6 +528,24 @@ def _compute_analysis(
 
     portfolio_timeseries = build_portfolio_timeseries(portfolio_returns, initial_value=100.0)
 
+    quant_stack = run_quant_stack(
+        portfolio_returns=portfolio_returns,
+        returns_df=returns,
+        config={
+            "tickers": returns.columns.tolist(),
+            "weights": [float(value) for value in weights],
+            "start_date": start_date,
+            "end_date": end_date,
+            "risk_profile": risk_profile,
+            "risk_free_rate": risk_free_rate,
+            "horizon_days": horizon_days,
+            "portfolio_metrics": metrics,
+            "news_max_items": 120,
+            "news_api_key": news_api_key,
+            "sector_keywords": ["macro", "rates", "inflation", "earnings", "volatility"],
+        },
+    )
+
     return {
         "tickers": returns.columns.tolist(),
         "weights": weights,
@@ -527,6 +573,14 @@ def _compute_analysis(
         "simulation_percentiles": simulation_percentiles,
         "asset_metrics_df": asset_metrics_df,
         "advanced_models": advanced_models,
+        "model_results": quant_stack["models"],
+        "signal_results": quant_stack["signals"],
+        "summary_result": quant_stack["summary"],
+        "news_result": quant_stack["news"],
+        "backtest_result": quant_stack["backtest"],
+        "run_record": quant_stack["run_record"],
+        "history_path": quant_stack["history_path"],
+        "history_records": list_run_records(limit=40),
         "warnings": alignment_warnings,
         "missing_tickers": missing_tickers,
     }
@@ -663,7 +717,192 @@ ai_review = analysis_result["ai_review"]
 returns = analysis_result["returns"]
 asset_metrics_df = analysis_result["asset_metrics_df"]
 advanced_models = analysis_result.get("advanced_models", {})
+model_results = analysis_result.get("model_results", {})
+signal_results = analysis_result.get("signal_results", {})
+summary_result = analysis_result.get("summary_result")
+news_result = analysis_result.get("news_result")
+backtest_result = analysis_result.get("backtest_result", {})
+history_records = analysis_result.get("history_records", [])
 
+
+st.header("Modular Dashboard")
+dashboard_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "Summary", "History", "Compare"])
+
+with dashboard_tabs[0]:
+    st.subheader("Data snapshot")
+    st.caption(f"Run record: {analysis_result.get('run_record').run_id if analysis_result.get('run_record') else '-'}")
+    st.dataframe(analysis_result["prices"].tail(20), use_container_width=True)
+    st.dataframe(analysis_result["returns"].tail(20), use_container_width=True)
+
+with dashboard_tabs[1]:
+    st.subheader("Model outputs")
+    model_rows: List[Dict[str, Any]] = []
+    for model_name, model in model_results.items():
+        metrics_map = getattr(model, "metrics", {})
+        model_rows.append({
+            "Model": model_name,
+            "Family": getattr(model, "family", ""),
+            "Available": bool(getattr(model, "available", False)),
+            "Confidence": float(getattr(model, "confidence", 0.0)),
+            "Primary Metric": float(
+                metrics_map.get(
+                    "expected_annual_return",
+                    metrics_map.get(
+                        "posterior_annual_return",
+                        metrics_map.get(
+                            "posterior_expected_annual_return",
+                            metrics_map.get("volatility_annualized", 0.0),
+                        ),
+                    ),
+                )
+            ),
+            "Band Width": float(metrics_map.get("posterior_interval_width", metrics_map.get("forecast_spread", 0.0))),
+            "Error": getattr(model, "error", ""),
+        })
+    if model_rows:
+        st.dataframe(pd.DataFrame(model_rows), use_container_width=True, hide_index=True)
+        confidence_frame = pd.DataFrame(model_rows)[["Model", "Confidence"]].set_index("Model")
+        st.caption("Model confidence")
+        st.bar_chart(confidence_frame)
+
+with dashboard_tabs[2]:
+    st.subheader("Signal outputs")
+    signal_rows: List[Dict[str, Any]] = []
+    for signal_name, signal in signal_results.items():
+        signal_rows.append({
+            "Signal": signal_name,
+            "Family": getattr(signal, "family", ""),
+            "Direction": getattr(signal, "direction", "neutral"),
+            "Score": float(getattr(signal, "score", 0.0)),
+            "Confidence": float(getattr(signal, "confidence", 0.0)),
+            "Available": bool(getattr(signal, "available", False)),
+            "Error": getattr(signal, "error", ""),
+        })
+    if signal_rows:
+        st.dataframe(pd.DataFrame(signal_rows), use_container_width=True, hide_index=True)
+
+with dashboard_tabs[3]:
+    st.subheader("Deterministic backtest")
+    bt_metrics = backtest_result.get("metrics", {})
+    bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
+    bt_col1.metric("Total Return", f"{bt_metrics.get('total_return', 0.0):.2%}")
+    bt_col2.metric("Volatility", f"{bt_metrics.get('volatility', 0.0):.2%}")
+    bt_col3.metric("Sharpe", f"{bt_metrics.get('sharpe', 0.0):.3f}")
+    bt_col4.metric("Max DD", f"{bt_metrics.get('max_drawdown', 0.0):.2%}")
+
+    equity_curve = backtest_result.get("equity_curve")
+    drawdown_series = backtest_result.get("drawdown")
+    if isinstance(equity_curve, pd.Series) and not equity_curve.empty:
+        st.line_chart(equity_curve.rename("equity_curve"))
+    if isinstance(drawdown_series, pd.Series) and not drawdown_series.empty:
+        st.line_chart(drawdown_series.rename("drawdown"))
+    st.caption(f"No-look-ahead safe: {bool(backtest_result.get('lookahead_safe', False))}")
+
+with dashboard_tabs[4]:
+    st.subheader("News relevance")
+    if news_result and getattr(news_result, "available", False):
+        n_col1, n_col2 = st.columns(2)
+        n_col1.metric("Aggregate sentiment", f"{float(getattr(news_result, 'sentiment_score', 0.0)):+.3f}")
+        n_col2.metric("Sentiment dispersion", f"{float(getattr(news_result, 'sentiment_dispersion', 0.0)):.3f}")
+        st.caption(f"Provider used: {str(getattr(news_result, 'context', {}).get('provider_used', 'unknown'))}")
+
+        fetch_errors = list(getattr(news_result, "context", {}).get("fetch_errors", []))
+        if fetch_errors:
+            with st.expander("News fetch diagnostics", expanded=False):
+                for msg in fetch_errors:
+                    st.write(f"- {msg}")
+
+        news_rows = build_news_rows_for_ui(news_result)
+        if news_rows:
+            news_df = pd.DataFrame(news_rows)
+
+            def _sentiment_color_style(value: Any) -> str:
+                if value == "green":
+                    return "background-color: #d5f5e3; color: #1e8449;"
+                if value == "red":
+                    return "background-color: #fadbd8; color: #922b21;"
+                return "background-color: #fcf3cf; color: #7d6608;"
+
+            styled = news_df.style.map(_sentiment_color_style, subset=["Sentiment Color"])
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+        else:
+            st.info("No relevant news items found for this run.")
+    else:
+        st.info(f"News layer unavailable: {getattr(news_result, 'error', 'n/a') if news_result else 'n/a'}")
+
+with dashboard_tabs[5]:
+    st.subheader("Summary layer")
+    if summary_result:
+        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+        s_col1.metric("Composite Score", f"{getattr(summary_result, 'composite_score', 0.0):.3f}")
+        s_col2.metric("Regime", str(getattr(summary_result, "regime_label", "neutral")))
+        s_col3.metric("Confidence", f"{getattr(summary_result, 'confidence', 0.0):.3f}")
+        s_col4.metric("News Sentiment", f"{float(getattr(summary_result, 'news_sentiment', 0.0)):+.3f}")
+        st.metric("News Sentiment Dispersion", f"{float(getattr(summary_result, 'news_sentiment_dispersion', 0.0)):.3f}")
+        for line in getattr(summary_result, "highlights", []):
+            st.write(f"- {line}")
+        st.caption(str(getattr(summary_result, "regime_interpretation", "")))
+        st.write(f"Expected return view: {float(getattr(summary_result, 'expected_return_view', 0.0)):.2%}")
+        st.write(f"Expected risk view: {float(getattr(summary_result, 'expected_risk_view', 0.0)):.2%}")
+        st.write(f"Drawdown implication: {getattr(summary_result, 'drawdown_implication', '')}")
+        st.write(f"Volatility implication: {getattr(summary_result, 'volatility_implication', '')}")
+        st.write(f"News implication: {getattr(summary_result, 'news_implication', '')}")
+        strongest = getattr(summary_result, "strongest_signals", [])
+        if strongest:
+            st.caption("Strongest signals")
+            st.dataframe(pd.DataFrame(strongest), use_container_width=True, hide_index=True)
+        top_news = getattr(summary_result, "top_relevant_news", [])
+        if top_news:
+            st.caption("Top 3 relevant news")
+            st.dataframe(pd.DataFrame(top_news), use_container_width=True, hide_index=True)
+        changes = getattr(summary_result, "recent_changes", [])
+        if changes:
+            st.caption("Recent changes vs prior run")
+            for change in changes:
+                st.write(f"- {change}")
+        for warning in getattr(summary_result, "warnings", []):
+            st.warning(warning)
+        for flag in getattr(summary_result, "risk_flags", []):
+            st.warning(flag)
+
+with dashboard_tabs[6]:
+    st.subheader("Run history")
+    history_rows = [
+        {
+            "Run ID": item.get("run_id", ""),
+            "Timestamp": item.get("timestamp", ""),
+            "Tickers": ", ".join(item.get("universe", [])),
+            "Regime": item.get("summary", {}).get("regime_label", ""),
+            "Composite": item.get("summary", {}).get("composite_score", 0.0),
+        }
+        for item in history_records
+    ]
+    if history_rows:
+        st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No historical runs stored yet.")
+
+with dashboard_tabs[7]:
+    st.subheader("Run comparison")
+    run_ids = [item.get("run_id") for item in history_records if item.get("run_id")]
+    if len(run_ids) >= 2:
+        left_run = st.selectbox("Base run", options=run_ids, index=min(1, len(run_ids) - 1))
+        right_run = st.selectbox("Compare run", options=run_ids, index=0)
+        if left_run and right_run and left_run != right_run:
+            try:
+                left_data = load_run_record(left_run)
+                right_data = load_run_record(right_run)
+                comparison = compare_runs(left_data, right_data)
+                st.dataframe(pd.DataFrame([comparison["metric_diff"]]), use_container_width=True, hide_index=True)
+                if comparison.get("summary_diff"):
+                    st.caption("Summary deltas")
+                    st.dataframe(pd.DataFrame([comparison["summary_diff"]]), use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.warning(f"Comparison failed: {exc}")
+    else:
+        st.info("Need at least two saved runs for comparison.")
+
+st.markdown("---")
 
 st.header("Portfolio score")
 col1, col2, col3 = st.columns(3)
