@@ -8,8 +8,19 @@ from .portfolio_metrics import (
     calculate_portfolio_core_metrics,
     build_portfolio_timeseries,
 )
-from .scoring import evaluate_portfolio_score, build_deterministic_fallback_review
+from .scoring import (
+    build_deterministic_fallback_review,
+    compute_weighted_factor_score,
+    evaluate_portfolio_score,
+)
 from .advanced import run_advanced_models
+from .scenario_playground import (
+    build_role_exposure_table,
+    build_scenario_suite,
+    classify_asset_role,
+    list_scenario_presets,
+    run_scenario_preset,
+)
 from .modular import (
     build_news_analysis,
     build_news_rows_for_ui,
@@ -37,7 +48,13 @@ __all__ = [
     "build_portfolio_timeseries",
     "evaluate_portfolio_score",
     "build_deterministic_fallback_review",
+    "compute_weighted_factor_score",
     "run_advanced_models",
+    "classify_asset_role",
+    "build_role_exposure_table",
+    "run_scenario_preset",
+    "build_scenario_suite",
+    "list_scenario_presets",
     "run_model_bundle",
     "run_signal_bundle",
     "build_summary",
