@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from html import escape
 from io import BytesIO
 from pathlib import Path
-import importlib
-import inspect
 import sys
 from typing import Any, Dict, List, Tuple
 
@@ -15,29 +12,9 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import yfinance as yf
 
-PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if PROJECT_ROOT in sys.path:
-    sys.path.remove(PROJECT_ROOT)
-sys.path.insert(0, PROJECT_ROOT)
-
-# Guard against accidentally reusing a non-local `src` package from site-packages.
-for module_name, module_obj in list(sys.modules.items()):
-    if module_name != "src" and not module_name.startswith("src."):
-        continue
-    module_file = getattr(module_obj, "__file__", None)
-    if not module_file:
-        continue
-    resolved = str(Path(module_file).resolve())
-    if not resolved.startswith(PROJECT_ROOT):
-        sys.modules.pop(module_name, None)
+sys.path.append(str(Path(__file__).parent.parent))
 
 from ui.economics_questions import render_economics_questions_section
-from ui.dashboard_shell import (
-    PAGE_LABELS,
-    DashboardPreferences,
-    inject_dashboard_styles,
-    render_dashboard_preferences,
-)
 from src.ai import generate_ai_review, resolve_groq_api_key
 from src.analytics import (
     build_deterministic_fallback_review,
@@ -55,16 +32,13 @@ from src.analytics import (
     run_advanced_models,
     run_quant_stack,
 )
-from src.analytics.scenario_playground import build_scenario_suite, list_scenario_presets
 from src.analytics.risk_metrics import (
     calculate_max_drawdown,
     calculate_sharpe_ratio,
     calculate_volatility,
 )
 from src.analytics.returns import calculate_annualized_return
-import src.data.universe_enrichment as universe_enrichment_module
-import src.data.universe_sources as universe_sources_module
-import src.data.stock_universe as stock_universe_module
+from src.data.stock_universe import get_universe, load_universe_metadata, load_universe_snapshot
 from src.data.fetchers.yahoo_fetcher import YahooFetcher
 from src.optimization import (
     calculate_efficient_frontier,
@@ -80,7 +54,6 @@ from src.reporting import (
 )
 from src.simulation import run_monte_carlo_simulation
 from src.stock_picker.ai_filter import apply_ai_query, parse_ai_query
-import src.stock_picker.screener as stock_screener_module
 from src.stock_picker.screener import (
     apply_classic_filters,
     apply_technical_indicators,
@@ -127,14 +100,6 @@ from src.visualization.charts_3d import (
     plot_monte_carlo_percentile_surface,
     plot_portfolio_tradeoff_3d,
 )
-from src.visualization.cockpit_charts import (
-    plot_asset_stress_impact,
-    plot_crisis_playback,
-    plot_phase_timeline,
-    plot_scenario_atlas,
-    plot_scenario_fingerprint,
-    plot_scenario_shock_map,
-)
 
 
 DEFAULT_TICKERS = [
@@ -147,7 +112,6 @@ DEFAULT_TICKERS = [
 
 
 st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_chart:")
-inject_dashboard_styles()
 st.title("Quant Platform v0.4")
 st.caption(
     "Portfolio evaluator with deterministic scoring, AI review via Groq, "
@@ -163,7 +127,6 @@ def fetch_market_data_cached(
     end_date: date,
 ) -> pd.DataFrame:
     """Fetch close prices with Streamlit cache to reduce repeated API calls."""
-    fetcher = YahooFetcher()
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
 
@@ -403,128 +366,6 @@ def _build_pdf_figures(result: Dict[str, Any]) -> Dict[str, Any]:
     asset_figure = plot_cumulative_returns(returns, title="Asset Cumulative Returns")
     figures["assets"] = asset_figure
     return figures
-
-
-def _analysis_export_cache_key(result: Dict[str, Any]) -> str:
-    run_record = result.get("run_record")
-    run_id = getattr(run_record, "run_id", None)
-    if run_id:
-        return f"exports::{run_id}"
-
-    tickers_key = ",".join(str(ticker) for ticker in result.get("tickers", []))
-    date_key = f"{result.get('start_date', '')}:{result.get('end_date', '')}"
-    return f"exports::{tickers_key}::{date_key}::{int(result.get('horizon_days', 0))}"
-
-
-def _prepare_export_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
-    cache = st.session_state.setdefault("_prepared_export_artifacts", {})
-    cache_key = _analysis_export_cache_key(result)
-    if cache_key in cache:
-        return cache[cache_key]
-
-    report_payload = _build_report_payload(result)
-    artifacts: Dict[str, Any] = {
-        "report_payload": report_payload,
-        "pdf_bytes": None,
-        "csv_bytes": None,
-        "json_bytes": None,
-        "errors": {},
-    }
-
-    pdf_figures: Dict[str, Any] = {}
-    try:
-        pdf_figures = _build_pdf_figures(result)
-        pdf_buffer = generate_pdf_report(report_payload, pdf_figures)
-        artifacts["pdf_bytes"] = pdf_buffer.getvalue()
-    except Exception as exc:
-        artifacts["errors"]["pdf"] = str(exc)
-    finally:
-        for figure in pdf_figures.values():
-            try:
-                plt.close(figure)
-            except Exception:
-                pass
-
-    try:
-        artifacts["csv_bytes"] = export_portfolio_data_csv(report_payload)
-    except Exception as exc:
-        artifacts["errors"]["csv"] = str(exc)
-
-    try:
-        artifacts["json_bytes"] = export_full_report_json(report_payload)
-    except Exception as exc:
-        artifacts["errors"]["json"] = str(exc)
-
-    cache[cache_key] = artifacts
-    return artifacts
-
-
-def _render_export_actions(
-    analysis_result: Dict[str, Any],
-    title: str,
-    body: str,
-    compact: bool = False,
-    key_namespace: str = "exports",
-) -> None:
-    export_artifacts = _prepare_export_artifacts(analysis_result)
-    errors = dict(export_artifacts.get("errors", {}))
-    pdf_bytes = export_artifacts.get("pdf_bytes")
-    csv_bytes = export_artifacts.get("csv_bytes")
-    json_bytes = export_artifacts.get("json_bytes")
-    timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    st.markdown(f"### {title}")
-    st.caption(body)
-
-    if not compact:
-        status_cols = st.columns(3)
-        status_cols[0].metric("PDF Report", "Ready" if pdf_bytes is not None else "Issue")
-        status_cols[1].metric("CSV Export", "Ready" if csv_bytes is not None else "Issue")
-        status_cols[2].metric("JSON Export", "Ready" if json_bytes is not None else "Issue")
-
-    export_col1, export_col2, export_col3 = st.columns(3)
-    with export_col1:
-        st.download_button(
-            "Download PDF Report",
-            data=pdf_bytes or b"",
-            file_name=f"portfolio_report_{timestamp_suffix}.pdf",
-            mime="application/pdf",
-            disabled=pdf_bytes is None,
-            help=errors.get("pdf", "Charts, score, simulation, and commentary in one document."),
-            use_container_width=True,
-            key=f"{key_namespace}_download_pdf",
-        )
-    with export_col2:
-        st.download_button(
-            "Download Data CSV",
-            data=csv_bytes or b"",
-            file_name=f"portfolio_data_{timestamp_suffix}.csv",
-            mime="text/csv",
-            disabled=csv_bytes is None,
-            help=errors.get("csv", "Portfolio data export for spreadsheet work."),
-            use_container_width=True,
-            key=f"{key_namespace}_download_csv",
-        )
-    with export_col3:
-        st.download_button(
-            "Download Full JSON",
-            data=json_bytes or b"",
-            file_name=f"portfolio_full_report_{timestamp_suffix}.json",
-            mime="application/json",
-            disabled=json_bytes is None,
-            help=errors.get("json", "Complete analysis payload for automation or archiving."),
-            use_container_width=True,
-            key=f"{key_namespace}_download_json",
-        )
-
-    if errors:
-        with st.expander("Export diagnostics", expanded=not compact):
-            if "pdf" in errors:
-                st.warning(f"PDF export issue: {errors['pdf']}")
-            if "csv" in errors:
-                st.warning(f"CSV export issue: {errors['csv']}")
-            if "json" in errors:
-                st.warning(f"JSON export issue: {errors['json']}")
 
 
 def _compute_analysis(
@@ -856,23 +697,6 @@ def _numeric_bounds(series: pd.Series, default_min: float, default_max: float) -
     return min_value, max_value
 
 
-def _rounded_slider_range(
-    minimum: float,
-    maximum: float,
-    precision: int = 2,
-    floor_at_zero: bool = False,
-) -> tuple[float, float]:
-    low = round(float(minimum), precision)
-    high = round(float(maximum), precision)
-    if floor_at_zero:
-        low = max(0.0, low)
-        high = max(low + (10 ** -precision), high)
-    if low >= high:
-        high = low + max(10 ** -precision, abs(low) * 0.05, 1.0 if floor_at_zero else 0.1)
-        high = round(high, precision)
-    return low, high
-
-
 def _portfolio_positions_dataframe(portfolio: Dict[str, Any]) -> pd.DataFrame:
     rows = []
     for item in portfolio.get("positions", []):
@@ -966,26 +790,6 @@ def _is_universe_snapshot_stale(metadata: Dict[str, Any], max_age_hours: int) ->
     return age_seconds > float(max_age_hours) * 3600.0
 
 
-def _extract_filter_options(series: pd.Series) -> list[str]:
-    normalized = series.fillna("").astype(str).str.strip()
-    known = sorted([value for value in normalized.unique().tolist() if value and value.lower() not in {"nan", "none"}])
-    has_unknown = bool((normalized == "").any())
-    if has_unknown or not known:
-        known.append("Unknown")
-    return known
-
-
-def _is_default_range(
-    selected: tuple[float, float],
-    full_range: tuple[float, float],
-    tolerance: float = 1e-8,
-) -> bool:
-    return (
-        abs(float(selected[0]) - float(full_range[0])) <= tolerance * max(1.0, abs(float(full_range[0])))
-        and abs(float(selected[1]) - float(full_range[1])) <= tolerance * max(1.0, abs(float(full_range[1])))
-    )
-
-
 def _parse_targets_input(raw_text: str) -> list[float]:
     if not raw_text.strip():
         return []
@@ -998,142 +802,6 @@ def _parse_targets_input(raw_text: str) -> list[float]:
         if pd.notna(parsed) and float(parsed) > 0:
             values.append(float(parsed))
     return values
-
-
-def _format_compact_number(value: float | int | None) -> str:
-    if value is None or pd.isna(value):
-        return "-"
-
-    numeric = float(value)
-    abs_value = abs(numeric)
-    if abs_value >= 1_000_000_000_000:
-        return f"{numeric / 1_000_000_000_000:.2f}T"
-    if abs_value >= 1_000_000_000:
-        return f"{numeric / 1_000_000_000:.2f}B"
-    if abs_value >= 1_000_000:
-        return f"{numeric / 1_000_000:.2f}M"
-    if abs_value >= 1_000:
-        return f"{numeric / 1_000:.1f}K"
-    return f"{numeric:.0f}"
-
-
-def _coverage_ratio(series: pd.Series) -> float:
-    if len(series) == 0:
-        return 0.0
-    return float(series.notna().mean())
-
-
-def _build_screenable_universe(universe_df: pd.DataFrame) -> pd.DataFrame:
-    if universe_df.empty:
-        return universe_df.copy()
-
-    output = universe_df.copy()
-    source_series = output["Source"].fillna("").astype(str).str.strip()
-    price_series = pd.to_numeric(output["Price"], errors="coerce")
-    sec_only_mask = source_series.eq("sec_company_tickers")
-
-    core = output.loc[~(sec_only_mask & price_series.isna())].copy()
-    return core.reset_index(drop=True)
-
-
-def _build_universe_health_rows(universe_df: pd.DataFrame) -> pd.DataFrame:
-    health_specs = [
-        ("Price", "Live price snapshot"),
-        ("AvgVolume", "Liquidity coverage"),
-        ("MarketCap", "Size coverage"),
-        ("Sector", "Classification"),
-        ("Industry", "Sub-industry classification"),
-        ("PE", "Trailing valuation"),
-        ("ForwardPE", "Forward valuation"),
-        ("ROE", "Quality"),
-        ("RevenueGrowth", "Growth"),
-        ("DividendYield", "Income"),
-        ("Return52W", "Momentum"),
-    ]
-    rows: list[dict[str, Any]] = []
-    total_rows = max(1, len(universe_df))
-    for column, label in health_specs:
-        if column not in universe_df.columns:
-            continue
-        non_null = int(universe_df[column].notna().sum())
-        coverage = non_null / float(total_rows)
-        rows.append({
-            "Field": column,
-            "Purpose": label,
-            "Coverage": f"{coverage:.1%}",
-            "Filled Rows": non_null,
-        })
-    return pd.DataFrame(rows)
-
-
-def _reload_stock_picker_modules() -> Tuple[Any, Any]:
-    importlib.reload(universe_sources_module)
-    importlib.reload(universe_enrichment_module)
-    refreshed_universe_module = importlib.reload(stock_universe_module)
-    refreshed_screener_module = importlib.reload(stock_screener_module)
-    return refreshed_universe_module, refreshed_screener_module
-
-
-def _render_universe_overview(
-    universe_df: pd.DataFrame,
-    screenable_universe_df: pd.DataFrame,
-    metadata: Dict[str, Any],
-    snapshot_stale: bool,
-) -> None:
-    st.markdown("### Universe Health")
-
-    raw_symbols_total = int(len(universe_df))
-    symbols_total = int(len(screenable_universe_df))
-    excluded_count = max(0, raw_symbols_total - symbols_total)
-    priced_count = int(screenable_universe_df["Price"].notna().sum()) if "Price" in screenable_universe_df.columns else 0
-    sector_count = int(screenable_universe_df["Sector"].notna().sum()) if "Sector" in screenable_universe_df.columns else 0
-    fundamentals_mask = pd.Series(False, index=screenable_universe_df.index)
-    for column in ["PE", "ForwardPE", "ROE", "RevenueGrowth", "DividendYield"]:
-        if column in screenable_universe_df.columns:
-            fundamentals_mask = fundamentals_mask | screenable_universe_df[column].notna()
-    fundamentals_count = int(fundamentals_mask.sum()) if len(screenable_universe_df) else 0
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Universe Size", f"{symbols_total:,}")
-    m2.metric("Price Coverage", f"{_coverage_ratio(screenable_universe_df['Price']) if 'Price' in screenable_universe_df.columns else 0.0:.1%}", f"{priced_count:,} priced")
-    m3.metric("Fundamental Coverage", f"{(fundamentals_count / max(1, symbols_total)):.1%}", f"{fundamentals_count:,} with key fields")
-    m4.metric("Sector Coverage", f"{(sector_count / max(1, symbols_total)):.1%}", f"{sector_count:,} classified")
-
-    left_col, right_col = st.columns([1.35, 1.65])
-    with left_col:
-        if excluded_count > 0:
-            st.caption(
-                f"Raw candidates: {raw_symbols_total:,}. "
-                f"Screenable core: {symbols_total:,}. "
-                f"Excluded SEC-only symbols without price: {excluded_count:,}."
-            )
-        health_rows = _build_universe_health_rows(screenable_universe_df)
-        if not health_rows.empty:
-            st.dataframe(health_rows, use_container_width=True, hide_index=True)
-        status = str(metadata.get("status", "unknown")).strip().lower()
-        last_refresh = str(metadata.get("last_refresh", "")).strip()
-        if last_refresh:
-            st.caption(f"Last refresh (UTC): {last_refresh}")
-        if snapshot_stale:
-            st.warning("Snapshot is stale. You can still screen on cached data, but a refresh is recommended.")
-        elif status == "fallback":
-            st.warning("Last refresh fell back to cached data. Coverage may be partial.")
-        else:
-            st.caption("Snapshot looks ready for screening.")
-
-    with right_col:
-        exchange_counts = (
-            screenable_universe_df["Exchange"].fillna("Unknown").astype(str).str.strip().replace("", "Unknown").value_counts().head(10)
-            if "Exchange" in screenable_universe_df.columns
-            else pd.Series(dtype=int)
-        )
-        if not exchange_counts.empty:
-            st.caption("Exchange mix")
-            st.bar_chart(exchange_counts)
-
-        fallback_reason = str(metadata.get("fallback_reason", "")).strip()
-        if fallback_reason:
-            st.caption(f"Refresh diagnostic: {fallback_reason}")
 
 
 def _render_selectable_results(results: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
@@ -1187,151 +855,118 @@ def _render_screener_bulk_actions(
     key_prefix: str,
 ) -> None:
     st.markdown("### Bulk Actions")
-    s1, s2, s3 = st.columns(3)
-    s1.metric("Selected", int(len(selected_rows)))
-    s2.metric("Result Set", int(len(full_results)))
-    median_market_cap = (
-        _format_compact_number(pd.to_numeric(selected_rows.get("MarketCap"), errors="coerce").median())
-        if not selected_rows.empty and "MarketCap" in selected_rows.columns
-        else "-"
+    shares_to_add = st.number_input(
+        "Shares per selected ticker",
+        min_value=0.01,
+        value=1.0,
+        step=0.25,
+        key=f"{key_prefix}_shares_to_add",
     )
-    s3.metric("Median Market Cap", median_market_cap)
 
-    action_tabs = st.tabs(["Portfolio", "Export", "Inspect"])
+    add_clicked = st.button(
+        "Add selected to Portfolio",
+        key=f"{key_prefix}_add_to_portfolio",
+        disabled=selected_rows.empty,
+        use_container_width=True,
+    )
+    if add_clicked and not selected_rows.empty:
+        portfolio = dict(st.session_state.get("current_portfolio", load_portfolio("default")))
+        for _, row in selected_rows.iterrows():
+            ticker = str(row.get("Ticker", "")).strip().upper()
+            if not ticker:
+                continue
+            price_raw = pd.to_numeric(row.get("Price"), errors="coerce")
+            cost_basis = None if pd.isna(price_raw) else float(price_raw)
+            portfolio = add_position(
+                portfolio,
+                ticker=ticker,
+                shares=float(shares_to_add),
+                cost_basis=cost_basis,
+            )
+        st.session_state["current_portfolio"] = portfolio
+        _invalidate_portfolio_live_snapshot()
+        st.success(f"Added {len(selected_rows)} symbols into the current portfolio.")
 
-    with action_tabs[0]:
-        shares_to_add = st.number_input(
-            "Shares per selected ticker",
-            min_value=0.01,
-            value=1.0,
-            step=0.25,
-            key=f"{key_prefix}_shares_to_add",
-        )
-        add_clicked = st.button(
-            "Add selected to Portfolio",
-            key=f"{key_prefix}_add_to_portfolio",
-            disabled=selected_rows.empty,
+    export_source = st.radio(
+        "Export scope",
+        options=["Selected rows", "All results"],
+        horizontal=True,
+        key=f"{key_prefix}_export_scope",
+    )
+    export_df = selected_rows if (export_source == "Selected rows" and not selected_rows.empty) else full_results
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+    excel_bytes = _dataframe_to_excel_bytes(export_df)
+
+    e1, e2 = st.columns(2)
+    with e1:
+        st.download_button(
+            "Export CSV",
+            data=csv_bytes,
+            file_name=f"screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
             use_container_width=True,
+            key=f"{key_prefix}_download_csv",
         )
-        if add_clicked and not selected_rows.empty:
-            portfolio = dict(st.session_state.get("current_portfolio", load_portfolio("default")))
-            for _, row in selected_rows.iterrows():
-                ticker = str(row.get("Ticker", "")).strip().upper()
-                if not ticker:
-                    continue
-                price_raw = pd.to_numeric(row.get("Price"), errors="coerce")
-                cost_basis = None if pd.isna(price_raw) else float(price_raw)
-                portfolio = add_position(
-                    portfolio,
-                    ticker=ticker,
-                    shares=float(shares_to_add),
-                    cost_basis=cost_basis,
-                )
-            st.session_state["current_portfolio"] = portfolio
-            _invalidate_portfolio_live_snapshot()
-            st.success(f"Added {len(selected_rows)} symbols into the current portfolio.")
-        if selected_rows.empty:
-            st.caption("Select rows in the result table to push them into the portfolio tracker.")
-
-    with action_tabs[1]:
-        export_source = st.radio(
-            "Export scope",
-            options=["Selected rows", "All results"],
-            horizontal=True,
-            key=f"{key_prefix}_export_scope",
-        )
-        export_df = selected_rows if (export_source == "Selected rows" and not selected_rows.empty) else full_results
-        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
-        excel_bytes = _dataframe_to_excel_bytes(export_df)
-
-        e1, e2 = st.columns(2)
-        with e1:
-            st.download_button(
-                "Export CSV",
-                data=csv_bytes,
-                file_name=f"screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"{key_prefix}_download_csv",
-            )
-        with e2:
-            if excel_bytes is None:
-                st.info("Excel export unavailable (openpyxl missing).")
-            else:
-                st.download_button(
-                    "Export Excel",
-                    data=excel_bytes,
-                    file_name=f"screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key=f"{key_prefix}_download_excel",
-                )
-
-    with action_tabs[2]:
-        if selected_rows.empty:
-            st.info("Select at least one row to inspect a candidate in more detail.")
+    with e2:
+        if excel_bytes is None:
+            st.info("Excel export unavailable (openpyxl missing).")
         else:
-            selected_tickers = selected_rows["Ticker"].dropna().astype(str).str.upper().tolist()
-            selected_ticker = st.selectbox(
-                "Inspect selected ticker",
-                options=selected_tickers,
-                key=f"{key_prefix}_inspect_ticker",
+            st.download_button(
+                "Export Excel",
+                data=excel_bytes,
+                file_name=f"screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"{key_prefix}_download_excel",
             )
-            history = _fetch_ticker_history_cached(selected_ticker)
-            if history.empty:
-                st.warning(f"Could not load historical data for {selected_ticker}.")
+
+    selected_tickers = selected_rows["Ticker"].astype(str).tolist() if not selected_rows.empty else []
+    selected_ticker = selected_tickers[0] if selected_tickers else ""
+
+    q1, q2 = st.columns(2)
+    if q1.button(
+        "Quick Analyze selected ticker",
+        disabled=(not selected_ticker),
+        key=f"{key_prefix}_quick_analyze",
+        use_container_width=True,
+    ) and selected_ticker:
+        history = _fetch_ticker_history_cached(selected_ticker)
+        if history.empty or "Close" not in history.columns:
+            st.warning(f"Could not load historical data for {selected_ticker}.")
+        else:
+            returns = pd.to_numeric(history["Close"], errors="coerce").pct_change().dropna()
+            if returns.empty:
+                st.warning(f"Insufficient data for quick analysis of {selected_ticker}.")
             else:
-                close_column = "Adj Close" if "Adj Close" in history.columns else "Close"
-                if close_column not in history.columns:
-                    st.warning(f"Price column not available for {selected_ticker}.")
-                else:
-                    close_prices = pd.to_numeric(history[close_column], errors="coerce").dropna()
-                    returns = close_prices.pct_change().dropna()
-                    selected_view = selected_rows[
-                        selected_rows["Ticker"].astype(str).str.upper() == selected_ticker
-                    ].head(1)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Annualized Return", f"{calculate_annualized_return(returns):.2%}")
+                c2.metric("Volatility", f"{calculate_volatility(returns):.2%}")
+                c3.metric("Sharpe", f"{calculate_sharpe_ratio(returns):.3f}")
+                c4.metric("Max Drawdown", f"{calculate_max_drawdown(returns):.2%}")
 
-                    if not selected_view.empty:
-                        record = selected_view.iloc[0]
-                        price_value = pd.to_numeric(record.get("Price"), errors="coerce")
-                        market_cap_value = pd.to_numeric(record.get("MarketCap"), errors="coerce")
-                        return_52w_value = pd.to_numeric(record.get("Return52W"), errors="coerce")
-                        quant_score_value = pd.to_numeric(record.get("QuantScore"), errors="coerce")
-                        i1, i2, i3, i4 = st.columns(4)
-                        i1.metric("Price", f"${float(price_value):.2f}" if pd.notna(price_value) else "-")
-                        i2.metric("Market Cap", _format_compact_number(market_cap_value))
-                        i3.metric("52w Return", f"{float(return_52w_value):.2%}" if pd.notna(return_52w_value) else "-")
-                        i4.metric("Quant Score", f"{float(quant_score_value):.1f}" if pd.notna(quant_score_value) else "-")
-                        st.caption(
-                            " | ".join(
-                                [
-                                    str(record.get("Company", "") or selected_ticker),
-                                    str(record.get("Sector", "") or "Unknown sector"),
-                                    str(record.get("Industry", "") or "Unknown industry"),
-                                ]
-                            )
-                        )
-
-                    if returns.empty:
-                        st.warning(f"Insufficient data for quick analysis of {selected_ticker}.")
-                    else:
-                        q1, q2, q3, q4 = st.columns(4)
-                        q1.metric("Annualized Return", f"{calculate_annualized_return(returns):.2%}")
-                        q2.metric("Volatility", f"{calculate_volatility(returns):.2%}")
-                        q3.metric("Sharpe", f"{calculate_sharpe_ratio(returns):.3f}")
-                        q4.metric("Max Drawdown", f"{calculate_max_drawdown(returns):.2%}")
-                    st.line_chart(close_prices.rename(selected_ticker))
+    if q2.button(
+        "Quick Chart selected ticker",
+        disabled=(not selected_ticker),
+        key=f"{key_prefix}_quick_chart",
+        use_container_width=True,
+    ) and selected_ticker:
+        history = _fetch_ticker_history_cached(selected_ticker)
+        if history.empty:
+            st.warning(f"Could not load chart data for {selected_ticker}.")
+        else:
+            close_column = "Adj Close" if "Adj Close" in history.columns else "Close"
+            if close_column in history.columns:
+                st.line_chart(history[close_column].rename(selected_ticker))
+            else:
+                st.warning(f"Price column not available for {selected_ticker}.")
 
 
 def _render_stock_picker_tab() -> None:
-    st.subheader("Stock Screener")
-    st.caption(
-        "Daily cached equity universe with staged filtering: broad cached filters first, "
-        "technical enrichment only for the shortlist."
-    )
-    universe_api = stock_universe_module
+    st.subheader("Stock Picker")
+    st.caption("Two-stage screener: cheap full-universe filtering first, expensive indicators only on shortlist.")
 
-    refresh_col, age_col, auto_col, status_col = st.columns([1, 1, 1.1, 2])
+    refresh_col, age_col, auto_col, status_col = st.columns([1, 1, 1.2, 2])
     with age_col:
         max_age_hours = st.number_input(
             "Universe max age (hours)",
@@ -1346,7 +981,7 @@ def _render_stock_picker_tab() -> None:
             "Auto-refresh stale snapshot",
             value=False,
             key="stock_picker_auto_refresh_stale",
-            help="When enabled, stale snapshots are rebuilt automatically before screening.",
+            help="When enabled, stale universe snapshots are rebuilt automatically (can block the app rerun).",
         )
     with refresh_col:
         refresh_clicked = st.button(
@@ -1356,93 +991,24 @@ def _render_stock_picker_tab() -> None:
         )
 
     if refresh_clicked:
-        try:
-            universe_api, _ = _reload_stock_picker_modules()
-        except Exception:
-            universe_api = stock_universe_module
-
-        universe_api.get_universe.clear()
-        universe_api.load_universe_snapshot.clear()
-        universe_api.load_universe_metadata.clear()
-        progress_bar = st.empty().progress(0.0, text="Starting universe refresh...")
-
-        def _on_universe_progress(event: Dict[str, Any]) -> None:
-            progress_value = float(event.get("progress", 0.0) or 0.0)
-            message = str(event.get("message", "Refreshing universe..."))
-            current = event.get("current")
-            total = event.get("total")
-            if current is not None and total is not None and int(total) > 0:
-                message = f"{message} ({int(current)}/{int(total)})"
-            progress_bar.progress(max(0.0, min(1.0, progress_value)), text=message)
-
-        try:
-            universe_df = universe_api.refresh_universe_if_stale(
-                max_age_hours=int(max_age_hours),
-                force_refresh=True,
-                progress_callback=_on_universe_progress,
-            )
-        except TypeError:
-            try:
-                progress_bar.progress(0.05, text="Reloading universe pipeline for compatibility...")
-                universe_api, _ = _reload_stock_picker_modules()
-                refreshed_fn = universe_api.refresh_universe_if_stale
-                signature = inspect.signature(refreshed_fn)
-                if "progress_callback" in signature.parameters:
-                    universe_df = refreshed_fn(
-                        max_age_hours=int(max_age_hours),
-                        force_refresh=True,
-                        progress_callback=_on_universe_progress,
-                    )
-                else:
-                    progress_bar.progress(
-                        0.1,
-                        text="Compatibility mode: refreshing without live progress details...",
-                    )
-                    universe_df = refreshed_fn(
-                        max_age_hours=int(max_age_hours),
-                        force_refresh=True,
-                    )
-            except Exception:
-                progress_bar.progress(
-                    0.1,
-                    text="Compatibility mode: refreshing without live progress details...",
-                )
-                universe_df = universe_api.refresh_universe_if_stale(
-                    max_age_hours=int(max_age_hours),
-                    force_refresh=True,
-                )
-
-        universe_api.load_universe_snapshot.clear()
-        universe_api.load_universe_metadata.clear()
-        st.session_state.pop("stock_picker_results_classic", None)
-        st.session_state.pop("stock_picker_results_ai", None)
-        st.session_state.pop("stock_picker_classic_info", None)
-        st.session_state.pop("stock_picker_ai_explanation", None)
-        st.session_state.pop("stock_picker_ai_parsed", None)
-
-        refresh_metadata = universe_api.load_universe_metadata()
-        refresh_failed = bool(universe_df.empty) or str(refresh_metadata.get("status", "")).lower() == "fallback"
-        if refresh_failed:
-            progress_bar.progress(1.0, text="Universe refresh finished with fallback")
-            fallback_reason = str(refresh_metadata.get("fallback_reason", "")).strip()
-            if fallback_reason:
-                st.error(f"Universe refresh failed: {fallback_reason}")
-        else:
-            progress_bar.progress(1.0, text="Universe refresh completed")
+        get_universe.clear()
+        load_universe_snapshot.clear()
+        load_universe_metadata.clear()
+        with st.spinner("Refreshing universe snapshot... this can take longer."):
+            universe_df = get_universe(max_age_hours=int(max_age_hours), force_refresh=True)
+        load_universe_snapshot.clear()
+        load_universe_metadata.clear()
     else:
-        universe_df = universe_api.load_universe_snapshot()
+        universe_df = load_universe_snapshot()
 
-    metadata = universe_api.load_universe_metadata()
+    metadata = load_universe_metadata()
     snapshot_stale = _is_universe_snapshot_stale(metadata, int(max_age_hours))
     if auto_refresh_stale and snapshot_stale and not refresh_clicked:
         with st.spinner("Snapshot is stale, rebuilding universe..."):
-            universe_df = universe_api.refresh_universe_if_stale(
-                max_age_hours=int(max_age_hours),
-                force_refresh=False,
-            )
-        universe_api.load_universe_snapshot.clear()
-        universe_api.load_universe_metadata.clear()
-        metadata = universe_api.load_universe_metadata()
+            universe_df = get_universe(max_age_hours=int(max_age_hours), force_refresh=False)
+        load_universe_snapshot.clear()
+        load_universe_metadata.clear()
+        metadata = load_universe_metadata()
         snapshot_stale = _is_universe_snapshot_stale(metadata, int(max_age_hours))
 
     with status_col:
@@ -1454,134 +1020,96 @@ def _render_stock_picker_tab() -> None:
         if last_refresh:
             st.caption(f"Last refresh (UTC): {last_refresh}")
         if snapshot_stale:
-            st.caption("Working from a stale snapshot is allowed, but results may lag current listings.")
+            st.caption("Snapshot is stale. You can continue with cached data or run manual refresh.")
 
     if universe_df.empty:
         st.warning("Universe snapshot is empty. Use 'Refresh Universe' to build it.")
         return
 
-    screenable_universe_df = _build_screenable_universe(universe_df)
-    _render_universe_overview(universe_df, screenable_universe_df, metadata, snapshot_stale)
-    screener_tabs = st.tabs(["Classic Screen", "AI Query"])
+    mode = st.radio(
+        "Screener mode",
+        options=["Classic Filter Mode", "AI Natural Language Mode"],
+        horizontal=True,
+        key="stock_picker_mode",
+    )
 
-    with screener_tabs[0]:
-        filter_col, result_col = st.columns([1.15, 1.85])
+    if mode == "Classic Filter Mode":
+        filter_col, result_col = st.columns([1.2, 2.2])
         with filter_col:
-            st.markdown("### Filter Builder")
-            st.caption("Build the broad cached filter first, then rank and enrich only the shortlist.")
+            mcap_min, mcap_max = _numeric_bounds(universe_df["MarketCap"] / 1e9, default_min=0.0, default_max=5000.0)
+            beta_min, beta_max = _numeric_bounds(universe_df["Beta"], default_min=-1.0, default_max=5.0)
+            price_min, price_max = _numeric_bounds(universe_df["Price"], default_min=0.5, default_max=2000.0)
+            avg_volume_min, _ = _numeric_bounds(universe_df["AvgVolume"], default_min=0.0, default_max=10_000_000.0)
 
-            market_cap_series = pd.to_numeric(screenable_universe_df["MarketCap"], errors="coerce") / 1e9
-            beta_series = pd.to_numeric(screenable_universe_df["Beta"], errors="coerce")
-            price_series = pd.to_numeric(screenable_universe_df["Price"], errors="coerce")
-
-            mcap_min, mcap_max = _numeric_bounds(market_cap_series, default_min=0.0, default_max=5000.0)
-            beta_min, beta_max = _numeric_bounds(beta_series, default_min=-1.0, default_max=5.0)
-            price_min, price_max = _numeric_bounds(price_series, default_min=0.5, default_max=2000.0)
-
-            sectors = _extract_filter_options(screenable_universe_df["Sector"])
-            industries = _extract_filter_options(screenable_universe_df["Industry"])
-            exchanges = _extract_filter_options(screenable_universe_df["Exchange"])
+            sectors = sorted([value for value in universe_df["Sector"].dropna().astype(str).unique() if value.strip()])
+            industries = sorted([value for value in universe_df["Industry"].dropna().astype(str).unique() if value.strip()])
+            exchanges = sorted([value for value in universe_df["Exchange"].dropna().astype(str).unique() if value.strip()])
 
             with st.form("classic_screener_form", clear_on_submit=False):
-                builder_tabs = st.tabs(["Universe", "Fundamentals", "Ranking"])
-
-                with builder_tabs[0]:
-                    full_market_cap_range_b = _rounded_slider_range(
-                        minimum=mcap_min,
-                        maximum=max(mcap_max, max(1.0, mcap_min + 1.0)),
-                        precision=2,
-                        floor_at_zero=True,
-                    )
-                    market_cap_range_b = st.slider(
-                        "Market Cap range ($B)",
-                        min_value=full_market_cap_range_b[0],
-                        max_value=full_market_cap_range_b[1],
-                        value=full_market_cap_range_b,
-                        step=0.25,
-                    )
-                    full_beta_range = _rounded_slider_range(
-                        minimum=beta_min,
-                        maximum=beta_max,
-                        precision=2,
-                    )
-                    beta_range = st.slider(
-                        "Beta range",
-                        min_value=full_beta_range[0],
-                        max_value=full_beta_range[1],
-                        value=full_beta_range,
-                        step=0.05,
-                    )
-                    full_price_range = _rounded_slider_range(
-                        minimum=price_min,
-                        maximum=max(price_max, max(1.0, price_min + 1.0)),
-                        precision=2,
-                        floor_at_zero=True,
-                    )
-                    price_range = st.slider(
-                        "Price range ($)",
-                        min_value=full_price_range[0],
-                        max_value=full_price_range[1],
-                        value=full_price_range,
-                        step=0.25,
-                    )
-                    min_avg_volume = st.number_input(
-                        "Minimum average volume",
-                        min_value=0.0,
-                        value=0.0,
-                        step=50_000.0,
-                    )
-                    selected_exchanges = st.multiselect("Exchanges", exchanges)
-                    selected_sectors = st.multiselect("Sectors", sectors)
-                    selected_industries = st.multiselect("Industries", industries)
-                    liquidity_prefilter = st.checkbox("Enable liquidity prefilter", value=False)
-
-                with builder_tabs[1]:
-                    f1, f2 = st.columns(2)
-                    with f1:
-                        use_valuation = st.checkbox("Apply valuation filters", value=False)
-                        pe_max = st.number_input("Max P/E", min_value=0.0, value=35.0, step=1.0)
-                        forward_pe_max = st.number_input("Max Forward P/E", min_value=0.0, value=35.0, step=1.0)
-                        peg_max = st.number_input("Max PEG", min_value=0.0, value=3.0, step=0.1)
-
-                        use_growth = st.checkbox("Apply growth filters", value=False)
-                        revenue_growth_min = st.number_input("Min Revenue Growth", value=0.05, step=0.01, format="%.3f")
-                        earnings_growth_min = st.number_input("Min Earnings Growth", value=0.05, step=0.01, format="%.3f")
-
-                    with f2:
-                        use_quality = st.checkbox("Apply quality filters", value=False)
-                        roe_min = st.number_input("Min ROE", value=0.05, step=0.01, format="%.3f")
-                        roa_min = st.number_input("Min ROA", value=0.02, step=0.01, format="%.3f")
-
-                        use_momentum = st.checkbox("Apply momentum filters", value=False)
-                        return_52w_min = st.number_input("Min 52w Return", value=0.0, step=0.02, format="%.3f")
-                        use_dividend = st.checkbox("Apply dividend filters", value=False)
-                        dividend_yield_min = st.number_input("Min Dividend Yield", value=0.0, step=0.005, format="%.4f")
-
-                with builder_tabs[2]:
-                    r1, r2 = st.columns(2)
-                    with r1:
-                        value_weight = st.slider("Value weight", 0.0, 3.0, 1.0, 0.1)
-                        growth_weight = st.slider("Growth weight", 0.0, 3.0, 1.0, 0.1)
-                        quality_weight = st.slider("Quality weight", 0.0, 3.0, 1.0, 0.1)
-                    with r2:
-                        momentum_weight = st.slider("Momentum weight", 0.0, 3.0, 1.0, 0.1)
-                        stability_weight = st.slider("Stability weight", 0.0, 3.0, 1.0, 0.1)
-                        dividend_weight = st.slider("Dividend weight", 0.0, 3.0, 0.5, 0.1)
-                    technical_limit = st.slider("Technical indicator shortlist size", 25, 400, 150, 25)
-                    st.caption("Technical indicators are computed only for the top-ranked shortlist.")
-
-                run_classic = st.form_submit_button(
-                    "Run Classic Screen",
-                    type="primary",
-                    use_container_width=True,
+                st.markdown("### Universe Filters")
+                market_cap_range_b = st.slider(
+                    "Market Cap range ($B)",
+                    min_value=float(max(0.0, mcap_min)),
+                    max_value=float(max(mcap_max, max(1.0, mcap_min + 1.0))),
+                    value=(float(max(0.0, mcap_min)), float(max(mcap_max, max(1.0, mcap_min + 1.0)))),
                 )
+                beta_range = st.slider(
+                    "Beta range",
+                    min_value=float(beta_min),
+                    max_value=float(beta_max),
+                    value=(float(beta_min), float(beta_max)),
+                )
+                price_range = st.slider(
+                    "Price range ($)",
+                    min_value=float(max(0.0, price_min)),
+                    max_value=float(max(price_max, max(1.0, price_min + 1.0))),
+                    value=(float(max(0.0, price_min)), float(max(price_max, max(1.0, price_min + 1.0)))),
+                )
+                min_avg_volume = st.number_input(
+                    "Minimum average volume",
+                    min_value=0.0,
+                    value=float(max(0.0, avg_volume_min)),
+                    step=50_000.0,
+                )
+                selected_sectors = st.multiselect("Sectors", sectors)
+                selected_industries = st.multiselect("Industries", industries)
+                selected_exchanges = st.multiselect("Exchanges", exchanges)
+                liquidity_prefilter = st.checkbox("Enable liquidity prefilter", value=True)
+
+                with st.expander("Valuation Filters", expanded=False):
+                    use_valuation = st.checkbox("Apply valuation filters", value=False)
+                    pe_max = st.number_input("Max P/E", min_value=0.0, value=35.0, step=1.0)
+                    forward_pe_max = st.number_input("Max Forward P/E", min_value=0.0, value=35.0, step=1.0)
+                    peg_max = st.number_input("Max PEG", min_value=0.0, value=3.0, step=0.1)
+
+                with st.expander("Growth Filters", expanded=False):
+                    use_growth = st.checkbox("Apply growth filters", value=False)
+                    revenue_growth_min = st.number_input("Min Revenue Growth", value=0.05, step=0.01, format="%.3f")
+                    earnings_growth_min = st.number_input("Min Earnings Growth", value=0.05, step=0.01, format="%.3f")
+
+                with st.expander("Quality Filters", expanded=False):
+                    use_quality = st.checkbox("Apply quality filters", value=False)
+                    roe_min = st.number_input("Min ROE", value=0.05, step=0.01, format="%.3f")
+                    roa_min = st.number_input("Min ROA", value=0.02, step=0.01, format="%.3f")
+
+                with st.expander("Momentum & Dividend Filters", expanded=False):
+                    use_momentum = st.checkbox("Apply momentum filters", value=False)
+                    return_52w_min = st.number_input("Min 52w Return", value=0.0, step=0.02, format="%.3f")
+                    use_dividend = st.checkbox("Apply dividend filters", value=False)
+                    dividend_yield_min = st.number_input("Min Dividend Yield", value=0.0, step=0.005, format="%.4f")
+
+                with st.expander("Ranking Weights", expanded=False):
+                    value_weight = st.slider("Value weight", 0.0, 3.0, 1.0, 0.1)
+                    growth_weight = st.slider("Growth weight", 0.0, 3.0, 1.0, 0.1)
+                    quality_weight = st.slider("Quality weight", 0.0, 3.0, 1.0, 0.1)
+                    momentum_weight = st.slider("Momentum weight", 0.0, 3.0, 1.0, 0.1)
+                    stability_weight = st.slider("Stability weight", 0.0, 3.0, 1.0, 0.1)
+                    dividend_weight = st.slider("Dividend weight", 0.0, 3.0, 0.5, 0.1)
+
+                technical_limit = st.slider("Technical indicator shortlist size", 25, 400, 150, 25)
+                run_classic = st.form_submit_button("Run Classic Screen", type="primary", use_container_width=True)
 
             if run_classic:
-                try:
-                    screener_api = importlib.reload(stock_screener_module)
-                except Exception:
-                    screener_api = stock_screener_module
-
                 valuation_filters = {}
                 if use_valuation:
                     valuation_filters = {
@@ -1612,68 +1140,22 @@ def _render_stock_picker_tab() -> None:
                 if use_dividend:
                     dividend_filters = {"DividendYield": (float(dividend_yield_min), None)}
 
-                active_market_cap_range = (
-                    None
-                    if _is_default_range(
-                        (float(market_cap_range_b[0]), float(market_cap_range_b[1])),
-                        full_market_cap_range_b,
-                    )
-                    else (float(market_cap_range_b[0]) * 1e9, float(market_cap_range_b[1]) * 1e9)
+                filtered = apply_classic_filters(
+                    df=universe_df,
+                    market_cap_range=(market_cap_range_b[0] * 1e9, market_cap_range_b[1] * 1e9),
+                    sectors=selected_sectors,
+                    industries=selected_industries,
+                    exchanges=selected_exchanges,
+                    beta_range=beta_range,
+                    price_range=price_range,
+                    min_avg_volume=float(min_avg_volume),
+                    valuation_filters=valuation_filters,
+                    growth_filters=growth_filters,
+                    quality_filters=quality_filters,
+                    momentum_filters=momentum_filters,
+                    dividend_filters=dividend_filters,
+                    liquidity_prefilter=bool(liquidity_prefilter),
                 )
-                active_beta_range = (
-                    None
-                    if _is_default_range((float(beta_range[0]), float(beta_range[1])), full_beta_range)
-                    else (float(beta_range[0]), float(beta_range[1]))
-                )
-                active_price_range = (
-                    None
-                    if _is_default_range((float(price_range[0]), float(price_range[1])), full_price_range)
-                    else (float(price_range[0]), float(price_range[1]))
-                )
-                active_min_avg_volume = float(min_avg_volume) if float(min_avg_volume) > 0 else None
-
-                try:
-                    filtered = screener_api.apply_classic_filters(
-                        df=screenable_universe_df,
-                        market_cap_range=active_market_cap_range,
-                        sectors=selected_sectors,
-                        industries=selected_industries,
-                        exchanges=selected_exchanges,
-                        beta_range=active_beta_range,
-                        price_range=active_price_range,
-                        min_avg_volume=active_min_avg_volume,
-                        valuation_filters=valuation_filters,
-                        growth_filters=growth_filters,
-                        quality_filters=quality_filters,
-                        momentum_filters=momentum_filters,
-                        dividend_filters=dividend_filters,
-                        liquidity_prefilter=bool(liquidity_prefilter),
-                    )
-                except Exception as exc:
-                    message = str(exc)
-                    if (
-                        ".str accessor" not in message
-                        and "_chunked" not in message
-                        and not isinstance(exc, NameError)
-                    ):
-                        raise
-                    screener_api = importlib.reload(stock_screener_module)
-                    filtered = screener_api.apply_classic_filters(
-                        df=screenable_universe_df,
-                        market_cap_range=active_market_cap_range,
-                        sectors=selected_sectors,
-                        industries=selected_industries,
-                        exchanges=selected_exchanges,
-                        beta_range=active_beta_range,
-                        price_range=active_price_range,
-                        min_avg_volume=active_min_avg_volume,
-                        valuation_filters=valuation_filters,
-                        growth_filters=growth_filters,
-                        quality_filters=quality_filters,
-                        momentum_filters=momentum_filters,
-                        dividend_filters=dividend_filters,
-                        liquidity_prefilter=bool(liquidity_prefilter),
-                    )
 
                 weighted = {
                     "value": value_weight,
@@ -1684,126 +1166,59 @@ def _render_stock_picker_tab() -> None:
                     "dividend": dividend_weight,
                 }
 
-                ranked = screener_api.rank_stocks(
-                    screener_api.calculate_quant_score(filtered, weighted),
-                    sort_by="QuantScore",
-                    ascending=False,
-                )
+                ranked = rank_stocks(calculate_quant_score(filtered, weighted), sort_by="QuantScore", ascending=False)
                 shortlist_size = min(int(technical_limit), len(ranked))
                 if shortlist_size > 0:
                     with st.spinner("Calculating technical indicators for shortlist..."):
-                        try:
-                            technical = screener_api.apply_technical_indicators(ranked.head(shortlist_size))
-                        except Exception as exc:
-                            message = str(exc)
-                            if (
-                                ".str accessor" not in message
-                                and "_chunked" not in message
-                                and not isinstance(exc, NameError)
-                            ):
-                                raise
-                            screener_api = importlib.reload(stock_screener_module)
-                            technical = screener_api.apply_technical_indicators(ranked.head(shortlist_size))
-                    technical_cols = [
-                        column
-                        for column in ["Ticker", "RSI", "MACD", "Volatility", "Drawdown"]
-                        if column in technical.columns
-                    ]
+                        technical = apply_technical_indicators(ranked.head(shortlist_size))
+                    technical_cols = [column for column in ["Ticker", "RSI", "MACD", "Volatility", "Drawdown"] if column in technical.columns]
                     ranked = ranked.merge(technical[technical_cols], on="Ticker", how="left")
-                    ranked = screener_api.rank_stocks(
-                        screener_api.calculate_quant_score(ranked, weighted),
-                        sort_by="QuantScore",
-                        ascending=False,
-                    )
+                    ranked = rank_stocks(calculate_quant_score(ranked, weighted), sort_by="QuantScore", ascending=False)
 
                 st.session_state["stock_picker_results_classic"] = ranked
                 st.session_state["stock_picker_classic_info"] = (
                     f"Stage 1: {len(filtered):,} matches | "
                     f"Stage 2: indicators on top {shortlist_size:,} symbols"
                 )
-                if filtered.empty:
-                    st.warning(
-                        "No matches with current active filters. Tip: keep the broad universe ranges open "
-                        "and tighten only the factors that truly matter for this pass."
-                    )
 
         with result_col:
-            st.markdown("### Shortlist")
+            st.markdown("### Classic Results")
             if st.session_state.get("stock_picker_classic_info"):
                 st.caption(st.session_state["stock_picker_classic_info"])
             classic_results = st.session_state.get("stock_picker_results_classic", pd.DataFrame())
-            if not classic_results.empty:
-                qscore_series = pd.to_numeric(
-                    classic_results["QuantScore"] if "QuantScore" in classic_results.columns else pd.Series(dtype=float),
-                    errors="coerce",
-                )
-                volume_series = pd.to_numeric(
-                    classic_results["AvgVolume"] if "AvgVolume" in classic_results.columns else pd.Series(dtype=float),
-                    errors="coerce",
-                )
-                priced_ratio = _coverage_ratio(classic_results["Price"]) if "Price" in classic_results.columns else 0.0
-                r1, r2, r3, r4 = st.columns(4)
-                r1.metric("Matches", f"{len(classic_results):,}")
-                r2.metric("Median Quant Score", f"{qscore_series.median():.1f}" if qscore_series.notna().any() else "-")
-                r3.metric("Median Avg Volume", _format_compact_number(volume_series.median()) if volume_series.notna().any() else "-")
-                r4.metric("Price Coverage", f"{priced_ratio:.1%}")
-
             selected_rows = _render_selectable_results(classic_results, "classic")
             if not classic_results.empty:
                 _render_screener_bulk_actions(selected_rows, classic_results, "classic")
 
-    with screener_tabs[1]:
-        ai_col, result_col = st.columns([1.05, 1.95])
-        with ai_col:
-            st.markdown("### Natural Language Query")
-            query = st.text_area(
-                "Describe your stock screen in plain English",
-                height=180,
-                placeholder=(
-                    "Example: Find profitable large-cap semiconductor stocks with low debt, "
-                    "strong ROE, and positive momentum."
-                ),
-                key="stock_picker_ai_query",
-            )
-            analyze_clicked = st.button(
-                "Analyze with Groq",
-                type="primary",
-                key="stock_picker_ai_run",
-                use_container_width=True,
-            )
-            if analyze_clicked:
-                with st.spinner("Parsing request and applying AI filters..."):
-                    parsed = parse_ai_query(query)
-                    results, explanation = apply_ai_query(query, screenable_universe_df, parsed_query=parsed)
-                    st.session_state["stock_picker_ai_parsed"] = parsed
-                    st.session_state["stock_picker_ai_explanation"] = explanation
-                    st.session_state["stock_picker_results_ai"] = results
+    else:
+        query = st.text_area(
+            "Describe your stock screen in plain English",
+            height=160,
+            placeholder="Example: Find profitable large-cap semiconductor stocks with low debt, strong ROE, and positive momentum.",
+            key="stock_picker_ai_query",
+        )
+        analyze_clicked = st.button("Analyze with Groq", type="primary", key="stock_picker_ai_run", use_container_width=True)
+        if analyze_clicked:
+            with st.spinner("Parsing request and applying AI filters..."):
+                parsed = parse_ai_query(query)
+                results, explanation = apply_ai_query(query, universe_df, parsed_query=parsed)
+                st.session_state["stock_picker_ai_parsed"] = parsed
+                st.session_state["stock_picker_ai_explanation"] = explanation
+                st.session_state["stock_picker_results_ai"] = results
 
-            explanation_text = st.session_state.get("stock_picker_ai_explanation")
-            if explanation_text:
-                st.info(explanation_text)
+        parsed_payload = st.session_state.get("stock_picker_ai_parsed")
+        if parsed_payload:
+            with st.expander("Parsed Filters (JSON)", expanded=True):
+                st.json(parsed_payload)
+        explanation_text = st.session_state.get("stock_picker_ai_explanation")
+        if explanation_text:
+            st.info(explanation_text)
 
-        with result_col:
-            parsed_payload = st.session_state.get("stock_picker_ai_parsed")
-            if parsed_payload:
-                with st.expander("Parsed Filters (JSON)", expanded=False):
-                    st.json(parsed_payload)
-
-            ai_results = st.session_state.get("stock_picker_results_ai", pd.DataFrame())
-            st.markdown("### AI Results")
-            if not ai_results.empty:
-                a1, a2, a3 = st.columns(3)
-                a1.metric("Matches", f"{len(ai_results):,}")
-                a2.metric("Priced", f"{_coverage_ratio(ai_results['Price']) if 'Price' in ai_results.columns else 0.0:.1%}")
-                a3.metric(
-                    "Median Market Cap",
-                    _format_compact_number(pd.to_numeric(ai_results.get("MarketCap"), errors="coerce").median())
-                    if "MarketCap" in ai_results.columns
-                    else "-",
-                )
-            selected_rows = _render_selectable_results(ai_results, "ai")
-            if not ai_results.empty:
-                _render_screener_bulk_actions(selected_rows, ai_results, "ai")
+        ai_results = st.session_state.get("stock_picker_results_ai", pd.DataFrame())
+        st.markdown("### AI Results")
+        selected_rows = _render_selectable_results(ai_results, "ai")
+        if not ai_results.empty:
+            _render_screener_bulk_actions(selected_rows, ai_results, "ai")
 
 
 def _render_portfolio_tracker_tab() -> None:
@@ -2599,949 +2014,6 @@ def _render_swing_tracker_tab() -> None:
                 st.dataframe(overdue_table, use_container_width=True, hide_index=True)
 
 
-def _render_dashboard_note(title: str, body: str) -> None:
-    st.markdown(
-        (
-            "<div class='dashboard-note'>"
-            f"<strong>{escape(title)}</strong>"
-            f"<span>{escape(body)}</span>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-def _render_empty_dashboard_state(preferences: DashboardPreferences) -> None:
-    st.markdown(
-        """
-        <div class="dashboard-hero">
-            <div class="dashboard-kicker">Modular dashboard</div>
-            <h2>Run portfolio analysis only when you need it.</h2>
-            <p>
-                Keep the workspace available for screening, portfolio tracking,
-                and swing-trade workflows even before the first analysis run.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    _render_dashboard_note(
-        "How the new layout works",
-        "Portfolio inputs stay in the sidebar, while the page itself is split into dedicated"
-        " workspaces for overview, analytics, portfolio lab, tools, and reporting.",
-    )
-    if preferences.show_workspace_when_empty:
-        _render_workspace_hub(None)
-    else:
-        st.info("Turn on 'Keep workspace visible before first run' in the sidebar to open the tool hub here.")
-
-
-def _render_dashboard_hero(analysis_result: Dict[str, Any], preferences: DashboardPreferences) -> None:
-    summary_result = analysis_result.get("summary_result")
-    tickers = [str(item) for item in analysis_result.get("tickers", [])]
-    ticker_preview = ", ".join(tickers[:6])
-    if len(tickers) > 6:
-        ticker_preview = f"{ticker_preview} +{len(tickers) - 6}"
-
-    regime_label = str(getattr(summary_result, "regime_label", "analysis ready"))
-    confidence = float(getattr(summary_result, "confidence", 0.0))
-    composite_score = float(getattr(summary_result, "composite_score", 0.0))
-    run_record = analysis_result.get("run_record")
-    run_id = getattr(run_record, "run_id", "-")
-
-    hero_title = f"{analysis_result.get('risk_profile', 'balanced').title()} portfolio cockpit"
-    hero_body = (
-        f"Tracking {len(tickers)} assets across {int(analysis_result.get('horizon_days', 252))} days. "
-        f"Use the {preferences.preset} preset or hide sections from the sidebar when you want a lighter view."
-    )
-
-    st.markdown(
-        (
-            "<div class='dashboard-hero'>"
-            "<div class='dashboard-kicker'>Quant Platform</div>"
-            f"<h2>{escape(hero_title)}</h2>"
-            f"<p>{escape(hero_body)}</p>"
-            "<div class='dashboard-badge-row'>"
-            f"<span class='dashboard-badge'>Run: {escape(str(run_id))}</span>"
-            f"<span class='dashboard-badge'>Regime: {escape(regime_label)}</span>"
-            f"<span class='dashboard-badge'>Confidence: {confidence:.2f}</span>"
-            f"<span class='dashboard-badge'>Composite: {composite_score:.2f}</span>"
-            f"<span class='dashboard-badge'>Assets: {len(tickers)}</span>"
-            "</div>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
-    meta_col, universe_col = st.columns([1.05, 1.35])
-    with meta_col:
-        st.caption("Current run")
-        st.write(f"**Date range:** {analysis_result['start_date']} to {analysis_result['end_date']}")
-        st.write(f"**Risk-free rate:** {analysis_result['risk_free_rate']:.3f}")
-        st.write(f"**Visible sections:** {', '.join(PAGE_LABELS[key] for key in preferences.visible_pages)}")
-    with universe_col:
-        st.caption("Tracked universe")
-        st.write(ticker_preview or "No tickers loaded.")
-
-    _render_export_actions(
-        analysis_result,
-        title="Quick Exports",
-        body=(
-            "Core report downloads stay pinned here, so PDF, CSV, and JSON are always available"
-            " without digging through the dashboard."
-        ),
-        compact=True,
-        key_namespace="hero_exports",
-    )
-
-
-def _render_workspace_hub(analysis_result: Dict[str, Any] | None) -> None:
-    st.subheader("Workspace Hub")
-    st.caption(
-        "Operational tools live here so screening, portfolio maintenance, and trade journaling"
-        " stay available without cluttering the analysis pages."
-    )
-    workspace_tabs = st.tabs(["Stock Picker", "Portfolio Tracker", "Swing Tracker", "Economics Coach"])
-    with workspace_tabs[0]:
-        _render_stock_picker_tab()
-    with workspace_tabs[1]:
-        _render_portfolio_tracker_tab()
-    with workspace_tabs[2]:
-        _render_swing_tracker_tab()
-    with workspace_tabs[3]:
-        if analysis_result is None:
-            st.info("Run one portfolio analysis first to generate context-aware economics questions.")
-        else:
-            render_economics_questions_section(analysis_result)
-
-
-def _render_overview_page(analysis_result: Dict[str, Any]) -> None:
-    metrics = analysis_result["metrics"]
-    score_result = analysis_result["score_result"]
-    summary_result = analysis_result.get("summary_result")
-
-    st.subheader("Executive Overview")
-    _render_dashboard_note(
-        "One place for the main answer",
-        "This overview keeps the score, regime, risk flags, and positioning together so you"
-        " can decide quickly whether to inspect deeper analytical layers.",
-    )
-
-    row1 = st.columns(4)
-    row1[0].metric("Deterministic Score", f"{score_result['score']} / 100")
-    row1[1].metric("Rating", str(score_result["rating"]))
-    row1[2].metric("Annualized Return", f"{metrics['annualized_return']:.2%}")
-    row1[3].metric("Volatility", f"{metrics['volatility']:.2%}")
-
-    row2 = st.columns(4)
-    row2[0].metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.3f}")
-    row2[1].metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
-    row2[2].metric("Average Correlation", f"{metrics['avg_correlation']:.3f}")
-    row2[3].metric("Effective Holdings", f"{metrics['effective_holdings']:.2f}")
-
-    left_col, right_col = st.columns([1.25, 1.0])
-    with left_col:
-        st.markdown("### Regime and signals")
-        if summary_result:
-            st.write(f"**Regime:** {getattr(summary_result, 'regime_label', 'neutral')}")
-            st.write(f"**Confidence:** {float(getattr(summary_result, 'confidence', 0.0)):.3f}")
-            st.write(
-                f"**Expected return view:** "
-                f"{float(getattr(summary_result, 'expected_return_view', 0.0)):.2%}"
-            )
-            st.write(
-                f"**Expected risk view:** "
-                f"{float(getattr(summary_result, 'expected_risk_view', 0.0)):.2%}"
-            )
-            regime_interpretation = str(getattr(summary_result, "regime_interpretation", "")).strip()
-            if regime_interpretation:
-                st.caption(regime_interpretation)
-            for line in getattr(summary_result, "highlights", []):
-                st.write(f"- {line}")
-            strongest = getattr(summary_result, "strongest_signals", [])
-            if strongest:
-                st.caption("Strongest signals")
-                st.dataframe(pd.DataFrame(strongest), use_container_width=True, hide_index=True)
-        else:
-            st.info("Summary layer is not available for this run.")
-
-    with right_col:
-        st.markdown("### Risk flags")
-        rendered_alerts: set[str] = set()
-        if score_result["flags"]:
-            for flag in score_result["flags"]:
-                normalized_flag = str(flag).strip()
-                if normalized_flag and normalized_flag not in rendered_alerts:
-                    st.warning(normalized_flag)
-                    rendered_alerts.add(normalized_flag)
-        else:
-            st.success("No critical deterministic flags detected.")
-
-        if summary_result:
-            for warning in getattr(summary_result, "warnings", []):
-                normalized_warning = str(warning).strip()
-                if normalized_warning and normalized_warning not in rendered_alerts:
-                    st.warning(normalized_warning)
-                    rendered_alerts.add(normalized_warning)
-            for flag in getattr(summary_result, "risk_flags", []):
-                normalized_risk_flag = str(flag).strip()
-                if normalized_risk_flag and normalized_risk_flag not in rendered_alerts:
-                    st.warning(normalized_risk_flag)
-                    rendered_alerts.add(normalized_risk_flag)
-            recent_changes = getattr(summary_result, "recent_changes", [])
-            if recent_changes:
-                st.caption("Recent changes vs prior run")
-                for change in recent_changes:
-                    st.write(f"- {change}")
-
-    allocation_col, compare_col = st.columns([1.0, 1.25])
-    with allocation_col:
-        st.markdown("### Current allocation")
-        weights_df = pd.DataFrame(
-            {
-                "Ticker": analysis_result["tickers"],
-                "Weight": [f"{float(weight):.2%}" for weight in analysis_result["weights"]],
-            }
-        )
-        st.dataframe(weights_df, use_container_width=True, hide_index=True)
-
-        if score_result["breakdown"]:
-            with st.expander("Score breakdown", expanded=False):
-                score_breakdown_df = pd.DataFrame(score_result["breakdown"]).rename(
-                    columns={"rule": "Rule", "penalty": "Penalty", "detail": "Detail"}
-                )
-                st.dataframe(score_breakdown_df, use_container_width=True, hide_index=True)
-
-    with compare_col:
-        st.markdown("### Portfolio vs optimized alternatives")
-        highlighted_rows = []
-        for item in analysis_result.get("highlighted_portfolios", []):
-            highlighted_rows.append(
-                {
-                    "Portfolio": item.get("name", ""),
-                    "Expected Return": float(item.get("expected_return", 0.0)),
-                    "Volatility": float(item.get("volatility", 0.0)),
-                    "Sharpe": float(item.get("sharpe_ratio", 0.0)),
-                    "Effective Holdings": float(item.get("effective_holdings", 0.0)),
-                    "Max Weight": float(item.get("max_weight", 0.0)),
-                }
-            )
-        if highlighted_rows:
-            st.dataframe(pd.DataFrame(highlighted_rows), use_container_width=True, hide_index=True)
-        top_news = getattr(summary_result, "top_relevant_news", []) if summary_result else []
-        if top_news:
-            st.caption("Top relevant news")
-            st.dataframe(pd.DataFrame(top_news), use_container_width=True, hide_index=True)
-
-
-def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
-    st.subheader("Decision Cockpit")
-    _render_dashboard_note(
-        "Stress the book before the market does",
-        "This playground replays your current portfolio through deterministic extreme scenarios"
-        " so you can see which shock hurts most, how deep the path gets, and what action deserves attention first.",
-    )
-
-    summary_result = analysis_result.get("summary_result")
-    preset_metadata = {item["name"]: item for item in list_scenario_presets()}
-    control_col0, control_col1, control_col2, control_col3 = st.columns([1.15, 1.0, 1.0, 1.2])
-    with control_col0:
-        library_focus = st.selectbox(
-            "Scenario library",
-            options=["Historical Crises", "Synthetic Stress", "All Scenarios"],
-            index=0,
-            key="cockpit_library_focus",
-        )
-    with control_col1:
-        severity = st.slider(
-            "Stress severity",
-            min_value=0.60,
-            max_value=2.00,
-            value=1.00,
-            step=0.05,
-            key="cockpit_stress_severity",
-        )
-    with control_col2:
-        horizon_days = st.select_slider(
-            "Scenario horizon",
-            options=[10, 20, 30, 45, 60, 90],
-            value=30,
-            key="cockpit_horizon_days",
-        )
-    with control_col3:
-        initial_value = st.number_input(
-            "Capital base",
-            min_value=10_000.0,
-            value=100_000.0,
-            step=10_000.0,
-            key="cockpit_initial_value",
-        )
-    st.caption(
-        "Historical crises are analog replays: the app keeps your current holdings and recent return structure,"
-        " then layers crisis-shaped phase shocks on top."
-    )
-
-    scenario_suite = build_scenario_suite(
-        returns_df=analysis_result["returns"],
-        tickers=analysis_result["tickers"],
-        weights=analysis_result["weights"],
-        severity=float(severity),
-        initial_value=float(initial_value),
-        horizon_override=int(horizon_days),
-    )
-    summary_rows = scenario_suite["rows"].reset_index(drop=True)
-    if library_focus == "Historical Crises":
-        summary_rows = summary_rows[summary_rows["Category"] == "Historical Crisis"].reset_index(drop=True)
-    elif library_focus == "Synthetic Stress":
-        summary_rows = summary_rows[summary_rows["Category"] == "Synthetic Stress"].reset_index(drop=True)
-    if summary_rows.empty:
-        st.info("Scenario engine is unavailable for this run.")
-        return
-
-    scenario_options = summary_rows["Scenario"].tolist()
-    current_selection = st.session_state.get("cockpit_selected_scenario")
-    if current_selection not in scenario_options:
-        st.session_state["cockpit_selected_scenario"] = scenario_options[0]
-
-    selector_col, cue_col = st.columns([1.45, 1.0])
-    with selector_col:
-        selected_name = st.selectbox(
-            "Replay a scenario",
-            options=scenario_options,
-            index=scenario_options.index(st.session_state["cockpit_selected_scenario"]),
-            key="cockpit_selected_scenario",
-        )
-        selected_meta = preset_metadata.get(selected_name, {})
-        st.caption(
-            f"{selected_meta.get('category', '')} | {selected_meta.get('era', '')} | "
-            f"default horizon {int(selected_meta.get('horizon_days', horizon_days))} days"
-        )
-    with cue_col:
-        st.caption("Playback modes")
-        st.write("- Animated crisis replay with play / pause controls")
-        st.write("- Phase-by-phase shock heatmap")
-        st.write("- Fingerprint view for stress profile comparison")
-
-    worst_row = summary_rows.iloc[0]
-    selected_scenario = scenario_suite["scenarios"][selected_name]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Most Fragile Scenario", str(worst_row["Scenario"]))
-    m2.metric("Worst Stress Return", f"{float(worst_row['Total Return']):.2%}")
-    m3.metric("Worst Stress Drawdown", f"{float(worst_row['Max Drawdown']):.2%}")
-    m4.metric("Stress Gap vs Baseline", f"{float(worst_row['Stress Gap']):+.2%}")
-
-    expected_risk = (
-        float(getattr(summary_result, "expected_risk_view", analysis_result["metrics"]["volatility"]))
-        if summary_result
-        else float(analysis_result["metrics"]["volatility"])
-    )
-    if float(worst_row["Total Return"]) <= -0.15:
-        cockpit_message = (
-            "Current construction is vulnerable to at least one extreme regime. Priority should be"
-            " hedge sizing, concentration checks, and pre-committing what gets trimmed first."
-        )
-    elif expected_risk > 0.18:
-        cockpit_message = (
-            "Base risk is already elevated, so even moderate scenario stress can matter. Use the worst path"
-            " to decide where rebalancing or protection would help most."
-        )
-    else:
-        cockpit_message = (
-            "Stress losses look contained relative to the current return/risk profile. The useful next step"
-            " is testing whether the same resilience holds after concentration or view changes."
-        )
-    _render_dashboard_note("Decision brief", cockpit_message)
-
-    st.markdown("### Crisis Atlas")
-    st.plotly_chart(
-        plot_scenario_atlas(summary_rows, highlight_scenario=selected_name),
-        use_container_width=True,
-    )
-
-    scenario_table = summary_rows.copy()
-    scenario_table["Final Value"] = scenario_table["Final Value"].map(lambda value: f"${value:,.0f}")
-    scenario_table["Total Return"] = scenario_table["Total Return"].map(lambda value: f"{value:.2%}")
-    scenario_table["Max Drawdown"] = scenario_table["Max Drawdown"].map(lambda value: f"{value:.2%}")
-    scenario_table["Worst Day"] = scenario_table["Worst Day"].map(lambda value: f"{value:.2%}")
-    scenario_table["Stress Gap"] = scenario_table["Stress Gap"].map(lambda value: f"{value:+.2%}")
-    st.markdown("### Extreme Scenario Scoreboard")
-    st.dataframe(
-        scenario_table[
-            [
-                "Scenario",
-                "Category",
-                "Era",
-                "Horizon",
-                "Action Cue",
-                "Final Value",
-                "Total Return",
-                "Max Drawdown",
-                "Worst Day",
-                "Stress Gap",
-                "Days Underwater",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    detail_col, exposure_col = st.columns([1.45, 1.0])
-    with detail_col:
-        st.markdown(f"### Replay Studio: {selected_name}")
-        st.caption(preset_metadata.get(selected_name, {}).get("description", selected_scenario["description"]))
-    with exposure_col:
-        stressed_stats = selected_scenario["stressed_stats"]
-        d1, d2 = st.columns(2)
-        d1.metric("Action Cue", selected_scenario["action_cue"])
-        d2.metric("Underwater Days", int(stressed_stats["days_underwater"]))
-        d3, d4 = st.columns(2)
-        d3.metric("Worst Day", f"{float(stressed_stats['worst_day']):.2%}")
-        d4.metric(
-            "Recovery Day",
-            "-" if stressed_stats["recovery_day"] is None else int(stressed_stats["recovery_day"]),
-        )
-        st.write(f"**Playbook:** {selected_scenario['playbook']}")
-
-    cockpit_tabs = st.tabs(["Playback", "Shock Map", "Fingerprint", "Impact Board"])
-    with cockpit_tabs[0]:
-        st.caption("Press Play to replay the path like a mini crisis filmstrip.")
-        st.plotly_chart(
-            plot_crisis_playback(
-                scenario_name=selected_name,
-                baseline_path=selected_scenario["baseline_path"],
-                stressed_path=selected_scenario["stressed_path"],
-                daily_phase_labels=selected_scenario["daily_phase_labels"],
-            ),
-            use_container_width=True,
-        )
-        st.plotly_chart(
-            plot_phase_timeline(selected_name, selected_scenario["phase_table"]),
-            use_container_width=True,
-        )
-
-    with cockpit_tabs[1]:
-        shock_col, phase_col = st.columns([1.2, 1.0])
-        with shock_col:
-            st.plotly_chart(
-                plot_scenario_shock_map(
-                    selected_scenario["shock_map"],
-                    title=f"{selected_name} Shock Map",
-                ),
-                use_container_width=True,
-            )
-        with phase_col:
-            phase_view = selected_scenario["phase_table"].copy()
-            if not phase_view.empty:
-                phase_view["Vol Multiplier"] = phase_view["Vol Multiplier"].map(lambda value: f"{value:.2f}x")
-            st.dataframe(phase_view, use_container_width=True, hide_index=True)
-            drawdown_frame = pd.DataFrame(
-                {
-                    "Baseline Drawdown": selected_scenario["baseline_drawdown"],
-                    "Scenario Drawdown": selected_scenario["stressed_drawdown"],
-                }
-            )
-            st.line_chart(drawdown_frame)
-
-    with cockpit_tabs[2]:
-        fingerprint_col, role_col = st.columns([1.0, 1.0])
-        with fingerprint_col:
-            st.plotly_chart(
-                plot_scenario_fingerprint(
-                    scenario_name=selected_name,
-                    stressed_stats=selected_scenario["stressed_stats"],
-                    baseline_stats=selected_scenario["baseline_stats"],
-                    horizon_days=int(selected_scenario["horizon_days"]),
-                ),
-                use_container_width=True,
-            )
-        with role_col:
-            st.markdown("#### Role exposure map")
-            st.dataframe(selected_scenario["role_exposures"], use_container_width=True, hide_index=True)
-            path_frame = pd.DataFrame(
-                {
-                    "Baseline": selected_scenario["baseline_path"],
-                    "Scenario": selected_scenario["stressed_path"],
-                }
-            )
-            st.line_chart(path_frame)
-
-    with cockpit_tabs[3]:
-        impact_col, asset_col = st.columns([1.1, 0.9])
-        with impact_col:
-            st.plotly_chart(
-                plot_asset_stress_impact(selected_scenario["asset_impact_proxy"]),
-                use_container_width=True,
-            )
-        with asset_col:
-            impact_view = (
-                selected_scenario["asset_impact_proxy"]
-                .sort_values()
-                .rename_axis("Ticker")
-                .reset_index(name="Stress Gap")
-            )
-            impact_view["Stress Gap"] = impact_view["Stress Gap"].map(lambda value: f"${value:,.0f}")
-            st.dataframe(impact_view, use_container_width=True, hide_index=True)
-
-    with st.expander("Scenario assumptions", expanded=False):
-        assumptions_rows = []
-        for item in list_scenario_presets():
-            assumptions_rows.append(
-                {
-                    "Scenario": item["name"],
-                    "Category": item["category"],
-                    "Era": item["era"],
-                    "Default Horizon": int(item["horizon_days"]),
-                    "Description": item["description"],
-                    "Playbook": item["playbook"],
-                }
-            )
-        st.dataframe(pd.DataFrame(assumptions_rows), use_container_width=True, hide_index=True)
-        st.caption(
-            "These scenarios use a deterministic replay of recent asset returns and then layer"
-            " role-specific shocks on top. They are designed for decision support, not probabilistic forecasting."
-        )
-
-
-def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: bool) -> None:
-    model_results = analysis_result.get("model_results", {})
-    signal_results = analysis_result.get("signal_results", {})
-    backtest_result = analysis_result.get("backtest_result", {})
-    news_result = analysis_result.get("news_result")
-    history_records = analysis_result.get("history_records", [])
-    advanced_models = analysis_result.get("advanced_models", {})
-
-    st.subheader("Analysis Lab")
-    analysis_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "History", "Compare"])
-
-    with analysis_tabs[0]:
-        st.caption(
-            f"Run record: {analysis_result.get('run_record').run_id if analysis_result.get('run_record') else '-'}"
-        )
-        portfolio_timeseries = analysis_result["portfolio_timeseries"]
-        if isinstance(portfolio_timeseries, pd.DataFrame):
-            if "value" in portfolio_timeseries.columns:
-                portfolio_value_series = portfolio_timeseries["value"]
-            else:
-                portfolio_value_series = portfolio_timeseries.iloc[:, 0]
-        else:
-            portfolio_value_series = portfolio_timeseries
-        st.line_chart(portfolio_value_series.rename("Portfolio Value"))
-        if show_raw_tables:
-            data_tab1, data_tab2 = st.tabs(["Prices", "Returns"])
-            with data_tab1:
-                st.dataframe(analysis_result["prices"].tail(20), use_container_width=True)
-            with data_tab2:
-                st.dataframe(analysis_result["returns"].tail(20), use_container_width=True)
-
-    with analysis_tabs[1]:
-        model_rows: List[Dict[str, Any]] = []
-        for model_name, model in model_results.items():
-            metrics_map = getattr(model, "metrics", {})
-            model_rows.append(
-                {
-                    "Model": model_name,
-                    "Family": getattr(model, "family", ""),
-                    "Available": bool(getattr(model, "available", False)),
-                    "Confidence": float(getattr(model, "confidence", 0.0)),
-                    "Primary Metric": float(
-                        metrics_map.get(
-                            "expected_annual_return",
-                            metrics_map.get(
-                                "posterior_annual_return",
-                                metrics_map.get(
-                                    "posterior_expected_annual_return",
-                                    metrics_map.get("volatility_annualized", 0.0),
-                                ),
-                            ),
-                        )
-                    ),
-                    "Band Width": float(
-                        metrics_map.get(
-                            "posterior_interval_width",
-                            metrics_map.get("forecast_spread", 0.0),
-                        )
-                    ),
-                    "Error": getattr(model, "error", ""),
-                }
-            )
-
-        if model_rows:
-            st.markdown("### Quant stack model outputs")
-            st.dataframe(pd.DataFrame(model_rows), use_container_width=True, hide_index=True)
-            confidence_frame = pd.DataFrame(model_rows)[["Model", "Confidence"]].set_index("Model")
-            st.caption("Model confidence")
-            st.bar_chart(confidence_frame)
-
-        advanced_rows: List[Dict[str, Any]] = []
-        for model_name, result in advanced_models.items():
-            if result.get("available", False):
-                metrics_map = result.get("metrics", {})
-                advanced_rows.append(
-                    {
-                        "Model": model_name,
-                        "Status": "ok",
-                        "Signal 1": round(
-                            float(
-                                metrics_map.get(
-                                    "expected_annual_return",
-                                    metrics_map.get(
-                                        "next_period_return_forecast",
-                                        metrics_map.get("conditional_volatility", 0.0),
-                                    ),
-                                )
-                                or 0.0
-                            ),
-                            6,
-                        ),
-                        "Signal 2": round(
-                            float(
-                                metrics_map.get(
-                                    "trend_slope_daily",
-                                    metrics_map.get(
-                                        "forecast_confidence",
-                                        metrics_map.get("volatility_annualized", 0.0),
-                                    ),
-                                )
-                                or 0.0
-                            ),
-                            6,
-                        ),
-                        "Confidence": round(float(metrics_map.get("confidence", 0.0) or 0.0), 4),
-                        "Error": "",
-                    }
-                )
-            else:
-                advanced_rows.append(
-                    {
-                        "Model": model_name,
-                        "Status": "unavailable",
-                        "Signal 1": np.nan,
-                        "Signal 2": np.nan,
-                        "Confidence": np.nan,
-                        "Error": result.get("error", ""),
-                    }
-                )
-
-        if advanced_rows:
-            with st.expander("Legacy advanced model compatibility view", expanded=False):
-                st.caption(
-                    "Same underlying model layer rendered in the older dictionary schema for compatibility checks."
-                )
-                st.dataframe(pd.DataFrame(advanced_rows), use_container_width=True, hide_index=True)
-
-    with analysis_tabs[2]:
-        signal_rows: List[Dict[str, Any]] = []
-        for signal_name, signal in signal_results.items():
-            signal_rows.append(
-                {
-                    "Signal": signal_name,
-                    "Family": getattr(signal, "family", ""),
-                    "Direction": getattr(signal, "direction", "neutral"),
-                    "Score": float(getattr(signal, "score", 0.0)),
-                    "Confidence": float(getattr(signal, "confidence", 0.0)),
-                    "Available": bool(getattr(signal, "available", False)),
-                    "Error": getattr(signal, "error", ""),
-                }
-            )
-        if signal_rows:
-            st.dataframe(pd.DataFrame(signal_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No signal outputs are available for this run.")
-
-    with analysis_tabs[3]:
-        bt_metrics = backtest_result.get("metrics", {})
-        bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
-        bt_col1.metric("Total Return", f"{bt_metrics.get('total_return', 0.0):.2%}")
-        bt_col2.metric("Volatility", f"{bt_metrics.get('volatility', 0.0):.2%}")
-        bt_col3.metric("Sharpe", f"{bt_metrics.get('sharpe', 0.0):.3f}")
-        bt_col4.metric("Max DD", f"{bt_metrics.get('max_drawdown', 0.0):.2%}")
-
-        equity_curve = backtest_result.get("equity_curve")
-        drawdown_series = backtest_result.get("drawdown")
-        if isinstance(equity_curve, pd.Series) and not equity_curve.empty:
-            st.line_chart(equity_curve.rename("equity_curve"))
-        if isinstance(drawdown_series, pd.Series) and not drawdown_series.empty:
-            st.line_chart(drawdown_series.rename("drawdown"))
-        st.caption(f"No-look-ahead safe: {bool(backtest_result.get('lookahead_safe', False))}")
-
-    with analysis_tabs[4]:
-        if news_result and getattr(news_result, "available", False):
-            n_col1, n_col2 = st.columns(2)
-            n_col1.metric(
-                "Aggregate sentiment",
-                f"{float(getattr(news_result, 'sentiment_score', 0.0)):+.3f}",
-            )
-            n_col2.metric(
-                "Sentiment dispersion",
-                f"{float(getattr(news_result, 'sentiment_dispersion', 0.0)):.3f}",
-            )
-            st.caption(
-                f"Provider used: {str(getattr(news_result, 'context', {}).get('provider_used', 'unknown'))}"
-            )
-
-            fetch_errors = list(getattr(news_result, "context", {}).get("fetch_errors", []))
-            if fetch_errors:
-                with st.expander("News fetch diagnostics", expanded=False):
-                    for msg in fetch_errors:
-                        st.write(f"- {msg}")
-
-            news_rows = build_news_rows_for_ui(news_result)
-            if news_rows:
-                news_df = pd.DataFrame(news_rows)
-
-                def _sentiment_color_style(value: Any) -> str:
-                    if value == "green":
-                        return "background-color: #d5f5e3; color: #1e8449;"
-                    if value == "red":
-                        return "background-color: #fadbd8; color: #922b21;"
-                    return "background-color: #fcf3cf; color: #7d6608;"
-
-                styled = news_df.style.map(_sentiment_color_style, subset=["Sentiment Color"])
-                st.dataframe(styled, use_container_width=True, hide_index=True)
-            else:
-                st.info("No relevant news items found for this run.")
-        else:
-            st.info(
-                f"News layer unavailable: "
-                f"{getattr(news_result, 'error', 'n/a') if news_result else 'n/a'}"
-            )
-
-    with analysis_tabs[5]:
-        history_rows = [
-            {
-                "Run ID": item.get("run_id", ""),
-                "Timestamp": item.get("timestamp", ""),
-                "Tickers": ", ".join(item.get("universe", [])),
-                "Regime": item.get("summary", {}).get("regime_label", ""),
-                "Composite": item.get("summary", {}).get("composite_score", 0.0),
-            }
-            for item in history_records
-        ]
-        if history_rows:
-            st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No historical runs stored yet.")
-
-    with analysis_tabs[6]:
-        run_ids = [item.get("run_id") for item in history_records if item.get("run_id")]
-        if len(run_ids) >= 2:
-            left_run = st.selectbox("Base run", options=run_ids, index=min(1, len(run_ids) - 1))
-            right_run = st.selectbox("Compare run", options=run_ids, index=0)
-            if left_run and right_run and left_run != right_run:
-                try:
-                    left_data = load_run_record(left_run)
-                    right_data = load_run_record(right_run)
-                    comparison = compare_runs(left_data, right_data)
-                    st.dataframe(
-                        pd.DataFrame([comparison["metric_diff"]]),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                    if comparison.get("summary_diff"):
-                        st.caption("Summary deltas")
-                        st.dataframe(
-                            pd.DataFrame([comparison["summary_diff"]]),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                except Exception as exc:
-                    st.warning(f"Comparison failed: {exc}")
-        else:
-            st.info("Need at least two saved runs for comparison.")
-
-
-def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
-    metrics = analysis_result["metrics"]
-    portfolio_returns = analysis_result["portfolio_returns"]
-    returns = analysis_result["returns"]
-    corr_matrix = analysis_result["correlation_matrix"]
-    frontier = analysis_result["frontier"]
-    min_var_result = analysis_result["min_var_result"]
-    max_sharpe_result = analysis_result["max_sharpe_result"]
-    price_paths = analysis_result["price_paths"]
-    simulation_stats = analysis_result["simulation_stats"]
-    asset_metrics_df = analysis_result["asset_metrics_df"]
-
-    st.subheader("Portfolio Lab")
-    lab_tabs = st.tabs(["Performance", "Optimization", "Simulation", "Assets"])
-
-    with lab_tabs[0]:
-        portfolio_cumulative_fig = plot_cumulative_returns(
-            pd.DataFrame({"Portfolio": portfolio_returns}),
-            title="Portfolio Cumulative Return",
-        )
-        st.pyplot(portfolio_cumulative_fig)
-
-        asset_cumulative_fig = plot_cumulative_returns(returns, title="Asset Cumulative Returns")
-        with st.expander("Show cumulative returns for individual assets", expanded=False):
-            st.pyplot(asset_cumulative_fig)
-
-        drawdown_fig = plot_drawdown(portfolio_returns, title="Portfolio Drawdown")
-        st.pyplot(drawdown_fig)
-
-        corr_fig = plot_correlation_heatmap(corr_matrix, title="Correlation Matrix")
-        st.pyplot(corr_fig)
-        st.dataframe(corr_matrix.round(3), use_container_width=True)
-
-    with lab_tabs[1]:
-        compare_metrics = st.columns(4)
-        compare_metrics[0].metric("Current Sharpe", f"{metrics['sharpe_ratio']:.3f}")
-        compare_metrics[1].metric("Min Var Return", f"{min_var_result.get('expected_return', 0.0):.2%}")
-        compare_metrics[2].metric("Max Sharpe Return", f"{max_sharpe_result.get('expected_return', 0.0):.2%}")
-        compare_metrics[3].metric("Sampled Portfolios", f"{len(analysis_result['portfolio_cloud'])}")
-
-        opt_tabs = st.tabs(["Minimum Variance", "Maximum Sharpe", "Efficient Frontier", "3D Lab"])
-        with opt_tabs[0]:
-            if min_var_result["success"]:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Expected Return", f"{min_var_result['expected_return']:.2%}")
-                c2.metric("Volatility", f"{min_var_result['volatility']:.2%}")
-                c3.metric("Sharpe Ratio", f"{min_var_result['sharpe_ratio']:.3f}")
-                weights_df = pd.DataFrame(
-                    {
-                        "Symbol": min_var_result["symbols"],
-                        "Weight": [f"{weight:.2%}" for weight in min_var_result["weights"]],
-                    }
-                )
-                st.dataframe(weights_df, use_container_width=True)
-            else:
-                st.warning("Minimum variance optimization did not converge.")
-
-        with opt_tabs[1]:
-            if max_sharpe_result["success"]:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Expected Return", f"{max_sharpe_result['expected_return']:.2%}")
-                c2.metric("Volatility", f"{max_sharpe_result['volatility']:.2%}")
-                c3.metric("Sharpe Ratio", f"{max_sharpe_result['sharpe_ratio']:.3f}")
-                weights_df = pd.DataFrame(
-                    {
-                        "Symbol": max_sharpe_result["symbols"],
-                        "Weight": [f"{weight:.2%}" for weight in max_sharpe_result["weights"]],
-                    }
-                )
-                st.dataframe(weights_df, use_container_width=True)
-            else:
-                st.warning("Maximum Sharpe optimization did not converge.")
-
-        with opt_tabs[2]:
-            if frontier:
-                frontier_fig = plot_efficient_frontier(frontier, title="Efficient Frontier")
-                st.pyplot(frontier_fig)
-            else:
-                st.warning("No efficient frontier points were generated.")
-
-        with opt_tabs[3]:
-            try:
-                tradeoff_fig = plot_portfolio_tradeoff_3d(
-                    portfolio_cloud=analysis_result["portfolio_cloud"],
-                    frontier_points=frontier,
-                    highlighted_portfolios=analysis_result["highlighted_portfolios"],
-                )
-                st.plotly_chart(tradeoff_fig, use_container_width=True)
-            except Exception as exc:
-                st.warning(f"3D portfolio view unavailable: {exc}")
-
-    with lab_tabs[2]:
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Mean final value", f"${simulation_stats['mean']:,.0f}")
-        mc2.metric("Median final value", f"${simulation_stats['median']:,.0f}")
-        mc3.metric("5th percentile", f"${simulation_stats['percentile_5']:,.0f}")
-        mc4.metric("95th percentile", f"${simulation_stats['percentile_95']:,.0f}")
-
-        monte_carlo_fig = plot_monte_carlo_fan(price_paths)
-        st.pyplot(monte_carlo_fig)
-
-        with st.expander("Simulation percentile table", expanded=False):
-            st.dataframe(analysis_result["simulation_percentiles"].round(2), use_container_width=True)
-
-        try:
-            surface_fig = plot_monte_carlo_percentile_surface(price_paths)
-            st.plotly_chart(surface_fig, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"3D scenario surface unavailable: {exc}")
-
-    with lab_tabs[3]:
-        asset_metrics_view = asset_metrics_df.copy()
-        asset_metrics_view["Ann. Return"] = asset_metrics_view["Ann. Return"].map(
-            lambda value: f"{value:.2%}"
-        )
-        asset_metrics_view["Volatility"] = asset_metrics_view["Volatility"].map(
-            lambda value: f"{value:.2%}"
-        )
-        asset_metrics_view["Sharpe"] = asset_metrics_view["Sharpe"].map(lambda value: f"{value:.3f}")
-        asset_metrics_view["Max DD"] = asset_metrics_view["Max DD"].map(lambda value: f"{value:.2%}")
-        st.dataframe(asset_metrics_view, use_container_width=True)
-
-
-def _render_reports_page(analysis_result: Dict[str, Any]) -> None:
-    ai_review = analysis_result["ai_review"]
-
-    st.subheader("Reports")
-    report_tabs = st.tabs(["AI Commentary", "Export Center"])
-
-    with report_tabs[0]:
-        if ai_review.get("available", False):
-            st.success("Groq AI review generated successfully.")
-            if ai_review.get("json_mode_error"):
-                st.caption(f"JSON mode fallback used: {ai_review['json_mode_error']}")
-        else:
-            st.info("AI review unavailable. Showing deterministic fallback text.")
-            if ai_review.get("source_detail"):
-                st.error(f"AI detail: {ai_review['source_detail']}")
-
-        st.markdown(f"**Summary:** {ai_review.get('summary', '-')}")
-        st.markdown(f"**Main Risks:** {ai_review.get('risks', '-')}")
-        st.markdown(f"**Improvement Suggestions:** {ai_review.get('improvements', '-')}")
-        st.markdown(f"**Final Evaluation:** {ai_review.get('verdict', '-')}")
-
-        if ai_review.get("available", False) and ai_review.get("raw_response"):
-            with st.expander("AI raw response", expanded=False):
-                st.code(ai_review["raw_response"], language="json")
-
-    with report_tabs[1]:
-        _render_export_actions(
-            analysis_result,
-            title="Export Center",
-            body=(
-                "Download a polished PDF deck, raw CSV data, or the full JSON payload for this"
-                " exact analysis snapshot."
-            ),
-            compact=False,
-            key_namespace="reports_exports",
-        )
-
-
-def _render_modular_dashboard(
-    analysis_result: Dict[str, Any],
-    preferences: DashboardPreferences,
-) -> None:
-    _render_dashboard_hero(analysis_result, preferences)
-
-    for warning in analysis_result.get("warnings", []):
-        st.warning(warning)
-
-    for ai_message in analysis_result.get("ai_messages", []):
-        st.info(ai_message)
-
-    page_keys = [key for key in PAGE_LABELS if key in preferences.visible_pages]
-    page_tabs = st.tabs([PAGE_LABELS[key] for key in page_keys])
-
-    for tab, page_key in zip(page_tabs, page_keys, strict=False):
-        with tab:
-            if page_key == "overview":
-                _render_overview_page(analysis_result)
-            elif page_key == "cockpit":
-                _render_decision_cockpit_page(analysis_result)
-            elif page_key == "analysis":
-                _render_analysis_lab_page(analysis_result, preferences.show_raw_tables)
-            elif page_key == "portfolio_lab":
-                _render_portfolio_lab_page(analysis_result)
-            elif page_key == "workspace":
-                _render_workspace_hub(analysis_result)
-            elif page_key == "reports":
-                _render_reports_page(analysis_result)
-
-
 if "analysis_result" not in st.session_state:
     st.session_state["analysis_result"] = None
 if "current_portfolio_name" not in st.session_state:
@@ -3614,9 +2086,6 @@ with st.sidebar:
 
     run_clicked = st.button("Evaluate Portfolio", type="primary", use_container_width=True)
     _render_sidebar_portfolio_summary()
-    dashboard_preferences = render_dashboard_preferences(
-        has_analysis=st.session_state.get("analysis_result") is not None
-    )
 
 
 if run_clicked:
@@ -3649,7 +2118,6 @@ if run_clicked:
                 portfolio_samples=portfolio_samples,
             )
             st.session_state["analysis_result"] = analysis_result
-            st.rerun()
         except Exception as exc:
             st.error(f"Portfolio evaluation failed: {exc}")
             st.stop()
@@ -3658,7 +2126,512 @@ if run_clicked:
 analysis_result = st.session_state.get("analysis_result")
 
 if analysis_result is None:
-    _render_empty_dashboard_state(dashboard_preferences)
+    st.info("Configure the portfolio in the sidebar and click 'Evaluate Portfolio'.")
+    standalone_tabs = st.tabs(["Stock Picker", "Portfolio Tracker", "Swing Tracker"])
+    with standalone_tabs[0]:
+        _render_stock_picker_tab()
+    with standalone_tabs[1]:
+        _render_portfolio_tracker_tab()
+    with standalone_tabs[2]:
+        _render_swing_tracker_tab()
     st.stop()
 
-_render_modular_dashboard(analysis_result, dashboard_preferences)
+
+for warning in analysis_result.get("warnings", []):
+    st.warning(warning)
+
+for ai_message in analysis_result.get("ai_messages", []):
+    st.info(ai_message)
+
+
+metrics = analysis_result["metrics"]
+score_result = analysis_result["score_result"]
+portfolio_returns = analysis_result["portfolio_returns"]
+corr_matrix = analysis_result["correlation_matrix"]
+frontier = analysis_result["frontier"]
+min_var_result = analysis_result["min_var_result"]
+max_sharpe_result = analysis_result["max_sharpe_result"]
+price_paths = analysis_result["price_paths"]
+simulation_stats = analysis_result["simulation_stats"]
+ai_review = analysis_result["ai_review"]
+returns = analysis_result["returns"]
+asset_metrics_df = analysis_result["asset_metrics_df"]
+advanced_models = analysis_result.get("advanced_models", {})
+model_results = analysis_result.get("model_results", {})
+signal_results = analysis_result.get("signal_results", {})
+summary_result = analysis_result.get("summary_result")
+news_result = analysis_result.get("news_result")
+backtest_result = analysis_result.get("backtest_result", {})
+history_records = analysis_result.get("history_records", [])
+
+
+st.header("Modular Dashboard")
+dashboard_tabs = st.tabs(
+    [
+        "Data",
+        "Models",
+        "Signals",
+        "Backtest",
+        "News",
+        "Summary",
+        "History",
+        "Compare",
+        "Stock Picker",
+        "Portfolio Tracker",
+        "Swing Tracker",
+    ]
+)
+
+with dashboard_tabs[0]:
+    st.subheader("Data snapshot")
+    st.caption(f"Run record: {analysis_result.get('run_record').run_id if analysis_result.get('run_record') else '-'}")
+    st.dataframe(analysis_result["prices"].tail(20), use_container_width=True)
+    st.dataframe(analysis_result["returns"].tail(20), use_container_width=True)
+
+with dashboard_tabs[1]:
+    st.subheader("Model outputs")
+    model_rows: List[Dict[str, Any]] = []
+    for model_name, model in model_results.items():
+        metrics_map = getattr(model, "metrics", {})
+        model_rows.append({
+            "Model": model_name,
+            "Family": getattr(model, "family", ""),
+            "Available": bool(getattr(model, "available", False)),
+            "Confidence": float(getattr(model, "confidence", 0.0)),
+            "Primary Metric": float(
+                metrics_map.get(
+                    "expected_annual_return",
+                    metrics_map.get(
+                        "posterior_annual_return",
+                        metrics_map.get(
+                            "posterior_expected_annual_return",
+                            metrics_map.get("volatility_annualized", 0.0),
+                        ),
+                    ),
+                )
+            ),
+            "Band Width": float(metrics_map.get("posterior_interval_width", metrics_map.get("forecast_spread", 0.0))),
+            "Error": getattr(model, "error", ""),
+        })
+    if model_rows:
+        st.dataframe(pd.DataFrame(model_rows), use_container_width=True, hide_index=True)
+        confidence_frame = pd.DataFrame(model_rows)[["Model", "Confidence"]].set_index("Model")
+        st.caption("Model confidence")
+        st.bar_chart(confidence_frame)
+
+with dashboard_tabs[2]:
+    st.subheader("Signal outputs")
+    signal_rows: List[Dict[str, Any]] = []
+    for signal_name, signal in signal_results.items():
+        signal_rows.append({
+            "Signal": signal_name,
+            "Family": getattr(signal, "family", ""),
+            "Direction": getattr(signal, "direction", "neutral"),
+            "Score": float(getattr(signal, "score", 0.0)),
+            "Confidence": float(getattr(signal, "confidence", 0.0)),
+            "Available": bool(getattr(signal, "available", False)),
+            "Error": getattr(signal, "error", ""),
+        })
+    if signal_rows:
+        st.dataframe(pd.DataFrame(signal_rows), use_container_width=True, hide_index=True)
+
+with dashboard_tabs[3]:
+    st.subheader("Deterministic backtest")
+    bt_metrics = backtest_result.get("metrics", {})
+    bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
+    bt_col1.metric("Total Return", f"{bt_metrics.get('total_return', 0.0):.2%}")
+    bt_col2.metric("Volatility", f"{bt_metrics.get('volatility', 0.0):.2%}")
+    bt_col3.metric("Sharpe", f"{bt_metrics.get('sharpe', 0.0):.3f}")
+    bt_col4.metric("Max DD", f"{bt_metrics.get('max_drawdown', 0.0):.2%}")
+
+    equity_curve = backtest_result.get("equity_curve")
+    drawdown_series = backtest_result.get("drawdown")
+    if isinstance(equity_curve, pd.Series) and not equity_curve.empty:
+        st.line_chart(equity_curve.rename("equity_curve"))
+    if isinstance(drawdown_series, pd.Series) and not drawdown_series.empty:
+        st.line_chart(drawdown_series.rename("drawdown"))
+    st.caption(f"No-look-ahead safe: {bool(backtest_result.get('lookahead_safe', False))}")
+
+with dashboard_tabs[4]:
+    st.subheader("News relevance")
+    if news_result and getattr(news_result, "available", False):
+        n_col1, n_col2 = st.columns(2)
+        n_col1.metric("Aggregate sentiment", f"{float(getattr(news_result, 'sentiment_score', 0.0)):+.3f}")
+        n_col2.metric("Sentiment dispersion", f"{float(getattr(news_result, 'sentiment_dispersion', 0.0)):.3f}")
+        st.caption(f"Provider used: {str(getattr(news_result, 'context', {}).get('provider_used', 'unknown'))}")
+
+        fetch_errors = list(getattr(news_result, "context", {}).get("fetch_errors", []))
+        if fetch_errors:
+            with st.expander("News fetch diagnostics", expanded=False):
+                for msg in fetch_errors:
+                    st.write(f"- {msg}")
+
+        news_rows = build_news_rows_for_ui(news_result)
+        if news_rows:
+            news_df = pd.DataFrame(news_rows)
+
+            def _sentiment_color_style(value: Any) -> str:
+                if value == "green":
+                    return "background-color: #d5f5e3; color: #1e8449;"
+                if value == "red":
+                    return "background-color: #fadbd8; color: #922b21;"
+                return "background-color: #fcf3cf; color: #7d6608;"
+
+            styled = news_df.style.map(_sentiment_color_style, subset=["Sentiment Color"])
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+        else:
+            st.info("No relevant news items found for this run.")
+    else:
+        st.info(f"News layer unavailable: {getattr(news_result, 'error', 'n/a') if news_result else 'n/a'}")
+
+with dashboard_tabs[5]:
+    st.subheader("Summary layer")
+    if summary_result:
+        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+        s_col1.metric("Composite Score", f"{getattr(summary_result, 'composite_score', 0.0):.3f}")
+        s_col2.metric("Regime", str(getattr(summary_result, "regime_label", "neutral")))
+        s_col3.metric("Confidence", f"{getattr(summary_result, 'confidence', 0.0):.3f}")
+        s_col4.metric("News Sentiment", f"{float(getattr(summary_result, 'news_sentiment', 0.0)):+.3f}")
+        st.metric("News Sentiment Dispersion", f"{float(getattr(summary_result, 'news_sentiment_dispersion', 0.0)):.3f}")
+        for line in getattr(summary_result, "highlights", []):
+            st.write(f"- {line}")
+        st.caption(str(getattr(summary_result, "regime_interpretation", "")))
+        st.write(f"Expected return view: {float(getattr(summary_result, 'expected_return_view', 0.0)):.2%}")
+        st.write(f"Expected risk view: {float(getattr(summary_result, 'expected_risk_view', 0.0)):.2%}")
+        st.write(f"Drawdown implication: {getattr(summary_result, 'drawdown_implication', '')}")
+        st.write(f"Volatility implication: {getattr(summary_result, 'volatility_implication', '')}")
+        st.write(f"News implication: {getattr(summary_result, 'news_implication', '')}")
+        strongest = getattr(summary_result, "strongest_signals", [])
+        if strongest:
+            st.caption("Strongest signals")
+            st.dataframe(pd.DataFrame(strongest), use_container_width=True, hide_index=True)
+        top_news = getattr(summary_result, "top_relevant_news", [])
+        if top_news:
+            st.caption("Top 3 relevant news")
+            st.dataframe(pd.DataFrame(top_news), use_container_width=True, hide_index=True)
+        changes = getattr(summary_result, "recent_changes", [])
+        if changes:
+            st.caption("Recent changes vs prior run")
+            for change in changes:
+                st.write(f"- {change}")
+        for warning in getattr(summary_result, "warnings", []):
+            st.warning(warning)
+        for flag in getattr(summary_result, "risk_flags", []):
+            st.warning(flag)
+
+with dashboard_tabs[6]:
+    st.subheader("Run history")
+    history_rows = [
+        {
+            "Run ID": item.get("run_id", ""),
+            "Timestamp": item.get("timestamp", ""),
+            "Tickers": ", ".join(item.get("universe", [])),
+            "Regime": item.get("summary", {}).get("regime_label", ""),
+            "Composite": item.get("summary", {}).get("composite_score", 0.0),
+        }
+        for item in history_records
+    ]
+    if history_rows:
+        st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No historical runs stored yet.")
+
+with dashboard_tabs[7]:
+    st.subheader("Run comparison")
+    run_ids = [item.get("run_id") for item in history_records if item.get("run_id")]
+    if len(run_ids) >= 2:
+        left_run = st.selectbox("Base run", options=run_ids, index=min(1, len(run_ids) - 1))
+        right_run = st.selectbox("Compare run", options=run_ids, index=0)
+        if left_run and right_run and left_run != right_run:
+            try:
+                left_data = load_run_record(left_run)
+                right_data = load_run_record(right_run)
+                comparison = compare_runs(left_data, right_data)
+                st.dataframe(pd.DataFrame([comparison["metric_diff"]]), use_container_width=True, hide_index=True)
+                if comparison.get("summary_diff"):
+                    st.caption("Summary deltas")
+                    st.dataframe(pd.DataFrame([comparison["summary_diff"]]), use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.warning(f"Comparison failed: {exc}")
+    else:
+        st.info("Need at least two saved runs for comparison.")
+
+with dashboard_tabs[8]:
+    _render_stock_picker_tab()
+
+with dashboard_tabs[9]:
+    _render_portfolio_tracker_tab()
+
+with dashboard_tabs[10]:
+    _render_swing_tracker_tab()
+
+st.markdown("---")
+
+render_economics_questions_section(analysis_result)
+
+st.markdown("---")
+
+st.header("Portfolio score")
+col1, col2, col3 = st.columns(3)
+col1.metric("Deterministic score", f"{score_result['score']} / 100")
+col2.metric("Rating", str(score_result["rating"]))
+col3.metric("Flags", len(score_result["flags"]))
+st.progress(int(score_result["score"]))
+
+if score_result["flags"]:
+    for flag in score_result["flags"]:
+        st.warning(flag)
+else:
+    st.success("No critical deterministic flags detected.")
+
+if score_result["breakdown"]:
+    score_breakdown_df = pd.DataFrame(score_result["breakdown"]).rename(columns={
+        "rule": "Rule",
+        "penalty": "Penalty",
+        "detail": "Detail",
+    })
+    st.caption("Score breakdown")
+    st.dataframe(score_breakdown_df, use_container_width=True, hide_index=True)
+else:
+    st.caption("No score penalties were triggered.")
+
+st.markdown("---")
+
+
+st.header("Metrics overview")
+metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+metric_col1.metric("Annualized Return", f"{metrics['annualized_return']:.2%}")
+metric_col2.metric("Volatility", f"{metrics['volatility']:.2%}")
+metric_col3.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.3f}")
+metric_col4.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
+
+metric_col5, metric_col6, metric_col7, metric_col8 = st.columns(4)
+metric_col5.metric("Average Daily Return", f"{metrics['daily_return_mean']:.3%}")
+metric_col6.metric("Concentration (HHI)", f"{metrics['hhi']:.3f}")
+metric_col7.metric("Effective Holdings", f"{metrics['effective_holdings']:.2f}")
+metric_col8.metric("Average Correlation", f"{metrics['avg_correlation']:.3f}")
+
+st.markdown("---")
+
+
+st.header("Advanced Models (V0.3 / V0.4)")
+advanced_rows: List[Dict[str, Any]] = []
+for model_name, result in advanced_models.items():
+    if result.get("available", False):
+        metrics_map = result.get("metrics", {})
+        advanced_rows.append({
+            "Model": model_name,
+            "Status": "ok",
+            "Signal 1": round(float(metrics_map.get("expected_annual_return", metrics_map.get("next_period_return_forecast", metrics_map.get("conditional_volatility", 0.0))) or 0.0), 6),
+            "Signal 2": round(float(metrics_map.get("trend_slope_daily", metrics_map.get("forecast_confidence", metrics_map.get("volatility_annualized", 0.0))) or 0.0), 6),
+            "Confidence": round(float(metrics_map.get("confidence", 0.0) or 0.0), 4),
+            "Error": "",
+        })
+    else:
+        advanced_rows.append({
+            "Model": model_name,
+            "Status": "unavailable",
+            "Signal 1": np.nan,
+            "Signal 2": np.nan,
+            "Confidence": np.nan,
+            "Error": result.get("error", ""),
+        })
+
+if advanced_rows:
+    st.dataframe(pd.DataFrame(advanced_rows), use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+
+st.header("Portfolio performance")
+portfolio_cumulative_fig = plot_cumulative_returns(
+    pd.DataFrame({"Portfolio": portfolio_returns}),
+    title="Portfolio Cumulative Return",
+)
+st.pyplot(portfolio_cumulative_fig)
+
+asset_cumulative_fig = plot_cumulative_returns(returns, title="Asset Cumulative Returns")
+with st.expander("Show cumulative returns for individual assets", expanded=False):
+    st.pyplot(asset_cumulative_fig)
+
+
+st.header("Drawdown")
+drawdown_fig = plot_drawdown(portfolio_returns, title="Portfolio Drawdown")
+st.pyplot(drawdown_fig)
+
+
+st.header("Correlation matrix")
+corr_fig = plot_correlation_heatmap(corr_matrix, title="Correlation Matrix")
+st.pyplot(corr_fig)
+st.dataframe(corr_matrix.round(3), use_container_width=True)
+
+st.markdown("---")
+
+
+st.header("Portfolio optimization")
+tab1, tab2, tab3 = st.tabs(["Minimum Variance", "Maximum Sharpe", "Efficient Frontier"])
+
+with tab1:
+    if min_var_result["success"]:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Expected Return", f"{min_var_result['expected_return']:.2%}")
+        c2.metric("Volatility", f"{min_var_result['volatility']:.2%}")
+        c3.metric("Sharpe Ratio", f"{min_var_result['sharpe_ratio']:.3f}")
+        weights_df = pd.DataFrame({
+            "Symbol": min_var_result["symbols"],
+            "Weight": [f"{weight:.2%}" for weight in min_var_result["weights"]],
+        })
+        st.dataframe(weights_df, use_container_width=True)
+    else:
+        st.warning("Minimum variance optimization did not converge.")
+
+with tab2:
+    if max_sharpe_result["success"]:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Expected Return", f"{max_sharpe_result['expected_return']:.2%}")
+        c2.metric("Volatility", f"{max_sharpe_result['volatility']:.2%}")
+        c3.metric("Sharpe Ratio", f"{max_sharpe_result['sharpe_ratio']:.3f}")
+        weights_df = pd.DataFrame({
+            "Symbol": max_sharpe_result["symbols"],
+            "Weight": [f"{weight:.2%}" for weight in max_sharpe_result["weights"]],
+        })
+        st.dataframe(weights_df, use_container_width=True)
+    else:
+        st.warning("Maximum Sharpe optimization did not converge.")
+
+with tab3:
+    if frontier:
+        frontier_fig = plot_efficient_frontier(frontier, title="Efficient Frontier")
+        st.pyplot(frontier_fig)
+    else:
+        st.warning("No efficient frontier points were generated.")
+
+st.markdown("---")
+
+
+st.header("3D visualizations")
+viz_tab1, viz_tab2 = st.tabs(["Portfolio Lab", "Scenario Surface"])
+
+with viz_tab1:
+    try:
+        tradeoff_fig = plot_portfolio_tradeoff_3d(
+            portfolio_cloud=analysis_result["portfolio_cloud"],
+            frontier_points=frontier,
+            highlighted_portfolios=analysis_result["highlighted_portfolios"],
+        )
+        st.plotly_chart(tradeoff_fig, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"3D portfolio view unavailable: {exc}")
+
+with viz_tab2:
+    try:
+        surface_fig = plot_monte_carlo_percentile_surface(price_paths)
+        st.plotly_chart(surface_fig, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"3D scenario surface unavailable: {exc}")
+
+st.markdown("---")
+
+
+st.header("Monte Carlo simulation")
+mc1, mc2, mc3, mc4 = st.columns(4)
+mc1.metric("Mean final value", f"${simulation_stats['mean']:,.0f}")
+mc2.metric("Median final value", f"${simulation_stats['median']:,.0f}")
+mc3.metric("5th percentile", f"${simulation_stats['percentile_5']:,.0f}")
+mc4.metric("95th percentile", f"${simulation_stats['percentile_95']:,.0f}")
+
+monte_carlo_fig = plot_monte_carlo_fan(price_paths)
+st.pyplot(monte_carlo_fig)
+
+with st.expander("Simulation percentile table", expanded=False):
+    st.dataframe(analysis_result["simulation_percentiles"].round(2), use_container_width=True)
+
+st.markdown("---")
+
+
+st.header("Individual asset metrics")
+asset_metrics_view = asset_metrics_df.copy()
+asset_metrics_view["Ann. Return"] = asset_metrics_view["Ann. Return"].map(lambda value: f"{value:.2%}")
+asset_metrics_view["Volatility"] = asset_metrics_view["Volatility"].map(lambda value: f"{value:.2%}")
+asset_metrics_view["Sharpe"] = asset_metrics_view["Sharpe"].map(lambda value: f"{value:.3f}")
+asset_metrics_view["Max DD"] = asset_metrics_view["Max DD"].map(lambda value: f"{value:.2%}")
+st.dataframe(asset_metrics_view, use_container_width=True)
+
+st.markdown("---")
+
+
+st.header("AI Commentary")
+if ai_review.get("available", False):
+    st.success("Groq AI review generated successfully.")
+    if ai_review.get("json_mode_error"):
+        st.caption(f"JSON mode fallback used: {ai_review['json_mode_error']}")
+else:
+    st.info("AI review unavailable. Showing deterministic fallback text.")
+    if ai_review.get("source_detail"):
+        st.error(f"AI detail: {ai_review['source_detail']}")
+
+st.markdown(f"**Summary:** {ai_review.get('summary', '-')}")
+st.markdown(f"**Main Risks:** {ai_review.get('risks', '-')}")
+st.markdown(f"**Improvement Suggestions:** {ai_review.get('improvements', '-')}")
+st.markdown(f"**Final Evaluation:** {ai_review.get('verdict', '-')}")
+
+if ai_review.get("available", False) and ai_review.get("raw_response"):
+    with st.expander("AI raw response", expanded=False):
+        st.code(ai_review["raw_response"], language="json")
+
+st.markdown("---")
+
+
+st.header("Export panel")
+report_payload = _build_report_payload(analysis_result)
+pdf_bytes: bytes | None = None
+csv_bytes: bytes | None = None
+json_bytes: bytes | None = None
+
+try:
+    pdf_figures = _build_pdf_figures(analysis_result)
+    pdf_buffer = generate_pdf_report(report_payload, pdf_figures)
+    pdf_bytes = pdf_buffer.getvalue()
+    for figure in pdf_figures.values():
+        plt.close(figure)
+except Exception as exc:
+    st.error(f"PDF export could not be prepared: {exc}")
+
+try:
+    csv_bytes = export_portfolio_data_csv(report_payload)
+except Exception as exc:
+    st.error(f"Data CSV export failed: {exc}")
+
+try:
+    json_bytes = export_full_report_json(report_payload)
+except Exception as exc:
+    st.error(f"Full JSON export failed: {exc}")
+
+export_col1, export_col2, export_col3 = st.columns(3)
+with export_col1:
+    if pdf_bytes is not None:
+        st.download_button(
+            "Export PDF",
+            data=pdf_bytes,
+            file_name=f"portfolio_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+with export_col2:
+    if csv_bytes is not None:
+        st.download_button(
+            "Export Data (CSV)",
+            data=csv_bytes,
+            file_name=f"portfolio_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+with export_col3:
+    if json_bytes is not None:
+        st.download_button(
+            "Export Full Report (JSON)",
+            data=json_bytes,
+            file_name=f"portfolio_full_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
