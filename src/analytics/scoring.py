@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+import pandas as pd
+
 
 def _profile_thresholds(risk_profile: str) -> Dict[str, float]:
     profile = (risk_profile or "balanced").lower()
@@ -233,3 +235,40 @@ def build_deterministic_fallback_review(
             else "The portfolio looks robust against standard market scenarios."
         ),
     }
+
+
+def compute_weighted_factor_score(
+    factors: Dict[str, pd.Series],
+    weights: Dict[str, float],
+    neutral_value: float = 0.5,
+) -> pd.Series:
+    """
+    Compute a weighted score from named factor series.
+
+    Each factor is expected to already be normalized into [0, 1] range.
+    Missing values are filled with `neutral_value` to keep scoring robust.
+    """
+    if not factors:
+        return pd.Series(dtype=float)
+
+    non_empty_series = [series for series in factors.values() if isinstance(series, pd.Series)]
+    if not non_empty_series:
+        return pd.Series(dtype=float)
+
+    reference_index = non_empty_series[0].index
+    score = pd.Series(0.0, index=reference_index, dtype=float)
+
+    valid_weights = {key: max(0.0, float(value)) for key, value in weights.items()}
+    weight_sum = float(sum(valid_weights.values()))
+    if weight_sum <= 0:
+        valid_weights = {key: 1.0 for key in factors}
+        weight_sum = float(len(valid_weights))
+
+    for factor_name, factor_series in factors.items():
+        if not isinstance(factor_series, pd.Series):
+            continue
+        aligned = factor_series.reindex(reference_index).fillna(neutral_value)
+        factor_weight = valid_weights.get(factor_name, 0.0) / weight_sum
+        score = score + aligned * factor_weight
+
+    return score

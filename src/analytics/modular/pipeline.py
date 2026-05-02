@@ -48,6 +48,7 @@ def run_quant_stack(
     news_context = {
         "tickers": config.get("tickers", []),
         "sector_keywords": config.get("sector_keywords", []),
+        "news_api_key": config.get("news_api_key", ""),
         "regime_label": "risk_on" if pre_risk > 0.2 else "risk_off" if pre_risk < -0.2 else "neutral",
         "active_models": [name for name, model in models.items() if model.available],
         "active_signals": [name for name, signal in preliminary_signals.items() if signal.available],
@@ -71,9 +72,12 @@ def run_quant_stack(
     summary = build_summary(models, signals, news=news, backtest=backtest, prior_run=prior_run)
 
     run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+    backtest_metrics = {
+        f"backtest_{key}": value for key, value in backtest.get("metrics", {}).items()
+    }
     metrics = {
         **config.get("portfolio_metrics", {}),
-        **backtest.get("metrics", {}),
+        **backtest_metrics,
         "composite_signal": summary.composite_score,
         "summary_confidence": summary.confidence,
         "news_sentiment_score": float(news.sentiment_score),

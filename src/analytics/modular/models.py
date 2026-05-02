@@ -95,7 +95,24 @@ def _lasso_model(series: pd.Series, _: Dict[str, Any]) -> ModelResult:
     lam = 0.001
     beta = np.sign(corr) * max(0.0, abs(corr) - lam)
     next_ret = float(beta * clean.iloc[-1])
-    confidence = float(max(0.0, min(1.0, 1.0 - abs(beta - corr) * 100.0)))
+    x_std = float(np.std(x))
+    y_std = float(np.std(y))
+    corr_strength = 0.0
+    if x_std > 1e-12 and y_std > 1e-12:
+        corr_strength = float(abs(np.corrcoef(x, y)[0, 1]))
+    shrinkage_retention = float(min(1.0, abs(beta) / max(abs(corr), 1e-8))) if abs(corr) > 1e-8 else 0.0
+    forecast_strength = float(
+        min(1.0, abs(next_ret) / max(float(clean.std()), 1e-8) * 20.0)
+    )
+    confidence = float(
+        max(
+            0.0,
+            min(
+                1.0,
+                corr_strength * shrinkage_retention * (0.25 + 0.75 * forecast_strength),
+            ),
+        )
+    )
     return ModelResult(
         name="lasso",
         family="classical",
@@ -199,11 +216,22 @@ def _kalman_model(series: pd.Series, _: Dict[str, Any]) -> ModelResult:
     r = 1e-4
     x = 0.0
     p = 1.0
+    filtered_states = []
     for z in clean:
         p = p + q
         k = p / (p + r)
         x = x + k * (float(z) - x)
         p = (1 - k) * p
+        filtered_states.append(float(x))
+    clean_std = float(clean.std())
+    filtered_array = np.asarray(filtered_states, dtype=float)
+    residual_std = float(np.std(clean.to_numpy(dtype=float) - filtered_array))
+    signal_strength = float(np.tanh(abs(x) / max(clean_std, 1e-8) * 3.0))
+    tracking_quality = float(1.0 / (1.0 + residual_std / max(clean_std, 1e-8)))
+    state_certainty = float(1.0 / (1.0 + p * 100_000.0))
+    confidence = float(
+        max(0.0, min(0.85, signal_strength * 0.45 + tracking_quality * 0.35 + state_certainty * 0.20))
+    )
     return ModelResult(
         name="kalman_filter",
         family="classical",
@@ -211,9 +239,10 @@ def _kalman_model(series: pd.Series, _: Dict[str, Any]) -> ModelResult:
         metrics={
             "state_estimate": float(x),
             "expected_annual_return": float(x * 252.0),
-            "confidence": float(max(0.0, min(1.0, 1.0 - p))),
+            "residual_volatility": residual_std,
+            "confidence": confidence,
         },
-        confidence=float(max(0.0, min(1.0, 1.0 - p))),
+        confidence=confidence,
     )
 
 
@@ -552,6 +581,7 @@ def _black_litterman_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult
 
     if not view_keys:
         posterior = pi
+        confidence = 0.35
     else:
         p = np.zeros((len(view_keys), n_assets), dtype=float)
         q = np.zeros(len(view_keys), dtype=float)
@@ -564,12 +594,21 @@ def _black_litterman_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult
         inv_omega = np.linalg.pinv(omega)
         posterior_cov = np.linalg.pinv(inv_tau_cov + p.T @ inv_omega @ p)
         posterior = posterior_cov @ (inv_tau_cov @ pi + p.T @ inv_omega @ q)
+        confidence = float(
+            max(
+                0.0,
+                min(
+                    0.9,
+                    (1.0 / (1.0 + float(np.std(posterior - pi)) * 25.0))
+                    * min(1.0, 0.45 + len(view_keys) * 0.15),
+                ),
+            )
+        )
 
     implied_alpha = posterior - pi
     posterior_portfolio_return = float(np.dot(market_weights, posterior))
     implied_alpha_portfolio = float(np.dot(market_weights, implied_alpha))
     tilt_strength = float(np.max(np.abs(implied_alpha)))
-    confidence = float(max(0.0, min(1.0, 1.0 / (1.0 + float(np.std(implied_alpha)) * 25.0))))
 
     return ModelResult(
         name="black_litterman",
@@ -579,6 +618,8 @@ def _black_litterman_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult
             "posterior_expected_annual_return": posterior_portfolio_return,
             "implied_alpha_portfolio": implied_alpha_portfolio,
             "tilt_strength": tilt_strength,
+            "view_count": float(len(view_keys)),
+            "passive_reference_only": float(1.0 if not view_keys else 0.0),
             "confidence": confidence,
         },
         payload={
