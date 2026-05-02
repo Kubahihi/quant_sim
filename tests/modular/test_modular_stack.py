@@ -18,9 +18,11 @@ from src.analytics.modular.news import (
     build_news_rows_for_ui,
     clear_news_cache,
 )
+from src.analytics.modular.pipeline import run_quant_stack
 from src.analytics.modular.results import RunRecord
 from src.analytics.modular.signals import run_signal_bundle
 from src.analytics.modular.summary import build_summary
+from src.analytics.modular.results import NewsResult
 
 
 class DummyNewsProvider(NewsProvider):
@@ -368,3 +370,53 @@ def test_compare_runs_metric_diff():
     assert diff["metric_diff"]["volatility"] == pytest.approx(0.05)
     assert diff["summary_diff"]["composite_score"] == pytest.approx(0.1)
     assert diff["summary_diff"]["news_sentiment"] == pytest.approx(0.1)
+
+
+def test_run_quant_stack_preserves_portfolio_metrics_and_namespaces_backtest(tmp_path, monkeypatch):
+    returns_df = _sample_returns_df()
+    portfolio_returns = returns_df.mean(axis=1)
+    seen_context: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.analytics.modular.pipeline.build_news_analysis",
+        lambda *args, **kwargs: (
+            seen_context.update(kwargs.get("context", {}))
+            or NewsResult(
+                available=True,
+                items=[],
+                context={"relevance_coverage": 0.0, "provider_used": "test"},
+                sentiment_score=0.0,
+                sentiment_dispersion=0.0,
+            )
+        ),
+    )
+
+    result = run_quant_stack(
+        portfolio_returns=portfolio_returns,
+        returns_df=returns_df,
+        config={
+            "tickers": ["AAA", "BBB", "CCC"],
+            "weights": [1 / 3, 1 / 3, 1 / 3],
+            "start_date": portfolio_returns.index.min().date(),
+            "end_date": portfolio_returns.index.max().date(),
+            "portfolio_metrics": {
+                "volatility": 0.123,
+                "total_return": 0.456,
+                "max_drawdown": -0.111,
+                "sharpe_ratio": 1.234,
+            },
+            "news_api_key": "news-key-from-config",
+        },
+        history_dir=tmp_path,
+    )
+
+    saved = load_run_record(result["run_record"].run_id, base_dir=tmp_path)
+    assert saved["metrics"]["volatility"] == pytest.approx(0.123)
+    assert saved["metrics"]["total_return"] == pytest.approx(0.456)
+    assert saved["metrics"]["max_drawdown"] == pytest.approx(-0.111)
+    assert saved["metrics"]["sharpe_ratio"] == pytest.approx(1.234)
+    assert "backtest_volatility" in saved["metrics"]
+    assert "backtest_total_return" in saved["metrics"]
+    assert "backtest_max_drawdown" in saved["metrics"]
+    assert "backtest_sharpe" in saved["metrics"]
+    assert seen_context["news_api_key"] == "news-key-from-config"
