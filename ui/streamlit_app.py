@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Tuple
@@ -9,9 +10,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import yfinance as yf
 
 sys.path.append(str(Path(__file__).parent.parent))
 
+from ui.economics_questions import render_economics_questions_section
 from src.ai import generate_ai_review, resolve_groq_api_key
 from src.analytics import (
     build_deterministic_fallback_review,
@@ -35,6 +38,7 @@ from src.analytics.risk_metrics import (
     calculate_volatility,
 )
 from src.analytics.returns import calculate_annualized_return
+from src.data.stock_universe import get_universe, load_universe_metadata, load_universe_snapshot
 from src.data.fetchers.yahoo_fetcher import YahooFetcher
 from src.optimization import (
     calculate_efficient_frontier,
@@ -49,6 +53,42 @@ from src.reporting import (
     generate_pdf_report,
 )
 from src.simulation import run_monte_carlo_simulation
+from src.stock_picker.ai_filter import apply_ai_query, parse_ai_query
+from src.stock_picker.screener import (
+    apply_classic_filters,
+    apply_technical_indicators,
+    calculate_quant_score,
+    rank_stocks,
+)
+from src.portfolio_tracker.manager import (
+    add_position,
+    compute_live_values,
+    generate_rebalance_suggestions,
+    list_portfolios,
+    load_portfolio,
+    remove_position,
+    save_portfolio,
+    update_position,
+)
+from src.swing_tracker import (
+    build_discipline_overview,
+    build_stop_rationale,
+    calculate_position_size_for_trade,
+    calculate_stop_loss,
+    classify_setup_type,
+    close_trade as close_swing_trade,
+    create_trade,
+    generate_stop_rationale as generate_ai_stop_rationale,
+    historical_trade_rows,
+    open_trade_rows,
+    refresh_and_persist as refresh_swing_trades,
+    resolve_swing_tracker_api_key,
+    save_trade_book as save_swing_trade_book,
+    summarize_post_trade_review,
+    summarize_trade_thesis,
+    trades_to_rows,
+    upsert_trade as upsert_swing_trade,
+)
 from src.visualization.charts_2d import (
     plot_correlation_heatmap,
     plot_cumulative_returns,
@@ -87,7 +127,6 @@ def fetch_market_data_cached(
     end_date: date,
 ) -> pd.DataFrame:
     """Fetch close prices with Streamlit cache to reduce repeated API calls."""
-    fetcher = YahooFetcher()
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
 
@@ -586,8 +625,1401 @@ def _compute_analysis(
     }
 
 
+SCREENER_DISPLAY_COLUMNS = [
+    ("Rank", "Rank"),
+    ("Ticker", "Ticker"),
+    ("Company", "Company"),
+    ("Sector", "Sector"),
+    ("Industry", "Industry"),
+    ("Exchange", "Exchange"),
+    ("MarketCap", "MarketCap"),
+    ("Beta", "Beta"),
+    ("PE", "P/E"),
+    ("ForwardPE", "Forward P/E"),
+    ("PEG", "PEG"),
+    ("ROE", "ROE"),
+    ("ROA", "ROA"),
+    ("DividendYield", "DividendYield"),
+    ("Return52W", "52w Return"),
+    ("RSI", "RSI"),
+    ("MACD", "MACD"),
+    ("Volatility", "Volatility"),
+    ("Drawdown", "Drawdown"),
+    ("QuantScore", "QuantScore"),
+    ("AvgVolume", "AvgVolume"),
+    ("Price", "Price"),
+]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _fetch_ticker_history_cached(symbol: str, period: str = "1y") -> pd.DataFrame:
+    history = yf.download(
+        tickers=symbol,
+        period=period,
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=True,
+    )
+    if isinstance(history.columns, pd.MultiIndex):
+        level_0 = history.columns.get_level_values(0)
+        level_1 = history.columns.get_level_values(1)
+        if symbol in level_1:
+            history = history.xs(symbol, axis=1, level=1, drop_level=True)
+        elif symbol in level_0:
+            history = history[symbol]
+    return history
+
+
+def _dataframe_to_excel_bytes(dataframe: pd.DataFrame) -> bytes | None:
+    try:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            dataframe.to_excel(writer, index=False, sheet_name="Screener")
+        output.seek(0)
+        return output.getvalue()
+    except Exception:
+        return None
+
+
+def _numeric_bounds(series: pd.Series, default_min: float, default_max: float) -> Tuple[float, float]:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric.empty:
+        return float(default_min), float(default_max)
+
+    min_value = float(numeric.min())
+    max_value = float(numeric.max())
+    if not np.isfinite(min_value) or not np.isfinite(max_value):
+        return float(default_min), float(default_max)
+
+    if min_value == max_value:
+        max_value = min_value + max(1.0, abs(min_value) * 0.05)
+    return min_value, max_value
+
+
+def _portfolio_positions_dataframe(portfolio: Dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for item in portfolio.get("positions", []):
+        if not isinstance(item, dict):
+            continue
+        rows.append({
+            "Ticker": str(item.get("ticker", "")).upper(),
+            "Shares": float(item.get("shares", 0.0) or 0.0),
+            "CostBasis": float(item.get("cost_basis")) if item.get("cost_basis") not in (None, "") else np.nan,
+            "TargetWeight": float(item.get("target_weight")) if item.get("target_weight") not in (None, "") else np.nan,
+            "Notes": str(item.get("notes", "") or ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def _positions_from_editor(edited_df: pd.DataFrame) -> List[Dict[str, Any]]:
+    positions: List[Dict[str, Any]] = []
+    if edited_df.empty:
+        return positions
+
+    for _, row in edited_df.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        shares_raw = pd.to_numeric(row.get("Shares"), errors="coerce")
+        shares = 0.0 if pd.isna(shares_raw) else float(shares_raw)
+        if shares == 0.0:
+            continue
+
+        cost_basis_raw = pd.to_numeric(row.get("CostBasis"), errors="coerce")
+        target_weight_raw = pd.to_numeric(row.get("TargetWeight"), errors="coerce")
+
+        positions.append({
+            "ticker": ticker,
+            "shares": shares,
+            "cost_basis": (None if pd.isna(cost_basis_raw) else float(cost_basis_raw)),
+            "target_weight": (None if pd.isna(target_weight_raw) else float(target_weight_raw)),
+            "notes": str(row.get("Notes", "") or "").strip(),
+        })
+    return positions
+
+
+def _invalidate_portfolio_live_snapshot() -> None:
+    st.session_state.pop("portfolio_live_holdings", None)
+    st.session_state.pop("portfolio_live_summary", None)
+
+
+def _portfolio_cost_summary(portfolio: Dict[str, Any]) -> Dict[str, float]:
+    positions_df = _portfolio_positions_dataframe(portfolio)
+    if positions_df.empty:
+        return {"count": 0.0, "cost_value": 0.0}
+
+    cost_value = (
+        pd.to_numeric(positions_df["Shares"], errors="coerce")
+        * pd.to_numeric(positions_df["CostBasis"], errors="coerce")
+    ).sum(min_count=1)
+    return {
+        "count": float(len(positions_df)),
+        "cost_value": float(cost_value if pd.notna(cost_value) else 0.0),
+    }
+
+
+def _render_sidebar_portfolio_summary() -> None:
+    portfolio = st.session_state.get("current_portfolio")
+    if not isinstance(portfolio, dict):
+        return
+
+    summary = _portfolio_cost_summary(portfolio)
+    if summary["count"] <= 0:
+        return
+
+    st.markdown("---")
+    st.caption("Portfolio Tracker Snapshot")
+    c1, c2 = st.columns(2)
+    c1.metric("Holdings", f"{int(summary['count'])}")
+    c2.metric("Cost Value", f"${summary['cost_value']:,.0f}")
+
+
+def _is_universe_snapshot_stale(metadata: Dict[str, Any], max_age_hours: int) -> bool:
+    last_refresh_raw = str(metadata.get("last_refresh", "")).strip()
+    if not last_refresh_raw:
+        return True
+
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw.replace("Z", "+00:00"))
+    except Exception:
+        return True
+
+    now_utc = datetime.now().astimezone(last_refresh.tzinfo)
+    age_seconds = (now_utc - last_refresh).total_seconds()
+    return age_seconds > float(max_age_hours) * 3600.0
+
+
+def _parse_targets_input(raw_text: str) -> list[float]:
+    if not raw_text.strip():
+        return []
+    values: list[float] = []
+    for item in raw_text.replace(";", ",").split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        parsed = pd.to_numeric(cleaned, errors="coerce")
+        if pd.notna(parsed) and float(parsed) > 0:
+            values.append(float(parsed))
+    return values
+
+
+def _render_selectable_results(results: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    if results.empty:
+        st.info("No matching stocks found with the current filters.")
+        return pd.DataFrame()
+
+    view = results.copy()
+    for internal_name, _ in SCREENER_DISPLAY_COLUMNS:
+        if internal_name not in view.columns:
+            view[internal_name] = np.nan
+
+    max_rows_cap = min(1000, max(1, len(view)))
+    max_rows = st.slider(
+        "Rows to display",
+        min_value=1,
+        max_value=max_rows_cap,
+        value=min(250, max_rows_cap),
+        key=f"{key_prefix}_rows_to_display",
+    )
+    display_view = pd.DataFrame({
+        display_name: view[internal_name]
+        for internal_name, display_name in SCREENER_DISPLAY_COLUMNS
+    }).head(max_rows).copy()
+    display_view.insert(0, "Select", False)
+
+    edited = st.data_editor(
+        display_view,
+        use_container_width=True,
+        hide_index=True,
+        key=f"{key_prefix}_table_editor",
+        disabled=[column for column in display_view.columns if column != "Select"],
+        num_rows="fixed",
+    )
+    selected_tickers = (
+        edited.loc[edited["Select"], "Ticker"]
+        .dropna()
+        .astype(str)
+        .str.upper()
+        .drop_duplicates()
+        .tolist()
+    )
+    if not selected_tickers:
+        return pd.DataFrame(columns=results.columns)
+    return results[results["Ticker"].astype(str).str.upper().isin(selected_tickers)].copy()
+
+
+def _render_screener_bulk_actions(
+    selected_rows: pd.DataFrame,
+    full_results: pd.DataFrame,
+    key_prefix: str,
+) -> None:
+    st.markdown("### Bulk Actions")
+    shares_to_add = st.number_input(
+        "Shares per selected ticker",
+        min_value=0.01,
+        value=1.0,
+        step=0.25,
+        key=f"{key_prefix}_shares_to_add",
+    )
+
+    add_clicked = st.button(
+        "Add selected to Portfolio",
+        key=f"{key_prefix}_add_to_portfolio",
+        disabled=selected_rows.empty,
+        use_container_width=True,
+    )
+    if add_clicked and not selected_rows.empty:
+        portfolio = dict(st.session_state.get("current_portfolio", load_portfolio("default")))
+        for _, row in selected_rows.iterrows():
+            ticker = str(row.get("Ticker", "")).strip().upper()
+            if not ticker:
+                continue
+            price_raw = pd.to_numeric(row.get("Price"), errors="coerce")
+            cost_basis = None if pd.isna(price_raw) else float(price_raw)
+            portfolio = add_position(
+                portfolio,
+                ticker=ticker,
+                shares=float(shares_to_add),
+                cost_basis=cost_basis,
+            )
+        st.session_state["current_portfolio"] = portfolio
+        _invalidate_portfolio_live_snapshot()
+        st.success(f"Added {len(selected_rows)} symbols into the current portfolio.")
+
+    export_source = st.radio(
+        "Export scope",
+        options=["Selected rows", "All results"],
+        horizontal=True,
+        key=f"{key_prefix}_export_scope",
+    )
+    export_df = selected_rows if (export_source == "Selected rows" and not selected_rows.empty) else full_results
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+    excel_bytes = _dataframe_to_excel_bytes(export_df)
+
+    e1, e2 = st.columns(2)
+    with e1:
+        st.download_button(
+            "Export CSV",
+            data=csv_bytes,
+            file_name=f"screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key=f"{key_prefix}_download_csv",
+        )
+    with e2:
+        if excel_bytes is None:
+            st.info("Excel export unavailable (openpyxl missing).")
+        else:
+            st.download_button(
+                "Export Excel",
+                data=excel_bytes,
+                file_name=f"screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"{key_prefix}_download_excel",
+            )
+
+    selected_tickers = selected_rows["Ticker"].astype(str).tolist() if not selected_rows.empty else []
+    selected_ticker = selected_tickers[0] if selected_tickers else ""
+
+    q1, q2 = st.columns(2)
+    if q1.button(
+        "Quick Analyze selected ticker",
+        disabled=(not selected_ticker),
+        key=f"{key_prefix}_quick_analyze",
+        use_container_width=True,
+    ) and selected_ticker:
+        history = _fetch_ticker_history_cached(selected_ticker)
+        if history.empty or "Close" not in history.columns:
+            st.warning(f"Could not load historical data for {selected_ticker}.")
+        else:
+            returns = pd.to_numeric(history["Close"], errors="coerce").pct_change().dropna()
+            if returns.empty:
+                st.warning(f"Insufficient data for quick analysis of {selected_ticker}.")
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Annualized Return", f"{calculate_annualized_return(returns):.2%}")
+                c2.metric("Volatility", f"{calculate_volatility(returns):.2%}")
+                c3.metric("Sharpe", f"{calculate_sharpe_ratio(returns):.3f}")
+                c4.metric("Max Drawdown", f"{calculate_max_drawdown(returns):.2%}")
+
+    if q2.button(
+        "Quick Chart selected ticker",
+        disabled=(not selected_ticker),
+        key=f"{key_prefix}_quick_chart",
+        use_container_width=True,
+    ) and selected_ticker:
+        history = _fetch_ticker_history_cached(selected_ticker)
+        if history.empty:
+            st.warning(f"Could not load chart data for {selected_ticker}.")
+        else:
+            close_column = "Adj Close" if "Adj Close" in history.columns else "Close"
+            if close_column in history.columns:
+                st.line_chart(history[close_column].rename(selected_ticker))
+            else:
+                st.warning(f"Price column not available for {selected_ticker}.")
+
+
+def _render_stock_picker_tab() -> None:
+    st.subheader("Stock Picker")
+    st.caption("Two-stage screener: cheap full-universe filtering first, expensive indicators only on shortlist.")
+
+    refresh_col, age_col, auto_col, status_col = st.columns([1, 1, 1.2, 2])
+    with age_col:
+        max_age_hours = st.number_input(
+            "Universe max age (hours)",
+            min_value=1,
+            max_value=168,
+            value=24,
+            step=1,
+            key="stock_picker_max_age_hours",
+        )
+    with auto_col:
+        auto_refresh_stale = st.toggle(
+            "Auto-refresh stale snapshot",
+            value=False,
+            key="stock_picker_auto_refresh_stale",
+            help="When enabled, stale universe snapshots are rebuilt automatically (can block the app rerun).",
+        )
+    with refresh_col:
+        refresh_clicked = st.button(
+            "Refresh Universe",
+            key="stock_picker_refresh_universe",
+            use_container_width=True,
+        )
+
+    if refresh_clicked:
+        get_universe.clear()
+        load_universe_snapshot.clear()
+        load_universe_metadata.clear()
+        with st.spinner("Refreshing universe snapshot... this can take longer."):
+            universe_df = get_universe(max_age_hours=int(max_age_hours), force_refresh=True)
+        load_universe_snapshot.clear()
+        load_universe_metadata.clear()
+    else:
+        universe_df = load_universe_snapshot()
+
+    metadata = load_universe_metadata()
+    snapshot_stale = _is_universe_snapshot_stale(metadata, int(max_age_hours))
+    if auto_refresh_stale and snapshot_stale and not refresh_clicked:
+        with st.spinner("Snapshot is stale, rebuilding universe..."):
+            universe_df = get_universe(max_age_hours=int(max_age_hours), force_refresh=False)
+        load_universe_snapshot.clear()
+        load_universe_metadata.clear()
+        metadata = load_universe_metadata()
+        snapshot_stale = _is_universe_snapshot_stale(metadata, int(max_age_hours))
+
+    with status_col:
+        st.write(
+            f"Snapshot status: **{metadata.get('status', 'unknown')}** | "
+            f"Rows: **{metadata.get('rows', len(universe_df))}**"
+        )
+        last_refresh = str(metadata.get("last_refresh", ""))
+        if last_refresh:
+            st.caption(f"Last refresh (UTC): {last_refresh}")
+        if snapshot_stale:
+            st.caption("Snapshot is stale. You can continue with cached data or run manual refresh.")
+
+    if universe_df.empty:
+        st.warning("Universe snapshot is empty. Use 'Refresh Universe' to build it.")
+        return
+
+    mode = st.radio(
+        "Screener mode",
+        options=["Classic Filter Mode", "AI Natural Language Mode"],
+        horizontal=True,
+        key="stock_picker_mode",
+    )
+
+    if mode == "Classic Filter Mode":
+        filter_col, result_col = st.columns([1.2, 2.2])
+        with filter_col:
+            mcap_min, mcap_max = _numeric_bounds(universe_df["MarketCap"] / 1e9, default_min=0.0, default_max=5000.0)
+            beta_min, beta_max = _numeric_bounds(universe_df["Beta"], default_min=-1.0, default_max=5.0)
+            price_min, price_max = _numeric_bounds(universe_df["Price"], default_min=0.5, default_max=2000.0)
+            avg_volume_min, _ = _numeric_bounds(universe_df["AvgVolume"], default_min=0.0, default_max=10_000_000.0)
+
+            sectors = sorted([value for value in universe_df["Sector"].dropna().astype(str).unique() if value.strip()])
+            industries = sorted([value for value in universe_df["Industry"].dropna().astype(str).unique() if value.strip()])
+            exchanges = sorted([value for value in universe_df["Exchange"].dropna().astype(str).unique() if value.strip()])
+
+            with st.form("classic_screener_form", clear_on_submit=False):
+                st.markdown("### Universe Filters")
+                market_cap_range_b = st.slider(
+                    "Market Cap range ($B)",
+                    min_value=float(max(0.0, mcap_min)),
+                    max_value=float(max(mcap_max, max(1.0, mcap_min + 1.0))),
+                    value=(float(max(0.0, mcap_min)), float(max(mcap_max, max(1.0, mcap_min + 1.0)))),
+                )
+                beta_range = st.slider(
+                    "Beta range",
+                    min_value=float(beta_min),
+                    max_value=float(beta_max),
+                    value=(float(beta_min), float(beta_max)),
+                )
+                price_range = st.slider(
+                    "Price range ($)",
+                    min_value=float(max(0.0, price_min)),
+                    max_value=float(max(price_max, max(1.0, price_min + 1.0))),
+                    value=(float(max(0.0, price_min)), float(max(price_max, max(1.0, price_min + 1.0)))),
+                )
+                min_avg_volume = st.number_input(
+                    "Minimum average volume",
+                    min_value=0.0,
+                    value=float(max(0.0, avg_volume_min)),
+                    step=50_000.0,
+                )
+                selected_sectors = st.multiselect("Sectors", sectors)
+                selected_industries = st.multiselect("Industries", industries)
+                selected_exchanges = st.multiselect("Exchanges", exchanges)
+                liquidity_prefilter = st.checkbox("Enable liquidity prefilter", value=True)
+
+                with st.expander("Valuation Filters", expanded=False):
+                    use_valuation = st.checkbox("Apply valuation filters", value=False)
+                    pe_max = st.number_input("Max P/E", min_value=0.0, value=35.0, step=1.0)
+                    forward_pe_max = st.number_input("Max Forward P/E", min_value=0.0, value=35.0, step=1.0)
+                    peg_max = st.number_input("Max PEG", min_value=0.0, value=3.0, step=0.1)
+
+                with st.expander("Growth Filters", expanded=False):
+                    use_growth = st.checkbox("Apply growth filters", value=False)
+                    revenue_growth_min = st.number_input("Min Revenue Growth", value=0.05, step=0.01, format="%.3f")
+                    earnings_growth_min = st.number_input("Min Earnings Growth", value=0.05, step=0.01, format="%.3f")
+
+                with st.expander("Quality Filters", expanded=False):
+                    use_quality = st.checkbox("Apply quality filters", value=False)
+                    roe_min = st.number_input("Min ROE", value=0.05, step=0.01, format="%.3f")
+                    roa_min = st.number_input("Min ROA", value=0.02, step=0.01, format="%.3f")
+
+                with st.expander("Momentum & Dividend Filters", expanded=False):
+                    use_momentum = st.checkbox("Apply momentum filters", value=False)
+                    return_52w_min = st.number_input("Min 52w Return", value=0.0, step=0.02, format="%.3f")
+                    use_dividend = st.checkbox("Apply dividend filters", value=False)
+                    dividend_yield_min = st.number_input("Min Dividend Yield", value=0.0, step=0.005, format="%.4f")
+
+                with st.expander("Ranking Weights", expanded=False):
+                    value_weight = st.slider("Value weight", 0.0, 3.0, 1.0, 0.1)
+                    growth_weight = st.slider("Growth weight", 0.0, 3.0, 1.0, 0.1)
+                    quality_weight = st.slider("Quality weight", 0.0, 3.0, 1.0, 0.1)
+                    momentum_weight = st.slider("Momentum weight", 0.0, 3.0, 1.0, 0.1)
+                    stability_weight = st.slider("Stability weight", 0.0, 3.0, 1.0, 0.1)
+                    dividend_weight = st.slider("Dividend weight", 0.0, 3.0, 0.5, 0.1)
+
+                technical_limit = st.slider("Technical indicator shortlist size", 25, 400, 150, 25)
+                run_classic = st.form_submit_button("Run Classic Screen", type="primary", use_container_width=True)
+
+            if run_classic:
+                valuation_filters = {}
+                if use_valuation:
+                    valuation_filters = {
+                        "PE": (None, float(pe_max)),
+                        "ForwardPE": (None, float(forward_pe_max)),
+                        "PEG": (None, float(peg_max)),
+                    }
+
+                growth_filters = {}
+                if use_growth:
+                    growth_filters = {
+                        "RevenueGrowth": (float(revenue_growth_min), None),
+                        "EarningsGrowth": (float(earnings_growth_min), None),
+                    }
+
+                quality_filters = {}
+                if use_quality:
+                    quality_filters = {
+                        "ROE": (float(roe_min), None),
+                        "ROA": (float(roa_min), None),
+                    }
+
+                momentum_filters = {}
+                if use_momentum:
+                    momentum_filters = {"Return52W": (float(return_52w_min), None)}
+
+                dividend_filters = {}
+                if use_dividend:
+                    dividend_filters = {"DividendYield": (float(dividend_yield_min), None)}
+
+                filtered = apply_classic_filters(
+                    df=universe_df,
+                    market_cap_range=(market_cap_range_b[0] * 1e9, market_cap_range_b[1] * 1e9),
+                    sectors=selected_sectors,
+                    industries=selected_industries,
+                    exchanges=selected_exchanges,
+                    beta_range=beta_range,
+                    price_range=price_range,
+                    min_avg_volume=float(min_avg_volume),
+                    valuation_filters=valuation_filters,
+                    growth_filters=growth_filters,
+                    quality_filters=quality_filters,
+                    momentum_filters=momentum_filters,
+                    dividend_filters=dividend_filters,
+                    liquidity_prefilter=bool(liquidity_prefilter),
+                )
+
+                weighted = {
+                    "value": value_weight,
+                    "growth": growth_weight,
+                    "quality": quality_weight,
+                    "momentum": momentum_weight,
+                    "stability": stability_weight,
+                    "dividend": dividend_weight,
+                }
+
+                ranked = rank_stocks(calculate_quant_score(filtered, weighted), sort_by="QuantScore", ascending=False)
+                shortlist_size = min(int(technical_limit), len(ranked))
+                if shortlist_size > 0:
+                    with st.spinner("Calculating technical indicators for shortlist..."):
+                        technical = apply_technical_indicators(ranked.head(shortlist_size))
+                    technical_cols = [column for column in ["Ticker", "RSI", "MACD", "Volatility", "Drawdown"] if column in technical.columns]
+                    ranked = ranked.merge(technical[technical_cols], on="Ticker", how="left")
+                    ranked = rank_stocks(calculate_quant_score(ranked, weighted), sort_by="QuantScore", ascending=False)
+
+                st.session_state["stock_picker_results_classic"] = ranked
+                st.session_state["stock_picker_classic_info"] = (
+                    f"Stage 1: {len(filtered):,} matches | "
+                    f"Stage 2: indicators on top {shortlist_size:,} symbols"
+                )
+
+        with result_col:
+            st.markdown("### Classic Results")
+            if st.session_state.get("stock_picker_classic_info"):
+                st.caption(st.session_state["stock_picker_classic_info"])
+            classic_results = st.session_state.get("stock_picker_results_classic", pd.DataFrame())
+            selected_rows = _render_selectable_results(classic_results, "classic")
+            if not classic_results.empty:
+                _render_screener_bulk_actions(selected_rows, classic_results, "classic")
+
+    else:
+        query = st.text_area(
+            "Describe your stock screen in plain English",
+            height=160,
+            placeholder="Example: Find profitable large-cap semiconductor stocks with low debt, strong ROE, and positive momentum.",
+            key="stock_picker_ai_query",
+        )
+        analyze_clicked = st.button("Analyze with Groq", type="primary", key="stock_picker_ai_run", use_container_width=True)
+        if analyze_clicked:
+            with st.spinner("Parsing request and applying AI filters..."):
+                parsed = parse_ai_query(query)
+                results, explanation = apply_ai_query(query, universe_df, parsed_query=parsed)
+                st.session_state["stock_picker_ai_parsed"] = parsed
+                st.session_state["stock_picker_ai_explanation"] = explanation
+                st.session_state["stock_picker_results_ai"] = results
+
+        parsed_payload = st.session_state.get("stock_picker_ai_parsed")
+        if parsed_payload:
+            with st.expander("Parsed Filters (JSON)", expanded=True):
+                st.json(parsed_payload)
+        explanation_text = st.session_state.get("stock_picker_ai_explanation")
+        if explanation_text:
+            st.info(explanation_text)
+
+        ai_results = st.session_state.get("stock_picker_results_ai", pd.DataFrame())
+        st.markdown("### AI Results")
+        selected_rows = _render_selectable_results(ai_results, "ai")
+        if not ai_results.empty:
+            _render_screener_bulk_actions(selected_rows, ai_results, "ai")
+
+
+def _render_portfolio_tracker_tab() -> None:
+    st.subheader("Portfolio Tracker")
+    st.caption("Holdings are persisted as JSON files under data/portfolios/ and synced with session_state.")
+
+    available_portfolios = list_portfolios()
+    current_name = str(st.session_state.get("current_portfolio_name", "default"))
+    if current_name not in available_portfolios:
+        available_portfolios = [current_name, *available_portfolios]
+
+    c1, c2 = st.columns([2, 1])
+    selected_name = c1.selectbox(
+        "Saved portfolios",
+        options=available_portfolios if available_portfolios else ["default"],
+        index=0,
+        key="portfolio_tracker_selected_name",
+    )
+    if c2.button("Load Portfolio", key="portfolio_tracker_load", use_container_width=True):
+        st.session_state["current_portfolio"] = load_portfolio(selected_name)
+        st.session_state["current_portfolio_name"] = selected_name
+        _invalidate_portfolio_live_snapshot()
+        st.success(f"Loaded portfolio '{selected_name}'.")
+
+    save_as_name = st.text_input(
+        "Save as portfolio name",
+        value=current_name,
+        key="portfolio_tracker_save_as_name",
+    )
+    s1, s2 = st.columns(2)
+    if s1.button("Save Current Portfolio", key="portfolio_tracker_save_current", use_container_width=True):
+        save_portfolio(st.session_state["current_portfolio"], st.session_state.get("current_portfolio_name", current_name))
+        st.success("Portfolio saved.")
+    if s2.button("Save As New JSON", key="portfolio_tracker_save_as", use_container_width=True):
+        save_portfolio(st.session_state["current_portfolio"], save_as_name)
+        st.session_state["current_portfolio_name"] = save_as_name
+        st.success(f"Saved portfolio as '{save_as_name}'.")
+
+    with st.expander("Add Position", expanded=False):
+        a1, a2 = st.columns(2)
+        new_ticker = a1.text_input("Ticker", key="portfolio_add_ticker").strip().upper()
+        new_shares = a2.number_input("Shares", min_value=0.01, value=1.0, step=0.25, key="portfolio_add_shares")
+        b1, b2 = st.columns(2)
+        new_cost = b1.number_input("Cost basis (optional)", min_value=0.0, value=0.0, step=0.1, key="portfolio_add_cost")
+        new_target = b2.number_input("Target weight (optional)", min_value=0.0, max_value=1.0, value=0.0, step=0.01, key="portfolio_add_target")
+        if st.button("Add / Update Position", key="portfolio_add_button", use_container_width=True):
+            cost_basis = None if new_cost <= 0 else float(new_cost)
+            target_weight = None if new_target <= 0 else float(new_target)
+            st.session_state["current_portfolio"] = add_position(
+                st.session_state["current_portfolio"],
+                ticker=new_ticker,
+                shares=float(new_shares),
+                cost_basis=cost_basis,
+                target_weight=target_weight,
+            )
+            _invalidate_portfolio_live_snapshot()
+            st.success(f"Position for {new_ticker} was added/updated.")
+
+    portfolio = st.session_state.get("current_portfolio", load_portfolio("default"))
+    positions_df = _portfolio_positions_dataframe(portfolio)
+
+    st.markdown("### Holdings")
+    if positions_df.empty:
+        st.info("No positions yet. Add holdings from Stock Picker or manually here.")
+    else:
+        edited_positions = st.data_editor(
+            positions_df,
+            use_container_width=True,
+            hide_index=True,
+            key="portfolio_positions_editor",
+            num_rows="dynamic",
+        )
+
+        u1, u2 = st.columns(2)
+        if u1.button("Apply Edits", key="portfolio_apply_edits", use_container_width=True):
+            updated_portfolio = dict(st.session_state["current_portfolio"])
+            updated_portfolio["positions"] = _positions_from_editor(edited_positions)
+            st.session_state["current_portfolio"] = updated_portfolio
+            _invalidate_portfolio_live_snapshot()
+            st.success("Position edits applied.")
+
+        removable = sorted(edited_positions["Ticker"].dropna().astype(str).str.upper().unique().tolist())
+        to_remove = u2.multiselect("Remove tickers", removable, key="portfolio_remove_tickers")
+        if st.button("Remove Selected Tickers", key="portfolio_remove_button", disabled=(len(to_remove) == 0), use_container_width=True):
+            updated = st.session_state["current_portfolio"]
+            for ticker in to_remove:
+                updated = remove_position(updated, ticker)
+            st.session_state["current_portfolio"] = updated
+            _invalidate_portfolio_live_snapshot()
+            st.success(f"Removed {len(to_remove)} ticker(s).")
+
+    if st.button("Refresh Live Valuation", key="portfolio_refresh_live", use_container_width=True) or "portfolio_live_holdings" not in st.session_state:
+        with st.spinner("Fetching latest prices for holdings..."):
+            holdings, summary = compute_live_values(st.session_state["current_portfolio"])
+        st.session_state["portfolio_live_holdings"] = holdings
+        st.session_state["portfolio_live_summary"] = summary
+
+    holdings = st.session_state.get("portfolio_live_holdings", pd.DataFrame())
+    summary = st.session_state.get("portfolio_live_summary", {})
+
+    if isinstance(summary, dict):
+        v1, v2, v3, v4 = st.columns(4)
+        v1.metric("Market Value", f"${float(summary.get('TotalMarketValue', 0.0)):,.0f}")
+        v2.metric("Cost Value", f"${float(summary.get('TotalCostValue', 0.0)):,.0f}")
+        v3.metric("P&L", f"${float(summary.get('TotalPnL', 0.0)):,.0f}")
+        v4.metric("Priced Positions", int(summary.get("PricedPositions", 0.0)))
+
+    if isinstance(holdings, pd.DataFrame) and not holdings.empty:
+        st.dataframe(holdings, use_container_width=True, hide_index=True)
+        tolerance = st.slider(
+            "Rebalance tolerance",
+            min_value=0.01,
+            max_value=0.10,
+            value=0.03,
+            step=0.005,
+            key="portfolio_rebalance_tolerance",
+        )
+        suggestions = generate_rebalance_suggestions(holdings, tolerance=float(tolerance))
+        st.markdown("### Rebalance Suggestions")
+        if suggestions.empty:
+            st.success("Current weights are within tolerance or no target weights were provided.")
+        else:
+            st.dataframe(suggestions, use_container_width=True, hide_index=True)
+
+
+def _render_swing_tracker_tab() -> None:
+    st.subheader("Swing Tracker")
+    st.caption(
+        "Discretionary swing-trade journal with stop rationale discipline, "
+        "time-stop monitoring, lifecycle tracking, and post-trade review."
+    )
+
+    trades = refresh_swing_trades()
+    overview = build_discipline_overview(trades)
+
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("Total Trades", int(overview.get("total_trades", 0.0)))
+    s2.metric("Open", int(overview.get("open_trades", 0.0)))
+    s3.metric("Overdue", int(overview.get("overdue_trades", 0.0)))
+    s4.metric("Win Rate", f"{float(overview.get('win_rate', 0.0)):.1%}")
+    s5.metric("Avg Discipline", f"{float(overview.get('avg_discipline_score', 0.0)):.1f}")
+
+    try:
+        streamlit_secrets = st.secrets
+    except Exception:
+        streamlit_secrets = None
+    ai_api_key = resolve_swing_tracker_api_key(streamlit_secrets=streamlit_secrets)
+
+    swing_tabs = st.tabs(["New Plan", "Open Trades", "Close Trade", "History", "Analytics"])
+
+    with swing_tabs[0]:
+        st.markdown("### Create New Trade Plan")
+        p1, p2, p3 = st.columns(3)
+        account_size = p1.number_input(
+            "Account Size ($)",
+            min_value=1_000.0,
+            value=100_000.0,
+            step=1_000.0,
+            key="swing_new_account_size",
+        )
+        risk_percent = p2.number_input(
+            "Risk Per Trade (%)",
+            min_value=0.1,
+            max_value=10.0,
+            value=1.0,
+            step=0.1,
+            key="swing_new_risk_percent",
+        )
+        initial_status = p3.selectbox(
+            "Initial Status",
+            options=["planned", "open"],
+            index=0,
+            key="swing_new_initial_status",
+        )
+
+        t1, t2, t3 = st.columns(3)
+        ticker = t1.text_input("Ticker", key="swing_new_ticker").strip().upper()
+        direction = t2.selectbox("Direction", options=["long", "short"], key="swing_new_direction")
+        setup_type = t3.text_input("Setup Type", key="swing_new_setup_type").strip()
+        thesis = st.text_area(
+            "Thesis",
+            height=120,
+            key="swing_new_thesis",
+            placeholder="Why does this setup have edge, and what invalidates it?",
+        )
+
+        x1, x2, x3 = st.columns(3)
+        entry_price = x1.number_input(
+            "Planned Entry",
+            min_value=0.01,
+            value=100.0,
+            step=0.01,
+            key="swing_new_entry_price",
+        )
+        stop_type = x2.selectbox(
+            "Stop Type",
+            options=["structural", "atr", "fixed_risk", "time_stop"],
+            key="swing_new_stop_type",
+        )
+        trade_entry_date = x3.date_input(
+            "Entry Date (for open status)",
+            value=datetime.now().date(),
+            key="swing_new_entry_date",
+        )
+
+        structural_price: float | None = None
+        atr_value: float | None = None
+        atr_multiple: float | None = None
+        fixed_risk_percent: float | None = None
+        manual_stop_loss: float | None = None
+
+        if stop_type == "structural":
+            structural_price = st.number_input(
+                "Structural Stop Level",
+                min_value=0.01,
+                value=max(0.01, float(entry_price) * 0.95),
+                step=0.01,
+                key="swing_new_structural_price",
+            )
+        elif stop_type == "atr":
+            a1, a2 = st.columns(2)
+            atr_value = a1.number_input(
+                "ATR Value",
+                min_value=0.0001,
+                value=max(0.01, float(entry_price) * 0.02),
+                step=0.01,
+                key="swing_new_atr_value",
+            )
+            atr_multiple = a2.number_input(
+                "ATR Multiple",
+                min_value=0.25,
+                value=2.0,
+                step=0.25,
+                key="swing_new_atr_multiple",
+            )
+        elif stop_type == "fixed_risk":
+            fixed_risk_percent = st.number_input(
+                "Fixed Risk Stop (%)",
+                min_value=0.1,
+                max_value=25.0,
+                value=5.0,
+                step=0.1,
+                key="swing_new_fixed_risk_pct",
+            )
+        else:
+            z1, z2 = st.columns(2)
+            fixed_risk_percent = z1.number_input(
+                "Fallback Fixed Risk Stop (%)",
+                min_value=0.0,
+                max_value=25.0,
+                value=3.0,
+                step=0.1,
+                key="swing_new_time_stop_risk_pct",
+                help="Used only if manual hard stop is left blank.",
+            )
+            manual_stop_loss = z2.number_input(
+                "Manual Hard Stop (optional)",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                key="swing_new_manual_stop",
+            )
+            manual_stop_loss = None if float(manual_stop_loss) <= 0 else float(manual_stop_loss)
+
+        y1, y2, y3 = st.columns(3)
+        target_price_raw = y1.number_input(
+            "Primary Target",
+            min_value=0.0,
+            value=max(0.0, float(entry_price) * 1.1),
+            step=0.01,
+            key="swing_new_target_price",
+        )
+        time_stop_days = int(
+            y2.number_input(
+                "Time Stop (days)",
+                min_value=1,
+                value=8,
+                step=1,
+                key="swing_new_time_stop_days",
+            )
+        )
+        planned_holding_days = int(
+            y3.number_input(
+                "Planned Holding (days)",
+                min_value=1,
+                value=10,
+                step=1,
+                key="swing_new_planned_holding_days",
+            )
+        )
+
+        targets_text = st.text_input(
+            "Additional Targets (comma-separated)",
+            key="swing_new_targets_text",
+            placeholder="Example: 112.5, 118.0",
+        )
+        notes = st.text_area("Planning Notes", height=100, key="swing_new_notes")
+
+        computed_stop_loss: float | None = None
+        stop_error = ""
+        try:
+            computed_stop_loss = calculate_stop_loss(
+                direction=direction,
+                entry_price=float(entry_price),
+                stop_type=stop_type,
+                structural_price=structural_price,
+                atr_value=atr_value,
+                atr_multiple=atr_multiple,
+                fixed_risk_percent=fixed_risk_percent,
+                manual_stop_loss=manual_stop_loss,
+            )
+        except Exception as exc:
+            stop_error = str(exc)
+
+        computed_position_size: float | None = None
+        sizing_error = ""
+        if computed_stop_loss is not None:
+            try:
+                computed_position_size = calculate_position_size_for_trade(
+                    account_size=float(account_size),
+                    risk_percent=float(risk_percent),
+                    entry_price=float(entry_price),
+                    stop_loss=float(computed_stop_loss),
+                )
+            except Exception as exc:
+                sizing_error = str(exc)
+
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Computed Stop", "-" if computed_stop_loss is None else f"{computed_stop_loss:.2f}")
+        d2.metric(
+            "Position Size",
+            "-" if computed_position_size is None else f"{computed_position_size:,.2f}",
+        )
+        risk_amount = 0.0
+        if computed_stop_loss is not None and computed_position_size is not None:
+            risk_amount = abs(float(entry_price) - float(computed_stop_loss)) * float(computed_position_size)
+        d3.metric("Risk Amount", f"${risk_amount:,.2f}")
+
+        if stop_error:
+            st.error(stop_error)
+        if sizing_error:
+            st.error(sizing_error)
+
+        deterministic_rationale = ""
+        if computed_stop_loss is not None:
+            deterministic_rationale = build_stop_rationale(
+                direction=direction,
+                stop_type=stop_type,
+                entry_price=float(entry_price),
+                stop_loss=float(computed_stop_loss),
+                time_stop_days=int(time_stop_days),
+                atr_value=atr_value,
+                atr_multiple=atr_multiple,
+                fixed_risk_percent=fixed_risk_percent,
+            )
+
+        with st.expander("Groq AI Helper (Optional)", expanded=False):
+            if not ai_api_key:
+                st.info("GROQ_API_KEY not found. AI helper is disabled; deterministic flow remains active.")
+
+            ai1, ai2, ai3 = st.columns(3)
+            if ai1.button("Summarize Thesis", key="swing_ai_thesis_btn", use_container_width=True):
+                st.session_state["swing_ai_thesis_result"] = summarize_trade_thesis(
+                    ticker=ticker,
+                    direction=direction,
+                    thesis=thesis,
+                    api_key=ai_api_key,
+                )
+            if ai2.button("Classify Setup", key="swing_ai_setup_btn", use_container_width=True):
+                st.session_state["swing_ai_setup_result"] = classify_setup_type(
+                    ticker=ticker,
+                    direction=direction,
+                    thesis=thesis,
+                    api_key=ai_api_key,
+                )
+            if ai3.button(
+                "Draft Stop Rationale",
+                key="swing_ai_stop_btn",
+                use_container_width=True,
+                disabled=(computed_stop_loss is None),
+            ):
+                stop_payload = {
+                    "ticker": ticker,
+                    "direction": direction,
+                    "entry_price": float(entry_price),
+                    "stop_type": stop_type,
+                    "stop_loss": computed_stop_loss,
+                    "time_stop_days": int(time_stop_days),
+                    "planned_holding_days": int(planned_holding_days),
+                    "thesis": thesis,
+                }
+                stop_result = generate_ai_stop_rationale(
+                    trade_payload=stop_payload,
+                    api_key=ai_api_key,
+                )
+                st.session_state["swing_ai_stop_result"] = stop_result
+                if stop_result.get("available"):
+                    st.session_state["swing_new_stop_rationale"] = str(
+                        stop_result.get("stop_rationale_summary", "")
+                    )
+
+            thesis_ai = st.session_state.get("swing_ai_thesis_result")
+            if isinstance(thesis_ai, dict):
+                st.caption("Thesis summary payload")
+                st.json({
+                    "available": thesis_ai.get("available", False),
+                    "thesis_summary": thesis_ai.get("thesis_summary", ""),
+                    "risk_highlights": thesis_ai.get("risk_highlights", []),
+                    "execution_focus": thesis_ai.get("execution_focus", []),
+                    "error": thesis_ai.get("error", ""),
+                })
+
+            setup_ai = st.session_state.get("swing_ai_setup_result")
+            if isinstance(setup_ai, dict):
+                st.caption("Setup classification payload")
+                st.json({
+                    "available": setup_ai.get("available", False),
+                    "setup_type": setup_ai.get("setup_type", ""),
+                    "confidence": setup_ai.get("confidence", 0.0),
+                    "reasoning_tags": setup_ai.get("reasoning_tags", []),
+                    "error": setup_ai.get("error", ""),
+                })
+
+            stop_ai = st.session_state.get("swing_ai_stop_result")
+            if isinstance(stop_ai, dict):
+                st.caption("Stop rationale payload")
+                st.json({
+                    "available": stop_ai.get("available", False),
+                    "stop_rationale_summary": stop_ai.get("stop_rationale_summary", ""),
+                    "invalidators": stop_ai.get("invalidators", []),
+                    "checklist": stop_ai.get("checklist", []),
+                    "time_stop_rule": stop_ai.get("time_stop_rule", ""),
+                    "error": stop_ai.get("error", ""),
+                })
+
+        if "swing_new_stop_rationale" not in st.session_state:
+            st.session_state["swing_new_stop_rationale"] = deterministic_rationale
+        elif (
+            deterministic_rationale
+            and not str(st.session_state.get("swing_new_stop_rationale", "")).strip()
+        ):
+            st.session_state["swing_new_stop_rationale"] = deterministic_rationale
+
+        stop_rationale = st.text_area(
+            "Stop-Loss Rationale",
+            height=120,
+            key="swing_new_stop_rationale",
+        )
+
+        if deterministic_rationale:
+            st.caption(f"Deterministic rationale helper: {deterministic_rationale}")
+
+        if st.button(
+            "Create Trade Plan",
+            type="primary",
+            key="swing_create_trade_btn",
+            use_container_width=True,
+        ):
+            if computed_stop_loss is None:
+                st.error("Cannot create trade: stop-loss is invalid.")
+            elif computed_position_size is None or computed_position_size <= 0:
+                st.error("Cannot create trade: position size calculation failed.")
+            else:
+                primary_target = None if float(target_price_raw) <= 0 else float(target_price_raw)
+                target_list = _parse_targets_input(targets_text)
+                if primary_target is not None:
+                    target_list = [primary_target, *[item for item in target_list if item != primary_target]]
+
+                entry_date_value = trade_entry_date if initial_status == "open" else None
+                try:
+                    trade = create_trade(
+                        ticker=ticker,
+                        direction=direction,
+                        setup_type=setup_type or "unspecified",
+                        thesis=thesis,
+                        entry_price=float(entry_price),
+                        stop_loss=float(computed_stop_loss),
+                        stop_type=stop_type,
+                        stop_rationale=stop_rationale,
+                        target_price=primary_target,
+                        targets=target_list,
+                        time_stop_days=int(time_stop_days),
+                        planned_holding_days=int(planned_holding_days),
+                        risk_percent=float(risk_percent),
+                        position_size=float(computed_position_size),
+                        status=initial_status,
+                        entry_date=entry_date_value,
+                        notes=notes,
+                    )
+                    updated_trades = upsert_swing_trade(trades, trade)
+                    save_swing_trade_book(updated_trades)
+                    st.success(f"Trade plan created for {trade.ticker} ({trade.id}).")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Trade plan validation failed: {exc}")
+
+    with swing_tabs[1]:
+        st.markdown("### Open Trades")
+        active_trades = open_trade_rows(trades)
+        planned_trades = [item for item in trades if item.status == "planned"]
+        if not active_trades:
+            st.info("No open trades right now.")
+        else:
+            active_df = pd.DataFrame(trades_to_rows(active_trades))
+            active_df = active_df.sort_values(
+                by=["Status", "ActualHoldDays"],
+                ascending=[True, False],
+            )
+            active_cols = [
+                "ID",
+                "Ticker",
+                "Direction",
+                "Setup",
+                "Status",
+                "EntryDate",
+                "Entry",
+                "Stop",
+                "Target",
+                "PlannedHoldDays",
+                "TimeStopDays",
+                "ActualHoldDays",
+                "HoldDelta",
+                "PositionSize",
+                "Notional",
+                "RiskAmount",
+                "DisciplineScore",
+            ]
+            active_df = active_df[[column for column in active_cols if column in active_df.columns]]
+
+            o1, o2, o3 = st.columns(3)
+            o1.metric("Open Trades", int(overview.get("open_trades", 0.0)))
+            o2.metric("Overdue Trades", int(overview.get("overdue_trades", 0.0)))
+            o3.metric(
+                "Capital Trapped (Overdue)",
+                f"${float(overview.get('capital_trapped_overdue', 0.0)):,.0f}",
+            )
+
+            def _highlight_overdue(row: pd.Series) -> list[str]:
+                if str(row.get("Status", "")).lower() == "overdue":
+                    return ["background-color: #ffe6e6"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                active_df.style.apply(_highlight_overdue, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            overdue_symbols = sorted(
+                active_df.loc[active_df["Status"] == "overdue", "Ticker"]
+                .dropna()
+                .astype(str)
+                .str.upper()
+                .unique()
+                .tolist()
+            )
+            if overdue_symbols:
+                st.warning(f"Overdue trades needing action: {', '.join(overdue_symbols)}")
+
+        if planned_trades:
+            st.markdown("### Planned (Not Open Yet)")
+            planned_df = pd.DataFrame(trades_to_rows(planned_trades))
+            planned_cols = [
+                "ID",
+                "Ticker",
+                "Direction",
+                "Setup",
+                "Status",
+                "Entry",
+                "Stop",
+                "Target",
+                "PlannedHoldDays",
+                "TimeStopDays",
+                "RiskPct",
+                "PositionSize",
+                "StopType",
+                "StopRationale",
+            ]
+            planned_df = planned_df[[column for column in planned_cols if column in planned_df.columns]]
+            st.dataframe(planned_df, use_container_width=True, hide_index=True)
+
+    with swing_tabs[2]:
+        st.markdown("### Close Trade")
+        closable = open_trade_rows(trades)
+        if not closable:
+            st.info("No open or overdue trades to close.")
+        else:
+            close_options = {
+                f"{trade.id} | {trade.ticker} | {trade.status}": trade.id for trade in closable
+            }
+            selected_label = st.selectbox(
+                "Select trade",
+                options=list(close_options.keys()),
+                key="swing_close_selected_trade",
+            )
+            selected_id = close_options[selected_label]
+            selected_trade = next(item for item in closable if item.id == selected_id)
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Entry", f"{selected_trade.entry_price:.2f}")
+            c2.metric("Stop", f"{selected_trade.stop_loss:.2f}")
+            c3.metric("Position", f"{selected_trade.position_size:,.2f}")
+            c4.metric("Current Status", selected_trade.status)
+
+            q1, q2 = st.columns(2)
+            exit_price = q1.number_input(
+                "Exit Price",
+                min_value=0.01,
+                value=float(selected_trade.entry_price),
+                step=0.01,
+                key="swing_close_exit_price",
+            )
+            exit_date = q2.date_input(
+                "Exit Date",
+                value=datetime.now().date(),
+                key="swing_close_exit_date",
+            )
+
+            r1, r2 = st.columns(2)
+            exit_reason = r1.selectbox(
+                "Exit Reason",
+                options=["target_hit", "stop_loss", "time_stop", "manual_exit", "thesis_invalidated"],
+                key="swing_close_exit_reason",
+            )
+            final_status = r2.selectbox(
+                "Final Status",
+                options=["closed", "invalidated"],
+                index=0,
+                key="swing_close_final_status",
+            )
+            close_notes = st.text_area("Post-Trade Notes", height=120, key="swing_close_notes")
+
+            if st.button(
+                "Summarize Review (AI)",
+                key="swing_ai_post_review_btn",
+                use_container_width=True,
+            ):
+                st.session_state["swing_ai_post_review_result"] = summarize_post_trade_review(
+                    trade_payload=selected_trade.to_dict(),
+                    review_notes=close_notes,
+                    api_key=ai_api_key,
+                )
+
+            post_ai = st.session_state.get("swing_ai_post_review_result")
+            if isinstance(post_ai, dict):
+                st.caption("Post-trade review payload")
+                st.json({
+                    "available": post_ai.get("available", False),
+                    "review_summary": post_ai.get("review_summary", ""),
+                    "discipline_observations": post_ai.get("discipline_observations", []),
+                    "process_improvements": post_ai.get("process_improvements", []),
+                    "error": post_ai.get("error", ""),
+                })
+
+            if st.button(
+                "Close Selected Trade",
+                type="primary",
+                key="swing_close_trade_btn",
+                use_container_width=True,
+            ):
+                try:
+                    updated_trades, closed_trade = close_swing_trade(
+                        trades,
+                        trade_id=selected_trade.id,
+                        exit_price=float(exit_price),
+                        exit_date=exit_date,
+                        exit_reason=exit_reason,
+                        notes=close_notes,
+                        final_status=final_status,
+                    )
+                    save_swing_trade_book(updated_trades)
+                    st.success(
+                        f"Closed {closed_trade.ticker} | "
+                        f"PnL: ${float(closed_trade.realized_pnl or 0.0):,.2f} | "
+                        f"R: {float(closed_trade.realized_r_multiple or 0.0):.2f}"
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed to close trade: {exc}")
+
+    with swing_tabs[3]:
+        st.markdown("### Historical Trades")
+        history_trades = historical_trade_rows(trades)
+        if not history_trades:
+            st.info("No closed or invalidated trades yet.")
+        else:
+            history_df = pd.DataFrame(trades_to_rows(history_trades))
+            history_df = history_df.sort_values(
+                by=["ExitDate", "EntryDate"],
+                ascending=[False, False],
+            )
+            history_cols = [
+                "ID",
+                "Ticker",
+                "Direction",
+                "Setup",
+                "Status",
+                "EntryDate",
+                "ExitDate",
+                "Entry",
+                "Exit",
+                "RealizedPnL",
+                "RMultiple",
+                "PlannedHoldDays",
+                "ActualHoldDays",
+                "HoldDelta",
+                "DisciplineScore",
+                "ExitReason",
+                "Notes",
+            ]
+            history_df = history_df[[column for column in history_cols if column in history_df.columns]]
+            st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+            recent_row = history_df.iloc[0]
+            st.markdown("### Recent Closed Trade Review")
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            rc1.metric("Ticker", str(recent_row.get("Ticker", "")))
+            rc2.metric("PnL", f"${float(recent_row.get('RealizedPnL', 0.0) or 0.0):,.2f}")
+            rc3.metric("R Multiple", f"{float(recent_row.get('RMultiple', 0.0) or 0.0):.2f}")
+            rc4.metric("Discipline", f"{float(recent_row.get('DisciplineScore', 0.0) or 0.0):.1f}")
+            st.write(f"**Exit Reason:** {recent_row.get('ExitReason', '-')}")
+            st.write(f"**Notes:** {recent_row.get('Notes', '-')}")
+
+    with swing_tabs[4]:
+        st.markdown("### Analytics")
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Closed Trades", int(overview.get("closed_trades", 0.0)))
+        a2.metric("Win Rate", f"{float(overview.get('win_rate', 0.0)):.1%}")
+        a3.metric("Avg R Multiple", f"{float(overview.get('avg_r_multiple', 0.0)):.2f}")
+        a4.metric(
+            "Trapped Capital",
+            f"${float(overview.get('capital_trapped_overdue', 0.0)):,.0f}",
+        )
+
+        all_rows = pd.DataFrame(trades_to_rows(trades))
+        if all_rows.empty:
+            st.info("Create a few trades to unlock analytics.")
+        else:
+            status_counts = (
+                all_rows["Status"]
+                .fillna("unknown")
+                .astype(str)
+                .value_counts()
+                .rename_axis("Status")
+                .reset_index(name="Count")
+            )
+            st.markdown("#### Trade Status Distribution")
+            st.dataframe(status_counts, use_container_width=True, hide_index=True)
+            st.bar_chart(status_counts.set_index("Status"))
+
+            discipline_table = (
+                all_rows.groupby("Status", dropna=False)["DisciplineScore"]
+                .mean()
+                .reset_index()
+                .rename(columns={"DisciplineScore": "AvgDisciplineScore"})
+                .sort_values(by="AvgDisciplineScore", ascending=False)
+            )
+            st.markdown("#### Discipline Overview")
+            st.dataframe(discipline_table, use_container_width=True, hide_index=True)
+
+            holding_table = all_rows[all_rows["Status"].isin(["closed", "invalidated"])].copy()
+            if not holding_table.empty:
+                st.markdown("#### Planned vs Actual Holding")
+                holding_table = holding_table[
+                    [
+                        "Ticker",
+                        "Status",
+                        "PlannedHoldDays",
+                        "TimeStopDays",
+                        "ActualHoldDays",
+                        "HoldDelta",
+                        "RMultiple",
+                        "DisciplineScore",
+                    ]
+                ].sort_values(by="HoldDelta", ascending=False)
+                st.dataframe(holding_table, use_container_width=True, hide_index=True)
+
+            overdue_table = all_rows[all_rows["Status"] == "overdue"].copy()
+            if not overdue_table.empty:
+                st.markdown("#### Overdue Trade Focus")
+                overdue_table = overdue_table[
+                    [
+                        "Ticker",
+                        "EntryDate",
+                        "ActualHoldDays",
+                        "PlannedHoldDays",
+                        "TimeStopDays",
+                        "HoldDelta",
+                        "Notional",
+                        "RiskAmount",
+                    ]
+                ].sort_values(by="ActualHoldDays", ascending=False)
+                st.dataframe(overdue_table, use_container_width=True, hide_index=True)
+
+
 if "analysis_result" not in st.session_state:
     st.session_state["analysis_result"] = None
+if "current_portfolio_name" not in st.session_state:
+    st.session_state["current_portfolio_name"] = "default"
+if "current_portfolio" not in st.session_state:
+    st.session_state["current_portfolio"] = load_portfolio(st.session_state["current_portfolio_name"])
 
 
 with st.sidebar:
@@ -653,6 +2085,7 @@ with st.sidebar:
     )
 
     run_clicked = st.button("Evaluate Portfolio", type="primary", use_container_width=True)
+    _render_sidebar_portfolio_summary()
 
 
 if run_clicked:
@@ -694,6 +2127,13 @@ analysis_result = st.session_state.get("analysis_result")
 
 if analysis_result is None:
     st.info("Configure the portfolio in the sidebar and click 'Evaluate Portfolio'.")
+    standalone_tabs = st.tabs(["Stock Picker", "Portfolio Tracker", "Swing Tracker"])
+    with standalone_tabs[0]:
+        _render_stock_picker_tab()
+    with standalone_tabs[1]:
+        _render_portfolio_tracker_tab()
+    with standalone_tabs[2]:
+        _render_swing_tracker_tab()
     st.stop()
 
 
@@ -726,7 +2166,21 @@ history_records = analysis_result.get("history_records", [])
 
 
 st.header("Modular Dashboard")
-dashboard_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "Summary", "History", "Compare"])
+dashboard_tabs = st.tabs(
+    [
+        "Data",
+        "Models",
+        "Signals",
+        "Backtest",
+        "News",
+        "Summary",
+        "History",
+        "Compare",
+        "Stock Picker",
+        "Portfolio Tracker",
+        "Swing Tracker",
+    ]
+)
 
 with dashboard_tabs[0]:
     st.subheader("Data snapshot")
@@ -901,6 +2355,19 @@ with dashboard_tabs[7]:
                 st.warning(f"Comparison failed: {exc}")
     else:
         st.info("Need at least two saved runs for comparison.")
+
+with dashboard_tabs[8]:
+    _render_stock_picker_tab()
+
+with dashboard_tabs[9]:
+    _render_portfolio_tracker_tab()
+
+with dashboard_tabs[10]:
+    _render_swing_tracker_tab()
+
+st.markdown("---")
+
+render_economics_questions_section(analysis_result)
 
 st.markdown("---")
 
