@@ -38,6 +38,12 @@ from ui.dashboard_shell import (
     inject_dashboard_styles,
     render_dashboard_preferences,
 )
+from ui.auth_page import (
+    init_multi_user_mode,
+    get_current_user_id,
+    render_logout_button,
+    render_user_info,
+)
 from src.ai import generate_ai_review, resolve_groq_api_key
 from src.analytics import (
     build_deterministic_fallback_review,
@@ -148,6 +154,47 @@ DEFAULT_TICKERS = [
 
 st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_chart:")
 inject_dashboard_styles()
+
+# ---- Authentication initialization ----
+# First, check if user is already logged in
+token = st.session_state.get("auth_token")
+user_id = None
+
+if token:
+    from src.auth import is_authenticated, get_current_user
+    if is_authenticated(token):
+        user = get_current_user(token)
+        if user:
+            user_id = user.get("id")
+            st.session_state["auth_user"] = user
+
+# If not authenticated, show login screen
+if user_id is None:
+    from ui.auth_page import render_login_form
+    
+    # Initialize auth database if needed
+    from src.auth import init_auth_database
+    init_auth_database()
+    
+    # Run migration if needed
+    from src.auth.migrations import get_migration_status, migrate_existing_data
+    status = get_migration_status()
+    if not status.get("completed"):
+        result = migrate_existing_data()
+        if result.get("success") and not result.get("already_migrated"):
+            st.info(f"🎉 Multi-user system initialized! Default user: admin / admin123")
+            st.info(f"   {result.get('files_migrated', {}).get('total', 0)} files migrated.")
+    
+    # Show login form and stop
+    render_login_form()
+    st.stop()
+
+# Show user info and logout in sidebar if logged in
+with st.sidebar:
+    render_user_info()
+    render_logout_button()
+    st.markdown("---")
+
 st.title("Quant Platform v0.4")
 st.caption(
     "Portfolio evaluator with deterministic scoring, AI review via Groq, "
@@ -1810,7 +1857,10 @@ def _render_portfolio_tracker_tab() -> None:
     st.subheader("Portfolio Tracker")
     st.caption("Holdings are persisted as JSON files under data/portfolios/ and synced with session_state.")
 
-    available_portfolios = list_portfolios()
+    # Get current user_id for data isolation
+    user_id = get_current_user_id()
+
+    available_portfolios = list_portfolios(user_id=user_id)
     current_name = str(st.session_state.get("current_portfolio_name", "default"))
     if current_name not in available_portfolios:
         available_portfolios = [current_name, *available_portfolios]
@@ -1823,7 +1873,7 @@ def _render_portfolio_tracker_tab() -> None:
         key="portfolio_tracker_selected_name",
     )
     if c2.button("Load Portfolio", key="portfolio_tracker_load", use_container_width=True):
-        st.session_state["current_portfolio"] = load_portfolio(selected_name)
+        st.session_state["current_portfolio"] = load_portfolio(selected_name, user_id=user_id)
         st.session_state["current_portfolio_name"] = selected_name
         _invalidate_portfolio_live_snapshot()
         st.success(f"Loaded portfolio '{selected_name}'.")
@@ -1835,10 +1885,10 @@ def _render_portfolio_tracker_tab() -> None:
     )
     s1, s2 = st.columns(2)
     if s1.button("Save Current Portfolio", key="portfolio_tracker_save_current", use_container_width=True):
-        save_portfolio(st.session_state["current_portfolio"], st.session_state.get("current_portfolio_name", current_name))
+        save_portfolio(st.session_state["current_portfolio"], st.session_state.get("current_portfolio_name", current_name), user_id=user_id)
         st.success("Portfolio saved.")
     if s2.button("Save As New JSON", key="portfolio_tracker_save_as", use_container_width=True):
-        save_portfolio(st.session_state["current_portfolio"], save_as_name)
+        save_portfolio(st.session_state["current_portfolio"], save_as_name, user_id=user_id)
         st.session_state["current_portfolio_name"] = save_as_name
         st.success(f"Saved portfolio as '{save_as_name}'.")
 
@@ -1862,7 +1912,7 @@ def _render_portfolio_tracker_tab() -> None:
             _invalidate_portfolio_live_snapshot()
             st.success(f"Position for {new_ticker} was added/updated.")
 
-    portfolio = st.session_state.get("current_portfolio", load_portfolio("default"))
+    portfolio = st.session_state.get("current_portfolio", load_portfolio("default", user_id=user_id))
     positions_df = _portfolio_positions_dataframe(portfolio)
 
     st.markdown("### Holdings")
@@ -1936,7 +1986,10 @@ def _render_swing_tracker_tab() -> None:
         "time-stop monitoring, lifecycle tracking, and post-trade review."
     )
 
-    trades = refresh_swing_trades()
+    # Get current user_id for data isolation
+    user_id = get_current_user_id()
+
+    trades = refresh_swing_trades(user_id=user_id)
     overview = build_discipline_overview(trades)
 
     s1, s2, s3, s4, s5 = st.columns(5)
@@ -2294,7 +2347,7 @@ def _render_swing_tracker_tab() -> None:
                         notes=notes,
                     )
                     updated_trades = upsert_swing_trade(trades, trade)
-                    save_swing_trade_book(updated_trades)
+                    save_swing_trade_book(updated_trades, user_id=user_id)
                     st.success(f"Trade plan created for {trade.ticker} ({trade.id}).")
                     st.rerun()
                 except Exception as exc:
@@ -2474,7 +2527,7 @@ def _render_swing_tracker_tab() -> None:
                         notes=close_notes,
                         final_status=final_status,
                     )
-                    save_swing_trade_book(updated_trades)
+                    save_swing_trade_book(updated_trades, user_id=user_id)
                     st.success(
                         f"Closed {closed_trade.ticker} | "
                         f"PnL: ${float(closed_trade.realized_pnl or 0.0):,.2f} | "

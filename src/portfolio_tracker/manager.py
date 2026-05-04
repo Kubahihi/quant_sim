@@ -12,7 +12,23 @@ import yfinance as yf
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PORTFOLIO_DIR = PROJECT_ROOT / "data" / "portfolios"
+
+# Legacy portfolio directory (for backward compatibility)
+LEGACY_PORTFOLIO_DIR = PROJECT_ROOT / "data" / "portfolios"
+
+
+def _get_portfolio_dir(user_id: int | None = None) -> Path:
+    """
+    Get the portfolio directory for a user.
+    
+    If user_id is provided, returns user-specific directory.
+    Otherwise, returns the legacy directory for backward compatibility.
+    """
+    if user_id is not None:
+        user_dir = PROJECT_ROOT / "data" / "users" / str(user_id) / "portfolios"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        return user_dir
+    return LEGACY_PORTFOLIO_DIR
 
 
 def _timestamp_now() -> str:
@@ -24,8 +40,10 @@ def _sanitize_name(name: str) -> str:
     return cleaned.strip("_") or "default"
 
 
-def _portfolio_path(name: str) -> Path:
-    return PORTFOLIO_DIR / f"{_sanitize_name(name)}.json"
+def _portfolio_path(name: str, user_id: int | None = None) -> Path:
+    """Get the file path for a portfolio, scoped to user if provided."""
+    portfolio_dir = _get_portfolio_dir(user_id)
+    return portfolio_dir / f"{_sanitize_name(name)}.json"
 
 
 def _normalize_position(raw: dict[str, Any]) -> dict[str, Any]:
@@ -53,18 +71,29 @@ def _default_portfolio(name: str = "default") -> dict[str, Any]:
     }
 
 
-def list_portfolios() -> list[str]:
-    """List saved portfolio names from `data/portfolios`."""
-    PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
+def list_portfolios(user_id: int | None = None) -> list[str]:
+    """
+    List saved portfolio names for a user.
+    
+    If user_id is provided, lists portfolios from user-specific directory.
+    Otherwise, lists from legacy directory for backward compatibility.
+    """
+    portfolio_dir = _get_portfolio_dir(user_id)
+    portfolio_dir.mkdir(parents=True, exist_ok=True)
     names: list[str] = []
-    for file_path in sorted(PORTFOLIO_DIR.glob("*.json")):
+    for file_path in sorted(portfolio_dir.glob("*.json")):
         names.append(file_path.stem)
     return names
 
 
-def load_portfolio(name: str = "default") -> dict[str, Any]:
-    """Load a portfolio JSON file or return an empty default structure."""
-    path = _portfolio_path(name)
+def load_portfolio(name: str = "default", user_id: int | None = None) -> dict[str, Any]:
+    """
+    Load a portfolio JSON file or return an empty default structure.
+    
+    If user_id is provided, loads from user-specific directory.
+    Otherwise, loads from legacy directory for backward compatibility.
+    """
+    path = _portfolio_path(name, user_id)
     if not path.exists():
         return _default_portfolio(name)
 
@@ -89,11 +118,17 @@ def load_portfolio(name: str = "default") -> dict[str, Any]:
     return portfolio
 
 
-def save_portfolio(portfolio: dict[str, Any], name: str | None = None) -> Path:
-    """Persist a portfolio dictionary under `data/portfolios`."""
-    PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
+def save_portfolio(portfolio: dict[str, Any], name: str | None = None, user_id: int | None = None) -> Path:
+    """
+    Persist a portfolio dictionary.
+    
+    If user_id is provided, saves to user-specific directory.
+    Otherwise, saves to legacy directory for backward compatibility.
+    """
+    portfolio_dir = _get_portfolio_dir(user_id)
+    portfolio_dir.mkdir(parents=True, exist_ok=True)
     portfolio_name = _sanitize_name(name or str(portfolio.get("name", "default")))
-    path = _portfolio_path(portfolio_name)
+    path = _portfolio_path(portfolio_name, user_id)
 
     normalized = _default_portfolio(portfolio_name)
     normalized["created_at"] = str(portfolio.get("created_at") or normalized["created_at"])
