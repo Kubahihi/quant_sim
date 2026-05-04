@@ -7,6 +7,27 @@ from typing import Any, Dict, List
 
 from .results import RunRecord
 
+# Project root
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Legacy run history directory (for backward compatibility)
+LEGACY_HISTORY_DIR = PROJECT_ROOT / "data" / "run_history"
+
+
+def _get_history_dir(user_id: int | None = None) -> Path:
+    """
+    Get the run history directory for a user.
+    
+    If user_id is provided, returns user-specific directory.
+    Otherwise, returns the legacy directory for backward compatibility.
+    """
+    if user_id is not None:
+        user_dir = PROJECT_ROOT / "data" / "users" / str(user_id) / "run_history"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        return user_dir
+    LEGACY_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    return LEGACY_HISTORY_DIR
+
 
 def _json_default(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
@@ -14,8 +35,18 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
-def ensure_history_dir(base_dir: str | Path = "data/run_history") -> Path:
-    path = Path(base_dir)
+def ensure_history_dir(base_dir: str | Path | None = None, user_id: int | None = None) -> Path:
+    """
+    Ensure the run history directory exists.
+    
+    If base_dir is explicitly provided, use it (for testing/custom paths).
+    If user_id is provided, use user-specific directory.
+    Otherwise, use legacy directory for backward compatibility.
+    """
+    if base_dir is not None:
+        path = Path(base_dir)
+    else:
+        path = _get_history_dir(user_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

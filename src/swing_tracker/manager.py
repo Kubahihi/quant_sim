@@ -19,7 +19,24 @@ from .stop_logic import validate_stop_loss_side
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SWING_TRACKER_PATH = PROJECT_ROOT / "data" / "swing_tracker" / "trades.json"
+
+# Legacy swing tracker path (for backward compatibility) - also exported for __init__.py
+LEGACY_SWING_TRACKER_PATH = PROJECT_ROOT / "data" / "swing_tracker" / "trades.json"
+SWING_TRACKER_PATH = LEGACY_SWING_TRACKER_PATH  # Alias for backward compatibility
+
+
+def _get_swing_tracker_path(user_id: int | None = None) -> Path:
+    """
+    Get the swing tracker file path for a user.
+    
+    If user_id is provided, returns user-specific path.
+    Otherwise, returns the legacy path for backward compatibility.
+    """
+    if user_id is not None:
+        user_dir = PROJECT_ROOT / "data" / "users" / str(user_id) / "swing_tracker"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        return user_dir / "trades.json"
+    return LEGACY_SWING_TRACKER_PATH
 
 
 def _utc_now_iso() -> str:
@@ -38,14 +55,28 @@ def _default_payload() -> dict[str, Any]:
     }
 
 
-def _resolve_storage_path(storage_path: str | Path | None = None) -> Path:
-    if storage_path is None:
-        return SWING_TRACKER_PATH
-    return Path(storage_path)
+def _resolve_storage_path(storage_path: str | Path | None = None, user_id: int | None = None) -> Path:
+    """
+    Resolve the storage path for swing tracker data.
+    
+    If storage_path is explicitly provided, use it (for testing/custom paths).
+    If user_id is provided, use user-specific path.
+    Otherwise, use legacy path for backward compatibility.
+    """
+    if storage_path is not None:
+        return Path(storage_path)
+    return _get_swing_tracker_path(user_id)
 
 
-def load_trade_book(storage_path: str | Path | None = None) -> list[SwingTrade]:
-    path = _ensure_storage(_resolve_storage_path(storage_path))
+def load_trade_book(storage_path: str | Path | None = None, user_id: int | None = None) -> list[SwingTrade]:
+    """
+    Load trade book from storage.
+    
+    Args:
+        storage_path: Explicit storage path (overrides user_id).
+        user_id: User ID for user-specific storage (used if storage_path not provided).
+    """
+    path = _ensure_storage(_resolve_storage_path(storage_path, user_id))
     if not path.exists():
         return []
 
@@ -72,8 +103,17 @@ def load_trade_book(storage_path: str | Path | None = None) -> list[SwingTrade]:
 def save_trade_book(
     trades: Iterable[SwingTrade],
     storage_path: str | Path | None = None,
+    user_id: int | None = None,
 ) -> Path:
-    path = _ensure_storage(_resolve_storage_path(storage_path))
+    """
+    Save trade book to storage.
+    
+    Args:
+        trades: The trades to save.
+        storage_path: Explicit storage path (overrides user_id).
+        user_id: User ID for user-specific storage (used if storage_path not provided).
+    """
+    path = _ensure_storage(_resolve_storage_path(storage_path, user_id))
     refreshed, _ = refresh_trade_book(list(trades))
     payload = _default_payload()
     payload["trades"] = [item.to_dict() for item in refreshed]
@@ -273,11 +313,19 @@ def trades_to_rows(trades: Iterable[SwingTrade]) -> list[dict[str, Any]]:
 
 def refresh_and_persist(
     storage_path: str | Path | None = None,
+    user_id: int | None = None,
 ) -> list[SwingTrade]:
-    trades = load_trade_book(storage_path=storage_path)
+    """
+    Refresh trade book and persist changes.
+    
+    Args:
+        storage_path: Explicit storage path (overrides user_id).
+        user_id: User ID for user-specific storage (used if storage_path not provided).
+    """
+    trades = load_trade_book(storage_path=storage_path, user_id=user_id)
     refreshed, changed = refresh_trade_book(trades)
     if changed:
-        save_trade_book(refreshed, storage_path=storage_path)
+        save_trade_book(refreshed, storage_path=storage_path, user_id=user_id)
     return refreshed
 
 
