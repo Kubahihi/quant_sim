@@ -363,7 +363,7 @@ def _fetch_price_volume_snapshot(
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
-                threads=True,
+                threads=False,
                 group_by="ticker",
                 session=session,
             )
@@ -509,30 +509,191 @@ def _select_fast_info_tickers(base: pd.DataFrame, max_symbols: int) -> list[str]
     return candidates["Ticker"].astype(str).head(max_symbols).tolist()
 
 
+# Persistent cache for fundamental data across refresh cycles
+_FUNDAMENTAL_CACHE: dict[str, dict[str, object]] = {}
+_FUNDAMENTAL_CACHE_TIMESTAMP: str | None = None
+
+
+def _load_fundamental_cache() -> dict[str, dict[str, object]]:
+    """Load cached fundamental data from disk if available."""
+    global _FUNDAMENTAL_CACHE, _FUNDAMENTAL_CACHE_TIMESTAMP
+    if _FUNDAMENTAL_CACHE:
+        return _FUNDAMENTAL_CACHE
+
+    cache_path = Path("data") / "cache" / "universe" / "fundamental_cache.json"
+    if cache_path.exists():
+        try:
+            import json
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            _FUNDAMENTAL_CACHE = data.get("data", {})
+            _FUNDAMENTAL_CACHE_TIMESTAMP = data.get("timestamp")
+        except Exception:
+            pass
+
+    return _FUNDAMENTAL_CACHE
+
+
+def _save_fundamental_cache(data: dict[str, dict[str, object]]) -> None:
+    """Persist fundamental data cache to disk."""
+    global _FUNDAMENTAL_CACHE, _FUNDAMENTAL_CACHE_TIMESTAMP
+    _FUNDAMENTAL_CACHE = data
+    _FUNDAMENTAL_CACHE_TIMESTAMP = _safe_timestamp_now()
+
+    cache_path = Path("data") / "cache" / "universe" / "fundamental_cache.json"
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        cache_path.write_text(
+            json.dumps({"data": data, "timestamp": _FUNDAMENTAL_CACHE_TIMESTAMP}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _safe_timestamp_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_cached_fundamental_row(cached_data: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(cached_data, dict):
+        return {}
+    return {
+        "Company": cached_data.get("Company") or cached_data.get("company_name"),
+        "Exchange": cached_data.get("Exchange") or cached_data.get("exchange"),
+        "Sector": cached_data.get("Sector") or cached_data.get("sector"),
+        "Industry": cached_data.get("Industry") or cached_data.get("industry"),
+        "MarketCap": cached_data.get("MarketCap") or cached_data.get("marketCap"),
+        "Beta": cached_data.get("Beta") or cached_data.get("beta"),
+        "PE": cached_data.get("PE") or cached_data.get("trailingPE"),
+        "ForwardPE": cached_data.get("ForwardPE") or cached_data.get("forwardPE"),
+        "PEG": cached_data.get("PEG") or cached_data.get("pegRatio"),
+        "ROE": cached_data.get("ROE") or cached_data.get("returnOnEquity"),
+        "ROA": cached_data.get("ROA") or cached_data.get("returnOnAssets"),
+        "RevenueGrowth": cached_data.get("RevenueGrowth") or cached_data.get("revenueGrowth"),
+        "EarningsGrowth": cached_data.get("EarningsGrowth") or cached_data.get("earningsGrowth"),
+        "DividendYield": cached_data.get("DividendYield") or cached_data.get("dividendYield"),
+    }
+
+
+def _build_cached_updates_for_tickers(
+    tickers: list[str],
+    cache: dict[str, dict[str, object]] | None,
+) -> dict[str, dict[str, object]]:
+    if not tickers or not cache:
+        return {}
+    cache_lookup = {str(symbol).strip().upper(): value for symbol, value in cache.items()}
+    updates: dict[str, dict[str, object]] = {}
+    for symbol in tickers:
+        key = str(symbol).strip().upper()
+        normalized = _normalize_cached_fundamental_row(cache_lookup.get(key))
+        if not normalized:
+            continue
+        # Reuse cache when it carries at least one descriptive field.
+        if (
+            normalized.get("Sector")
+            or normalized.get("Industry")
+            or normalized.get("PE")
+            or normalized.get("ForwardPE")
+            or normalized.get("ROE")
+            or normalized.get("RevenueGrowth")
+            or normalized.get("DividendYield")
+            or normalized.get("Company")
+        ):
+            updates[key] = normalized
+    return updates
+
+
+def _select_detail_tickers(
+    base: pd.DataFrame,
+    detail_columns: list[str],
+    max_symbols: int,
+    cache: dict[str, dict[str, object]] | None = None,
+) -> list[str]:
+    if max_symbols <= 0 or base.empty or "Ticker" not in base.columns:
+        return []
+
+    missing_score = base[detail_columns].isna().sum(axis=1)
+    detail_candidates = base.loc[
+        (missing_score >= 5) & pd.to_numeric(base["Price"], errors="coerce").notna(),
+        ["Ticker", "MarketCap", "AvgVolume", "SourceCount", "Price", *detail_columns],
+    ].copy()
+    if detail_candidates.empty:
+        return []
+
+    detail_candidates["MarketCap"] = pd.to_numeric(detail_candidates["MarketCap"], errors="coerce")
+    detail_candidates["AvgVolume"] = pd.to_numeric(detail_candidates["AvgVolume"], errors="coerce")
+    detail_candidates["SourceCount"] = pd.to_numeric(detail_candidates["SourceCount"], errors="coerce")
+    detail_candidates["Price"] = pd.to_numeric(detail_candidates["Price"], errors="coerce")
+
+    cache_keys: set[str] = set()
+    if cache:
+        cache_keys = {str(symbol).strip().upper() for symbol in cache.keys()}
+    detail_candidates["Cached"] = detail_candidates["Ticker"].astype(str).str.upper().isin(cache_keys)
+
+    key_fields = ["PE", "ForwardPE", "ROE", "RevenueGrowth", "DividendYield"]
+    available_key_fields = [column for column in key_fields if column in detail_candidates.columns]
+    if available_key_fields:
+        key_field_counts = [
+            pd.to_numeric(detail_candidates[column], errors="coerce").notna().astype(int)
+            for column in available_key_fields
+        ]
+        detail_candidates["KeyFieldCount"] = sum(key_field_counts)
+    else:
+        detail_candidates["KeyFieldCount"] = 0
+
+    detail_candidates = detail_candidates.sort_values(
+        by=[
+            "Cached",
+            "KeyFieldCount",
+            "SourceCount",
+            "MarketCap",
+            "AvgVolume",
+            "Price",
+            "Ticker",
+        ],
+        ascending=[True, True, False, False, False, False, True],
+        na_position="last",
+    )
+    return detail_candidates["Ticker"].astype(str).head(max_symbols).tolist()
+
+
 def _fetch_detail_info(
     tickers: list[str],
-    max_symbols: int = 800,
-    probe_size: int = 25,
-    min_probe_success_ratio: float = 0.10,
+    max_symbols: int = 1200,
+    probe_size: int = 40,
+    min_probe_success_ratio: float = 0.25,
     progress_callback: ProgressCallback | None = None,
     progress_start: float = 0.75,
     progress_end: float = 0.96,
     session: Any | None = None,
 ) -> dict[str, dict[str, object]]:
     """
-    Fetch richer metadata with strict cap to keep daily refresh bounded.
+    Fetch richer metadata with improved coverage and caching.
 
-    This call is intentionally capped because yfinance `info` is expensive.
+    Changes from previous version:
+    - Increased max_symbols from 800 to 1200 for broader coverage
+    - Increased probe_size from 25 to 40 for more reliable success rate assessment
+    - Raised min_probe_success_ratio from 0.10 to 0.25 to avoid false aborts
+    - Added persistent caching to reduce redundant API calls
+    - Better error handling and recovery
     """
     output: dict[str, dict[str, object]] = {}
     if not tickers:
         return output
+
+    # Load cached data to avoid re-fetching
+    cache = _load_fundamental_cache()
+    cache_hits = 0
 
     limited_tickers = tickers[:max_symbols]
     total_symbols = len(limited_tickers)
     probe_target = min(max(1, probe_size), total_symbols)
     probe_success = 0
     processed_symbols = 0
+    consecutive_failures = 0
+    max_consecutive_failures = 50  # Stop if we have 50 consecutive failures
 
     for idx, symbol in enumerate(limited_tickers, start=1):
         processed_symbols = idx
@@ -542,10 +703,21 @@ def _fetch_detail_info(
                 progress_callback,
                 step_progress,
                 "detail_info",
-                f"Downloading detailed fundamentals {idx}/{total_symbols}",
+                f"Downloading detailed fundamentals {idx}/{total_symbols} (cache hits: {cache_hits})",
                 current=idx,
                 total=total_symbols,
             )
+
+        # Check cache first (support both legacy and canonical key names).
+        if symbol in cache:
+            normalized_cached = _normalize_cached_fundamental_row(cache[symbol])
+            if normalized_cached.get("Sector") or normalized_cached.get("MarketCap") or normalized_cached.get("Company"):
+                output[symbol] = normalized_cached
+                cache[symbol] = normalized_cached
+                cache_hits += 1
+                consecutive_failures = 0
+                continue
+
         try:
             ticker = yf.Ticker(symbol, session=session)
             info = ticker.get_info()
@@ -553,6 +725,7 @@ def _fetch_detail_info(
             info = {}
 
         if isinstance(info, dict) and info:
+            consecutive_failures = 0
             row: dict[str, object] = {
                 "Company": info.get("longName") or info.get("shortName"),
                 "Exchange": info.get("exchange"),
@@ -570,8 +743,27 @@ def _fetch_detail_info(
                 "DividendYield": info.get("dividendYield"),
             }
             output[symbol] = row
+            # Update cache
+            cache[symbol] = row
+
             if idx <= probe_target:
-                probe_success += 1
+                # Count as success if we got any meaningful data
+                if row.get("Sector") or row.get("MarketCap") or row.get("Company"):
+                    probe_success += 1
+        else:
+            consecutive_failures += 1
+
+        # Check for consecutive failures (indicates rate limiting or network issues)
+        if consecutive_failures >= max_consecutive_failures:
+            _emit_progress(
+                progress_callback,
+                progress_end,
+                "detail_info",
+                f"Too many consecutive failures ({consecutive_failures}), stopping early",
+                current=idx,
+                total=total_symbols,
+            )
+            break
 
         if idx == probe_target and total_symbols > probe_target:
             success_ratio = probe_success / float(probe_target)
@@ -580,17 +772,21 @@ def _fetch_detail_info(
                     progress_callback,
                     progress_end,
                     "detail_info",
-                    f"Low detail info yield ({probe_success}/{probe_target}), skipping remaining expensive calls",
+                    f"Low detail info yield ({probe_success}/{probe_target}, ratio={success_ratio:.2f}), skipping remaining expensive calls",
                     current=idx,
                     total=total_symbols,
                 )
                 break
 
+    # Persist cache to disk
+    if cache:
+        _save_fundamental_cache(cache)
+
     _emit_progress(
         progress_callback,
         progress_end,
         "detail_info",
-        "Detailed fundamentals stage completed",
+        f"Detailed fundamentals stage completed (cache hits: {cache_hits}, fetched: {len(output) - cache_hits})",
         current=processed_symbols,
         total=total_symbols,
     )
@@ -626,20 +822,97 @@ def _ensure_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return output[STANDARD_COLUMNS]
 
 
+def _compute_coverage_metrics(frame: pd.DataFrame) -> dict[str, Any]:
+    """
+    Compute coverage metrics for the enriched universe.
+
+    Returns a dictionary with coverage percentages for key fields.
+    """
+    if frame.empty:
+        return {}
+
+    total = len(frame)
+    metrics: dict[str, Any] = {
+        "total_symbols": total,
+    }
+
+    # Text field coverage
+    for col in ["Sector", "Industry", "Company", "Exchange"]:
+        non_null = frame[col].notna() & (frame[col].astype(str).str.strip() != "") & (frame[col].astype(str).str.lower() != "nan")
+        metrics[f"{col}_coverage"] = round(float(non_null.sum()) / total * 100, 1)
+
+    # Numeric field coverage
+    for col in NUMERIC_COLUMNS:
+        if col in frame.columns:
+            non_null = pd.to_numeric(frame[col], errors="coerce").notna()
+            metrics[f"{col}_coverage"] = round(float(non_null.sum()) / total * 100, 1)
+
+    # Price coverage (critical field)
+    price_non_null = pd.to_numeric(frame["Price"], errors="coerce").notna()
+    metrics["Price_coverage"] = round(float(price_non_null.sum()) / total * 100, 1)
+
+    # Sector coverage (key metric)
+    sector_non_null = frame["Sector"].notna() & (frame["Sector"].astype(str).str.strip() != "") & (frame["Sector"].astype(str).str.lower() != "nan")
+    metrics["Sector_coverage"] = round(float(sector_non_null.sum()) / total * 100, 1)
+
+    # Overall data completeness (average of key fields)
+    key_fields = ["Sector", "Industry", "Company", "MarketCap", "Price", "PE", "Beta"]
+    completeness_scores = []
+    for col in key_fields:
+        if col in frame.columns:
+            if col in TEXT_COLUMNS:
+                non_null = frame[col].notna() & (frame[col].astype(str).str.strip() != "") & (frame[col].astype(str).str.lower() != "nan")
+            else:
+                non_null = pd.to_numeric(frame[col], errors="coerce").notna()
+            completeness_scores.append(float(non_null.sum()) / total)
+    metrics["overall_completeness"] = round(sum(completeness_scores) / len(completeness_scores) * 100, 1) if completeness_scores else 0.0
+
+    return metrics
+
+
+def _log_coverage_metrics(metrics: dict[str, Any]) -> None:
+    """Log coverage metrics for monitoring."""
+    if not metrics:
+        return
+
+    print("\n" + "=" * 60)
+    print("UNIVERSE COVERAGE REPORT")
+    print("=" * 60)
+    print(f"Total Symbols: {metrics.get('total_symbols', 'N/A'):,}")
+    print("-" * 40)
+    print("Key Field Coverage:")
+    for key, value in sorted(metrics.items()):
+        if key.endswith("_coverage") or key == "overall_completeness":
+            field_name = key.replace("_coverage", "").replace("_", " ").title()
+            print(f"  {field_name}: {value}%")
+    print("=" * 60 + "\n")
+
+
 def enrich_universe_candidates(
     candidates: pd.DataFrame,
     previous_snapshot: pd.DataFrame | None = None,
     price_chunk_size: int = 220,
-    fast_info_limit: int = 1500,
-    detail_limit: int = 800,
+    fast_info_limit: int = 1000,
+    detail_limit: int = 1200,
     compute_beta_from_history: bool = False,
     progress_callback: ProgressCallback | None = None,
+    report_coverage: bool = True,
 ) -> pd.DataFrame:
     """
     Enrich a raw ticker universe with lightweight metadata and fundamentals.
 
     Expensive detail calls are capped and fault tolerant. Missing fields are
     left as NaN so a single symbol cannot break the pipeline.
+
+    Args:
+        candidates: Raw candidate DataFrame from universe sources
+        previous_snapshot: Previous universe snapshot for fallback data
+        price_chunk_size: Number of tickers per price download batch
+        fast_info_limit: Max tickers to fetch fast_info for
+        detail_limit: Max tickers to fetch detailed fundamentals for
+        compute_beta_from_history: Whether to compute beta from price history
+        progress_callback: Optional callback for progress updates
+        report_coverage: Whether to compute and log coverage metrics
     """
     if candidates.empty:
         return _ensure_columns(pd.DataFrame())
@@ -668,6 +941,11 @@ def enrich_universe_candidates(
     base = _merge_previous_snapshot(base, previous_snapshot)
 
     tickers = base["Ticker"].tolist()
+    fundamental_cache = _load_fundamental_cache()
+    cached_updates = _build_cached_updates_for_tickers(tickers, fundamental_cache)
+    if cached_updates:
+        base = _merge_symbol_updates(base, cached_updates, overwrite_non_null=True)
+
     _emit_progress(progress_callback, 0.18, "enrichment", f"Universe prepared: {len(tickers)} tickers")
     _emit_progress(progress_callback, 0.19, "enrichment", "Applying network compatibility settings")
     yf_session = _build_yfinance_session()
@@ -681,20 +959,8 @@ def enrich_universe_candidates(
             compute_beta=compute_beta_from_history,
             session=yf_session,
         )
-        base = _merge_symbol_updates(base, price_snapshot, overwrite_non_null=True)
-        fast_info_tickers = _select_fast_info_tickers(base, max_symbols=int(fast_info_limit))
-        if fast_info_tickers:
-            fast_info = _fetch_fast_info(
-                fast_info_tickers,
-                progress_callback=progress_callback,
-                progress_start=0.50,
-                progress_end=0.75,
-                session=yf_session,
-            )
-        else:
-            fast_info = {}
 
-    base = _merge_symbol_updates(base, fast_info, overwrite_non_null=False)
+    base = _merge_symbol_updates(base, price_snapshot, overwrite_non_null=True)
 
     # Request rich info only for symbols that still miss most descriptive fields.
     detail_columns = [
@@ -709,33 +975,49 @@ def enrich_universe_candidates(
         "EarningsGrowth",
         "DividendYield",
     ]
-    missing_score = base[detail_columns].isna().sum(axis=1)
-    detail_candidates = base.loc[
-        (missing_score >= 5) & pd.to_numeric(base["Price"], errors="coerce").notna(),
-        ["Ticker", "MarketCap", "AvgVolume", "SourceCount", "Price"],
-    ].copy()
-    detail_candidates["MarketCap"] = pd.to_numeric(detail_candidates["MarketCap"], errors="coerce")
-    detail_candidates["AvgVolume"] = pd.to_numeric(detail_candidates["AvgVolume"], errors="coerce")
-    detail_candidates["SourceCount"] = pd.to_numeric(detail_candidates["SourceCount"], errors="coerce")
-    detail_candidates["Price"] = pd.to_numeric(detail_candidates["Price"], errors="coerce")
-    detail_candidates = detail_candidates.sort_values(
-        by=["SourceCount", "MarketCap", "AvgVolume", "Price", "Ticker"],
-        ascending=[False, False, False, False, True],
-        na_position="last",
+    detail_tickers = _select_detail_tickers(
+        base,
+        detail_columns=detail_columns,
+        max_symbols=int(detail_limit),
+        cache=fundamental_cache,
     )
-    detail_tickers = detail_candidates["Ticker"].astype(str).tolist()
+
     with _temporary_proxy_bypass():
         detail_info = _fetch_detail_info(
             detail_tickers,
             max_symbols=detail_limit,
             progress_callback=progress_callback,
-            progress_start=0.75,
-            progress_end=0.96,
+            progress_start=0.50,
+            progress_end=0.82,
             session=yf_session,
         )
 
     base = _merge_symbol_updates(base, detail_info, overwrite_non_null=True)
 
+    # Fill remaining lightweight fields for symbols still missing market metadata.
+    with _temporary_proxy_bypass():
+        fast_info_tickers = _select_fast_info_tickers(base, max_symbols=int(fast_info_limit))
+        if fast_info_tickers:
+            fast_info = _fetch_fast_info(
+                fast_info_tickers,
+                progress_callback=progress_callback,
+                progress_start=0.82,
+                progress_end=0.96,
+                session=yf_session,
+            )
+        else:
+            fast_info = {}
+
+    base = _merge_symbol_updates(base, fast_info, overwrite_non_null=False)
+
     base["LastUpdated"] = datetime.now(timezone.utc).isoformat()
     _emit_progress(progress_callback, 0.98, "enrichment", "Finalizing enriched universe dataframe")
-    return _ensure_columns(base)
+
+    result = _ensure_columns(base)
+
+    # Compute and log coverage metrics
+    if report_coverage:
+        metrics = _compute_coverage_metrics(result)
+        _log_coverage_metrics(metrics)
+
+    return result

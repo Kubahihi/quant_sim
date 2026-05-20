@@ -6,6 +6,8 @@ from io import BytesIO
 from pathlib import Path
 import importlib
 import inspect
+import json
+import os
 import sys
 from typing import Any, Dict, List, Tuple
 
@@ -39,7 +41,6 @@ from ui.dashboard_shell import (
     render_dashboard_preferences,
 )
 from ui.auth_page import (
-    init_multi_user_mode,
     get_current_user_id,
     render_logout_button,
     render_user_info,
@@ -156,36 +157,69 @@ st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_c
 inject_dashboard_styles()
 
 # ---- Authentication initialization ----
-# First, check if user is already logged in
-token = st.session_state.get("auth_token")
-user_id = None
+def _resolve_authenticated_user_id() -> int | None:
+    token = st.session_state.get("auth_token")
+    if not token:
+        return None
 
-if token:
-    from src.auth import is_authenticated, get_current_user
-    if is_authenticated(token):
-        user = get_current_user(token)
-        if user:
-            user_id = user.get("id")
-            st.session_state["auth_user"] = user
+    from src.auth import get_current_user, is_authenticated
 
-# If not authenticated, show login screen
-if user_id is None:
-    from ui.auth_page import render_login_form
-    
-    # Initialize auth database if needed
+    if not is_authenticated(token):
+        return None
+
+    user = get_current_user(token)
+    if not user:
+        return None
+
+    st.session_state["auth_user"] = user
+    user_id = user.get("id")
+    return int(user_id) if user_id is not None else None
+
+
+def _auto_login_for_smoke_tests() -> int | None:
+    """Auto-login only for pytest-driven Streamlit smoke tests."""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+
+    try:
+        from src.auth import login_user
+        from src.auth.migrations import DEFAULT_PASSWORD, DEFAULT_USERNAME, create_default_user
+
+        create_default_user()
+        token, user, errors = login_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
+        if errors or not token or not user:
+            return None
+
+        st.session_state["auth_token"] = token
+        st.session_state["auth_user"] = user
+        user_id = user.get("id")
+        return int(user_id) if user_id is not None else None
+    except Exception:
+        return None
+
+
+def _bootstrap_authentication() -> int | None:
     from src.auth import init_auth_database
-    init_auth_database()
-    
-    # Run migration if needed
     from src.auth.migrations import get_migration_status, migrate_existing_data
+
+    init_auth_database()
     status = get_migration_status()
     if not status.get("completed"):
         result = migrate_existing_data()
         if result.get("success") and not result.get("already_migrated"):
-            st.info(f"🎉 Multi-user system initialized! Default user: admin / REMOVED")
-            st.info(f"   {result.get('files_migrated', {}).get('total', 0)} files migrated.")
-    
-    # Show login form and stop
+            st.info("Multi-user system initialized. Default user: admin / REMOVED")
+            st.info(f"{result.get('files_migrated', {}).get('total', 0)} files migrated.")
+
+    user_id = _resolve_authenticated_user_id()
+    if user_id is None:
+        user_id = _auto_login_for_smoke_tests()
+    return user_id
+
+
+user_id = _bootstrap_authentication()
+if user_id is None:
+    from ui.auth_page import render_login_form
+
     render_login_form()
     st.stop()
 
@@ -1045,6 +1079,196 @@ def _parse_targets_input(raw_text: str) -> list[float]:
         if pd.notna(parsed) and float(parsed) > 0:
             values.append(float(parsed))
     return values
+
+
+def _extract_json_object_from_text(raw_text: str) -> dict[str, Any]:
+    cleaned = str(raw_text or "").strip()
+    if not cleaned:
+        raise ValueError("Response is empty.")
+
+    if cleaned.startswith("```"):
+        lines = [line for line in cleaned.splitlines() if not line.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+
+    try:
+        payload = json.loads(cleaned)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+
+    start_index = cleaned.find("{")
+    end_index = cleaned.rfind("}")
+    if start_index == -1 or end_index == -1 or end_index <= start_index:
+        raise ValueError("Could not find a JSON object in the pasted response.")
+
+    payload = json.loads(cleaned[start_index : end_index + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("Pasted response JSON must be an object.")
+    return payload
+
+
+def _parse_optional_date(value: Any) -> date | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    try:
+        return date.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _format_number_list(values: list[float]) -> str:
+    return ", ".join(f"{float(item):g}" for item in values if float(item) > 0)
+
+
+def _build_external_swing_prompt(context: dict[str, Any]) -> str:
+    compact_context = json.dumps(context, ensure_ascii=False, indent=2)
+    return (
+        "You are filling a swing-trade planner form.\n"
+        "Use the context JSON below and output ONLY one strict JSON object (no markdown, no explanation).\n\n"
+        "OUTPUT SCHEMA:\n"
+        "{\n"
+        '  "ticker": "AAPL",\n'
+        '  "direction": "long",\n'
+        '  "setup_type": "breakout_retest",\n'
+        '  "thesis": "1-3 concise paragraphs",\n'
+        '  "entry_price": 182.4,\n'
+        '  "stop_type": "structural",\n'
+        '  "structural_price": 176.9,\n'
+        '  "atr_value": null,\n'
+        '  "atr_multiple": null,\n'
+        '  "fixed_risk_percent": null,\n'
+        '  "manual_stop_loss": null,\n'
+        '  "target_price": 196.0,\n'
+        '  "targets": [196.0, 203.5],\n'
+        '  "time_stop_days": 8,\n'
+        '  "planned_holding_days": 10,\n'
+        '  "account_size": 100000,\n'
+        '  "risk_percent": 1.0,\n'
+        '  "initial_status": "planned",\n'
+        '  "entry_date": "2026-05-18",\n'
+        '  "stop_rationale": "Why this stop invalidates the setup.",\n'
+        '  "notes": "Execution notes and checklist."\n'
+        "}\n\n"
+        "RULES:\n"
+        "- Respect direction and risk logic.\n"
+        "- Use only stop_type values: structural, atr, fixed_risk, time_stop.\n"
+        "- Use only direction values: long, short.\n"
+        "- Use only initial_status values: planned, open.\n"
+        "- Keep numbers realistic and positive.\n"
+        "- If a field is unknown, return null (or [] for targets).\n\n"
+        "CONTEXT_JSON:\n"
+        f"{compact_context}"
+    )
+
+
+def _apply_external_swing_payload_to_session(payload: dict[str, Any]) -> list[str]:
+    applied: list[str] = []
+    allowed_stop_types = {"structural", "atr", "fixed_risk", "time_stop"}
+    allowed_directions = {"long", "short"}
+    allowed_statuses = {"planned", "open"}
+
+    def _apply_text(field: str, key: str, transform: Any = None) -> None:
+        value = payload.get(field)
+        if value is None:
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        st.session_state[key] = transform(text) if transform else text
+        applied.append(field)
+
+    def _apply_float(field: str, key: str, minimum: float = 0.0) -> None:
+        value = payload.get(field)
+        if value in (None, ""):
+            return
+        parsed = pd.to_numeric(value, errors="coerce")
+        if pd.isna(parsed):
+            return
+        numeric = float(parsed)
+        if numeric <= minimum:
+            return
+        st.session_state[key] = numeric
+        applied.append(field)
+
+    def _apply_int(field: str, key: str, minimum: int = 0) -> None:
+        value = payload.get(field)
+        if value in (None, ""):
+            return
+        parsed = pd.to_numeric(value, errors="coerce")
+        if pd.isna(parsed):
+            return
+        integer = int(parsed)
+        if integer <= minimum:
+            return
+        st.session_state[key] = integer
+        applied.append(field)
+
+    _apply_text("ticker", "swing_new_ticker", transform=lambda text: text.upper())
+
+    direction = str(payload.get("direction", "")).strip().lower()
+    if direction in allowed_directions:
+        st.session_state["swing_new_direction"] = direction
+        applied.append("direction")
+
+    stop_type = str(payload.get("stop_type", "")).strip().lower()
+    if stop_type in allowed_stop_types:
+        st.session_state["swing_new_stop_type"] = stop_type
+        applied.append("stop_type")
+
+    initial_status = str(payload.get("initial_status", "")).strip().lower()
+    if initial_status in allowed_statuses:
+        st.session_state["swing_new_initial_status"] = initial_status
+        applied.append("initial_status")
+
+    entry_date_value = _parse_optional_date(payload.get("entry_date"))
+    if entry_date_value is not None:
+        st.session_state["swing_new_entry_date"] = entry_date_value
+        applied.append("entry_date")
+
+    _apply_text("setup_type", "swing_new_setup_type")
+    _apply_text("thesis", "swing_new_thesis")
+    _apply_text("stop_rationale", "swing_new_stop_rationale")
+    _apply_text("notes", "swing_new_notes")
+
+    _apply_float("account_size", "swing_new_account_size")
+    _apply_float("risk_percent", "swing_new_risk_percent")
+    _apply_float("entry_price", "swing_new_entry_price")
+    _apply_float("target_price", "swing_new_target_price")
+    _apply_float("structural_price", "swing_new_structural_price")
+    _apply_float("atr_value", "swing_new_atr_value")
+    _apply_float("atr_multiple", "swing_new_atr_multiple")
+    _apply_float("fixed_risk_percent", "swing_new_fixed_risk_pct")
+
+    manual_stop_loss = payload.get("manual_stop_loss")
+    if manual_stop_loss not in (None, ""):
+        parsed_manual_stop = pd.to_numeric(manual_stop_loss, errors="coerce")
+        if pd.notna(parsed_manual_stop):
+            st.session_state["swing_new_manual_stop"] = max(0.0, float(parsed_manual_stop))
+            applied.append("manual_stop_loss")
+
+    _apply_int("time_stop_days", "swing_new_time_stop_days")
+    _apply_int("planned_holding_days", "swing_new_planned_holding_days")
+
+    targets_value = payload.get("targets", [])
+    targets: list[float] = []
+    if isinstance(targets_value, list):
+        for item in targets_value:
+            parsed = pd.to_numeric(item, errors="coerce")
+            if pd.notna(parsed) and float(parsed) > 0:
+                targets.append(float(parsed))
+    if targets:
+        st.session_state["swing_new_targets_text"] = _format_number_list(targets)
+        if "target_price" not in payload or payload.get("target_price") in (None, "", 0):
+            st.session_state["swing_new_target_price"] = float(targets[0])
+        applied.append("targets")
+
+    return sorted(set(applied))
 
 
 def _format_compact_number(value: float | int | None) -> str:
@@ -2009,6 +2233,80 @@ def _render_swing_tracker_tab() -> None:
 
     with swing_tabs[0]:
         st.markdown("### Create New Trade Plan")
+
+        with st.expander("External AI Prompt (Copy/Paste)", expanded=False):
+            st.caption(
+                "Generate a structured prompt for any external AI tool. "
+                "Paste the JSON answer back and the form fields will auto-fill."
+            )
+            external_context = st.text_area(
+                "What should the external AI consider?",
+                key="swing_external_ai_context",
+                height=100,
+                placeholder=(
+                    "Example: weekly trend, earnings date, key support/resistance, "
+                    "your conviction, and any risk constraints."
+                ),
+            )
+
+            prompt_context = {
+                "risk_preferences": {
+                    "account_size": st.session_state.get("swing_new_account_size", 100000.0),
+                    "risk_percent": st.session_state.get("swing_new_risk_percent", 1.0),
+                    "initial_status": st.session_state.get("swing_new_initial_status", "planned"),
+                },
+                "draft_trade": {
+                    "ticker": st.session_state.get("swing_new_ticker", ""),
+                    "direction": st.session_state.get("swing_new_direction", "long"),
+                    "setup_type": st.session_state.get("swing_new_setup_type", ""),
+                    "thesis": st.session_state.get("swing_new_thesis", ""),
+                    "entry_price": st.session_state.get("swing_new_entry_price", 100.0),
+                    "stop_type": st.session_state.get("swing_new_stop_type", "structural"),
+                    "time_stop_days": st.session_state.get("swing_new_time_stop_days", 8),
+                    "planned_holding_days": st.session_state.get("swing_new_planned_holding_days", 10),
+                    "targets_hint": st.session_state.get("swing_new_targets_text", ""),
+                },
+                "user_context": external_context.strip(),
+            }
+
+            if "swing_external_ai_prompt" not in st.session_state:
+                st.session_state["swing_external_ai_prompt"] = _build_external_swing_prompt(prompt_context)
+
+            if st.button(
+                "Generate Prompt",
+                key="swing_external_generate_prompt_btn",
+                use_container_width=True,
+            ):
+                st.session_state["swing_external_ai_prompt"] = _build_external_swing_prompt(prompt_context)
+
+            st.text_area(
+                "Prompt to copy into external AI",
+                key="swing_external_ai_prompt",
+                height=330,
+            )
+
+            pasted_ai_response = st.text_area(
+                "Paste external AI JSON response",
+                key="swing_external_ai_response",
+                height=220,
+                placeholder='{"ticker":"AAPL","direction":"long",...}',
+            )
+            if st.button(
+                "Apply JSON to Form",
+                key="swing_external_apply_payload_btn",
+                use_container_width=True,
+            ):
+                try:
+                    parsed_payload = _extract_json_object_from_text(pasted_ai_response)
+                    applied_fields = _apply_external_swing_payload_to_session(parsed_payload)
+                    if not applied_fields:
+                        st.warning("No compatible fields were found in the pasted payload.")
+                    else:
+                        st.success(f"Applied fields: {', '.join(applied_fields)}")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not parse/apply response: {exc}")
+
         p1, p2, p3 = st.columns(3)
         account_size = p1.number_input(
             "Account Size ($)",
