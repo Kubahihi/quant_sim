@@ -13,6 +13,7 @@ import pandas as pd
 
 USER_AGENT = "quant-sim-universe/1.0 (research contact: local-app)"
 VALID_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9\-]{0,9}$")
+SEC_NOISE_SUFFIXES = {"F", "Y", "Q", "W", "U", "R"}
 
 # Heuristic keyword blocklist to remove obvious non-common-stock instruments.
 NOISE_KEYWORDS = (
@@ -76,6 +77,26 @@ def normalize_symbol(symbol: str) -> str:
     cleaned = re.sub(r"[^A-Z0-9\-]", "", cleaned)
     cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
     return cleaned
+
+
+def _is_likely_us_common_symbol(symbol: str) -> bool:
+    """
+    Coarse symbol-level filter to cut obvious SEC feed noise.
+
+    The SEC ticker file includes many OTC tickers, rights, units and warrant
+    artifacts that materially degrade Yahoo enrichment reliability.
+    """
+    text = normalize_symbol(symbol)
+    if not text or not VALID_SYMBOL_RE.match(text):
+        return False
+
+    if len(text) > 5 and "-" not in text:
+        return False
+
+    if len(text) == 5 and text[-1] in SEC_NOISE_SUFFIXES:
+        return False
+
+    return True
 
 
 def _first_non_empty(values: Iterable[object]) -> str | None:
@@ -187,7 +208,7 @@ def _collect_from_sec_company_tickers() -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for item in payload.values():
         symbol = normalize_symbol(str(item.get("ticker", "")))
-        if not symbol or not VALID_SYMBOL_RE.match(symbol):
+        if not _is_likely_us_common_symbol(symbol):
             continue
 
         company_name = str(item.get("title", "")).strip()
@@ -230,6 +251,66 @@ def _collect_from_sp500_wikipedia() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _collect_from_sector_mapper() -> pd.DataFrame:
+    """
+    Collect sector/industry classifications from the dedicated sector mapper.
+
+    This provides GICS sector data for ~500+ major tickers from static mappings
+    and Wikipedia S&P 500, serving as a reliable sector source independent of
+    yfinance API availability.
+    """
+    try:
+        from src.data.sector_mapper import gather_sector_classifications
+        sector_df = gather_sector_classifications()
+        if sector_df.empty:
+            return pd.DataFrame()
+        # Add placeholder columns to match the standard candidate schema
+        sector_df = sector_df.copy()
+        sector_df["company_name"] = None
+        sector_df = sector_df[["ticker", "company_name", "sector", "industry", "source"]]
+        return sector_df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _fill_sectors_from_mapper(combined: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill missing sector/industry values from the sector mapper.
+
+    This is called after the main aggregation to backfill any remaining
+    sector gaps for tickers that exist in our static/curated mappings.
+    """
+    try:
+        from src.data.sector_mapper import gather_sector_classifications
+        sector_map = gather_sector_classifications()
+        if sector_map.empty:
+            return combined
+
+        sector_lookup = dict(zip(sector_map["ticker"], sector_map["sector"]))
+        industry_lookup = dict(zip(sector_map["ticker"], sector_map["industry"]))
+
+        for idx in combined.index:
+            ticker = str(combined.at[idx, "ticker"] or "").strip().upper()
+            if not ticker:
+                continue
+
+            current_sector = combined.at[idx, "sector"]
+            current_industry = combined.at[idx, "industry"]
+
+            # Only fill if currently missing
+            sector_missing = pd.isna(current_sector) or str(current_sector).strip() == ""
+            industry_missing = pd.isna(current_industry) or str(current_industry).strip() == ""
+
+            if sector_missing and ticker in sector_lookup:
+                combined.at[idx, "sector"] = sector_lookup[ticker]
+            if industry_missing and ticker in industry_lookup:
+                combined.at[idx, "industry"] = industry_lookup[ticker]
+    except Exception:
+        pass
+
+    return combined
+
+
 def gather_universe_candidates() -> pd.DataFrame:
     """
     Gather and normalize US equity universe candidates from multiple sources.
@@ -247,6 +328,7 @@ def gather_universe_candidates() -> pd.DataFrame:
         _collect_from_nasdaq_trader,
         _collect_from_sec_company_tickers,
         _collect_from_sp500_wikipedia,
+        _collect_from_sector_mapper,
     ]
 
     collected_frames: list[pd.DataFrame] = []
@@ -277,6 +359,8 @@ def gather_universe_candidates() -> pd.DataFrame:
     combined = combined[combined["ticker"].map(lambda value: bool(VALID_SYMBOL_RE.match(value or "")))]
     combined = combined.dropna(subset=["ticker"]).copy()
 
+    # For sector and industry, prefer non-empty values using _first_non_empty
+    # which will naturally prefer values from sources that provide them
     grouped = (
         combined.groupby("ticker", as_index=False)
         .agg({
@@ -289,6 +373,10 @@ def gather_universe_candidates() -> pd.DataFrame:
         .sort_values("ticker")
         .reset_index(drop=True)
     )
+
+    # Post-aggregation: fill remaining sector/industry gaps from the sector mapper
+    grouped = _fill_sectors_from_mapper(grouped)
+
     grouped["source_count"] = grouped["source"].map(
         lambda value: len([item for item in str(value).split(",") if item.strip()])
     )

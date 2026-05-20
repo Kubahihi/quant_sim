@@ -151,11 +151,60 @@ def load_universe_snapshot() -> pd.DataFrame:
     return _load_universe_snapshot_from_disk()
 
 
+def _validate_snapshot_quality(snapshot: pd.DataFrame, min_sector_coverage: float = 0.30) -> dict[str, Any]:
+    """
+    Validate the quality of an enriched universe snapshot.
+
+    Returns a dict with validation results and any warnings.
+    """
+    results: dict[str, Any] = {
+        "valid": True,
+        "warnings": [],
+        "metrics": {},
+    }
+
+    if snapshot.empty:
+        results["valid"] = False
+        results["warnings"].append("Empty snapshot")
+        return results
+
+    total = len(snapshot)
+    results["metrics"]["total_symbols"] = total
+
+    # Check sector coverage
+    sector_non_null = snapshot["Sector"].notna() & (snapshot["Sector"].astype(str).str.strip() != "") & (snapshot["Sector"].astype(str).str.lower() != "nan")
+    sector_coverage = float(sector_non_null.sum()) / total
+    results["metrics"]["sector_coverage"] = round(sector_coverage * 100, 1)
+
+    if sector_coverage < min_sector_coverage:
+        results["warnings"].append(
+            f"Sector coverage is low ({sector_coverage:.1%} < {min_sector_coverage:.0%})"
+        )
+
+    # Check price coverage (should be high)
+    price_non_null = pd.to_numeric(snapshot["Price"], errors="coerce").notna()
+    price_coverage = float(price_non_null.sum()) / total
+    results["metrics"]["price_coverage"] = round(price_coverage * 100, 1)
+
+    if price_coverage < 0.50:
+        results["warnings"].append(
+            f"Price coverage is low ({price_coverage:.1%} < 50%)"
+        )
+
+    # Check for duplicate tickers
+    duplicate_count = snapshot["Ticker"].duplicated().sum()
+    if duplicate_count > 0:
+        results["warnings"].append(f"Found {duplicate_count} duplicate tickers")
+
+    return results
+
+
 def build_universe_snapshot(progress_callback: ProgressCallback | None = None) -> pd.DataFrame:
     """
     Build and persist a new daily universe snapshot.
 
     The function is fault tolerant and always writes a metadata record.
+    It includes quality validation and recovery mechanisms for incomplete data.
     """
     _emit_progress(progress_callback, 0.02, "bootstrap", "Initializing universe build")
     _ensure_storage_dirs()
@@ -164,7 +213,24 @@ def build_universe_snapshot(progress_callback: ProgressCallback | None = None) -
     _emit_progress(progress_callback, 0.06, "raw_sources", "Collecting ticker universe from sources")
     candidates = gather_universe_candidates()
     if candidates.empty:
+        # Recovery: If no candidates from primary sources, try to use previous snapshot
+        if not previous_snapshot.empty:
+            _emit_progress(
+                progress_callback,
+                0.10,
+                "raw_sources",
+                "No new candidates collected, using previous snapshot as fallback",
+            )
+            enriched = previous_snapshot.copy()
+            enriched["LastUpdated"] = _safe_timestamp_now()
+            _save_snapshot_to_disk(enriched)
+            load_universe_snapshot.clear()
+            load_universe_metadata.clear()
+            get_universe.clear()
+            _emit_progress(progress_callback, 1.0, "done", f"Using previous snapshot ({len(enriched):,} symbols)")
+            return enriched
         raise RuntimeError("No ticker candidates were collected from any source.")
+
     _emit_progress(
         progress_callback,
         0.10,
@@ -187,6 +253,7 @@ def build_universe_snapshot(progress_callback: ProgressCallback | None = None) -
             candidates,
             previous_snapshot=previous_snapshot,
             progress_callback=progress_callback,
+            report_coverage=True,
         )
     else:
         # Compatibility path when an older enrichment module is still loaded
@@ -194,12 +261,38 @@ def build_universe_snapshot(progress_callback: ProgressCallback | None = None) -
         enriched = enrich_universe_candidates(
             candidates,
             previous_snapshot=previous_snapshot,
+            report_coverage=True,
         )
+
     if enriched.empty:
-        raise RuntimeError("Universe enrichment produced an empty snapshot.")
+        # Recovery: If enrichment produced empty result, use previous snapshot
+        if not previous_snapshot.empty:
+            _emit_progress(
+                progress_callback,
+                0.98,
+                "recovery",
+                "Enrichment failed, falling back to previous snapshot",
+            )
+            enriched = previous_snapshot.copy()
+            enriched["LastUpdated"] = _safe_timestamp_now()
+        else:
+            raise RuntimeError("Universe enrichment produced an empty snapshot and no fallback available.")
+
+    # Validate snapshot quality
+    quality = _validate_snapshot_quality(enriched)
+    if quality["warnings"]:
+        for warning in quality["warnings"]:
+            _emit_progress(progress_callback, 0.98, "validation", f"Warning: {warning}")
 
     _emit_progress(progress_callback, 0.99, "persist", "Saving snapshot to disk")
     _save_snapshot_to_disk(enriched)
+
+    # Write quality metrics to metadata
+    metadata = _read_metadata_from_disk()
+    metadata["quality_metrics"] = quality["metrics"]
+    metadata["quality_warnings"] = quality["warnings"]
+    _write_metadata(metadata)
+
     load_universe_snapshot.clear()
     load_universe_metadata.clear()
     get_universe.clear()
