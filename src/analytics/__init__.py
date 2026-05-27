@@ -8,6 +8,11 @@ from .portfolio_metrics import (
     calculate_portfolio_core_metrics,
     build_portfolio_timeseries,
 )
+from .benchmark import (
+    calculate_active_risk_metrics,
+    calculate_return_contribution,
+    calculate_risk_contribution,
+)
 from .scoring import (
     build_deterministic_fallback_review,
     compute_weighted_factor_score,
@@ -46,6 +51,9 @@ __all__ = [
     "calculate_average_correlation",
     "calculate_portfolio_core_metrics",
     "build_portfolio_timeseries",
+    "calculate_active_risk_metrics",
+    "calculate_return_contribution",
+    "calculate_risk_contribution",
     "evaluate_portfolio_score",
     "build_deterministic_fallback_review",
     "compute_weighted_factor_score",
