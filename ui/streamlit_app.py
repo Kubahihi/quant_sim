@@ -47,6 +47,7 @@ from ui.auth_page import (
 )
 from src.ai import generate_ai_review, resolve_groq_api_key
 from src.analytics import (
+    calculate_active_risk_metrics,
     build_deterministic_fallback_review,
     build_news_rows_for_ui,
     build_portfolio_timeseries,
@@ -54,6 +55,8 @@ from src.analytics import (
     calculate_average_correlation,
     calculate_concentration_metrics,
     calculate_correlation_matrix,
+    calculate_return_contribution,
+    calculate_risk_contribution,
     list_run_records,
     load_run_record,
     calculate_portfolio_core_metrics,
@@ -75,6 +78,7 @@ import src.data.stock_universe as stock_universe_module
 from src.data.fetchers.yahoo_fetcher import YahooFetcher
 from src.optimization import (
     calculate_efficient_frontier,
+    optimize_cost_aware_rebalance,
     calculate_portfolio_statistics,
     optimize_maximum_sharpe,
     optimize_minimum_variance,
@@ -155,6 +159,21 @@ DEFAULT_TICKERS = [
 
 st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_chart:")
 inject_dashboard_styles()
+
+with st.sidebar:
+    st.header("Navigation")
+    app_route = st.radio(
+        "Workspace",
+        options=["Quant Platform", "Wharton Cockpit"],
+        key="quant_sim_workspace_route",
+    )
+    st.markdown("---")
+
+if app_route == "Wharton Cockpit":
+    from ui.pages.wharton_dash import render_wharton_cockpit
+
+    render_wharton_cockpit()
+    st.stop()
 
 # ---- Authentication initialization ----
 def _resolve_authenticated_user_id() -> int | None:
@@ -375,6 +394,16 @@ def _build_ai_payload(
             "concentration_hhi": round(float(metrics.get("hhi", 0.0)), 4),
             "effective_holdings": round(float(metrics.get("effective_holdings", 0.0)), 4),
             "max_weight": round(float(metrics.get("max_weight", 0.0)), 4),
+            "benchmark_annualized_return": round(
+                float(metrics.get("benchmark_annualized_return", 0.0)), 6
+            ),
+            "active_return_annualized": round(
+                float(metrics.get("active_return_annualized", 0.0)), 6
+            ),
+            "tracking_error": round(float(metrics.get("tracking_error", 0.0)), 6),
+            "information_ratio": round(float(metrics.get("information_ratio", 0.0)), 4),
+            "beta_to_benchmark": round(float(metrics.get("beta_to_benchmark", 0.0)), 4),
+            "alpha_to_benchmark": round(float(metrics.get("alpha_to_benchmark", 0.0)), 6),
         },
         "score": int(score_result.get("score", 0)),
         "rating": score_result.get("rating", "N/A"),
@@ -420,6 +449,12 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
             "weights": [float(value) for value in point.get("weights", [])],
         })
 
+    cost_aware_rebalance = result.get("cost_aware_rebalance", {}) or {}
+    serialized_cost_aware = dict(cost_aware_rebalance)
+    weights_array = serialized_cost_aware.get("weights")
+    if isinstance(weights_array, np.ndarray):
+        serialized_cost_aware["weights"] = [float(value) for value in weights_array.tolist()]
+
     return {
         "inputs": {
             "tickers": result["tickers"],
@@ -427,6 +462,9 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
             "horizon_days": result["horizon_days"],
             "risk_profile": result["risk_profile"],
             "risk_free_rate": result["risk_free_rate"],
+            "benchmark_ticker": str(
+                result.get("benchmark_metrics", {}).get("benchmark_ticker", "") or ""
+            ),
             "date_range": {
                 "start": result["start_date"].isoformat(),
                 "end": result["end_date"].isoformat(),
@@ -458,6 +496,10 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
             "metrics": result.get("backtest_result", {}).get("metrics", {}),
             "lookahead_safe": bool(result.get("backtest_result", {}).get("lookahead_safe", False)),
         },
+        "benchmark": result.get("benchmark_metrics", {}),
+        "return_contribution": result.get("return_contribution_df", pd.DataFrame()),
+        "risk_contribution": result.get("risk_contribution_df", pd.DataFrame()),
+        "cost_aware_rebalance": serialized_cost_aware,
         "recommendation": result["ai_review"].get("verdict", ""),
     }
 
@@ -618,6 +660,11 @@ def _compute_analysis(
     n_simulations: int,
     horizon_days: int,
     portfolio_samples: int,
+    benchmark_ticker: str,
+    rebalance_max_weight: float,
+    rebalance_turnover_limit: float,
+    rebalance_cost_bps: float,
+    rebalance_risk_aversion: float,
 ) -> Dict[str, Any]:
     prices = fetch_market_data_cached(tuple(tickers), start_date, end_date)
     if prices.empty:
@@ -640,12 +687,51 @@ def _compute_analysis(
     corr_matrix = calculate_correlation_matrix(returns)
     concentration = calculate_concentration_metrics(weights)
     avg_corr = calculate_average_correlation(corr_matrix)
+    benchmark_symbol = (benchmark_ticker or "").strip().upper()
+    benchmark_returns = pd.Series(dtype=float)
+    if benchmark_symbol:
+        benchmark_prices = fetch_market_data_cached((benchmark_symbol,), start_date, end_date)
+        if benchmark_symbol in benchmark_prices.columns:
+            benchmark_returns = benchmark_prices[benchmark_symbol].pct_change().dropna()
+
+    benchmark_metrics = calculate_active_risk_metrics(
+        portfolio_returns=portfolio_returns,
+        benchmark_returns=benchmark_returns,
+        benchmark_ticker=benchmark_symbol,
+        risk_free_rate=risk_free_rate,
+    )
+    if benchmark_symbol and not bool(benchmark_metrics.get("benchmark_available", False)):
+        alignment_warnings.append(
+            f"Benchmark metrics unavailable for {benchmark_symbol} "
+            f"({benchmark_metrics.get('reason', 'unknown reason')})."
+        )
+
+    active_metric_values = {
+        "benchmark_total_return": float(benchmark_metrics.get("benchmark_total_return", 0.0) or 0.0),
+        "benchmark_annualized_return": float(
+            benchmark_metrics.get("benchmark_annualized_return", 0.0) or 0.0
+        ),
+        "active_return_total": float(benchmark_metrics.get("active_return_total", 0.0) or 0.0),
+        "active_return_annualized": float(
+            benchmark_metrics.get("active_return_annualized", 0.0) or 0.0
+        ),
+        "tracking_error": float(benchmark_metrics.get("tracking_error", 0.0) or 0.0),
+        "information_ratio": float(benchmark_metrics.get("information_ratio", 0.0) or 0.0),
+        "beta_to_benchmark": float(benchmark_metrics.get("beta_to_benchmark", 0.0) or 0.0),
+        "alpha_to_benchmark": float(benchmark_metrics.get("alpha_to_benchmark", 0.0) or 0.0),
+        "active_hit_rate": float(benchmark_metrics.get("active_hit_rate", 0.0) or 0.0),
+        "up_capture": float(benchmark_metrics.get("up_capture", np.nan)),
+        "down_capture": float(benchmark_metrics.get("down_capture", np.nan)),
+    }
 
     metrics = {
         **core_metrics,
         **concentration,
         "avg_correlation": avg_corr,
+        **active_metric_values,
     }
+    return_contribution_df = calculate_return_contribution(returns, weights)
+    risk_contribution_df = calculate_risk_contribution(returns, weights)
 
     advanced_models = run_advanced_models(
         returns=portfolio_returns,
@@ -716,6 +802,15 @@ def _compute_analysis(
 
     min_var_result = optimize_minimum_variance(returns)
     max_sharpe_result = optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate)
+    cost_aware_rebalance = optimize_cost_aware_rebalance(
+        returns=returns,
+        current_weights=weights,
+        risk_free_rate=risk_free_rate,
+        max_weight=rebalance_max_weight,
+        turnover_limit=rebalance_turnover_limit,
+        transaction_cost_bps=rebalance_cost_bps,
+        risk_aversion=rebalance_risk_aversion,
+    )
     frontier = calculate_efficient_frontier(returns, n_points=30)
 
     portfolio_cloud = sample_portfolio_cloud(
@@ -792,6 +887,17 @@ def _compute_analysis(
                 sharpe_ratio=float(max_sharpe_result["sharpe_ratio"]),
             )
         )
+    rebalance_weights = np.asarray(cost_aware_rebalance.get("weights", np.array([])), dtype=float)
+    if bool(cost_aware_rebalance.get("success")) and rebalance_weights.size == len(weights):
+        highlighted_portfolios.append(
+            build_portfolio_marker(
+                "Cost-Aware Rebalance",
+                marker_weights=rebalance_weights,
+                expected_return_value=float(cost_aware_rebalance.get("expected_return", 0.0)),
+                volatility_value=float(cost_aware_rebalance.get("volatility", 0.0)),
+                sharpe_ratio=float(cost_aware_rebalance.get("sharpe_ratio", 0.0)),
+            )
+        )
 
     asset_metrics_data = []
     for symbol in returns.columns:
@@ -818,6 +924,14 @@ def _compute_analysis(
             "risk_profile": risk_profile,
             "risk_free_rate": risk_free_rate,
             "horizon_days": horizon_days,
+            "benchmark_ticker": benchmark_symbol,
+            "benchmark_metrics": benchmark_metrics,
+            "rebalance_constraints": {
+                "max_weight": float(rebalance_max_weight),
+                "turnover_limit": float(rebalance_turnover_limit),
+                "transaction_cost_bps": float(rebalance_cost_bps),
+                "risk_aversion": float(rebalance_risk_aversion),
+            },
             "portfolio_metrics": metrics,
             "news_max_items": 120,
             "news_api_key": news_api_key,
@@ -851,6 +965,10 @@ def _compute_analysis(
         "simulation_stats": simulation_stats,
         "simulation_percentiles": simulation_percentiles,
         "asset_metrics_df": asset_metrics_df,
+        "benchmark_metrics": benchmark_metrics,
+        "return_contribution_df": return_contribution_df,
+        "risk_contribution_df": risk_contribution_df,
+        "cost_aware_rebalance": cost_aware_rebalance,
         "advanced_models": advanced_models,
         "model_results": quant_stack["models"],
         "signal_results": quant_stack["signals"],
@@ -3070,6 +3188,7 @@ def _render_overview_page(analysis_result: Dict[str, Any]) -> None:
     metrics = analysis_result["metrics"]
     score_result = analysis_result["score_result"]
     summary_result = analysis_result.get("summary_result")
+    benchmark_metrics = analysis_result.get("benchmark_metrics", {})
 
     st.subheader("Executive Overview")
     _render_dashboard_note(
@@ -3089,6 +3208,19 @@ def _render_overview_page(analysis_result: Dict[str, Any]) -> None:
     row2[1].metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
     row2[2].metric("Average Correlation", f"{metrics['avg_correlation']:.3f}")
     row2[3].metric("Effective Holdings", f"{metrics['effective_holdings']:.2f}")
+
+    benchmark_symbol = str(benchmark_metrics.get("benchmark_ticker", "") or "")
+    if benchmark_symbol:
+        row3 = st.columns(4)
+        row3[0].metric("Benchmark", benchmark_symbol)
+        row3[1].metric("Active Return (Ann.)", f"{metrics.get('active_return_annualized', 0.0):.2%}")
+        row3[2].metric("Tracking Error", f"{metrics.get('tracking_error', 0.0):.2%}")
+        row3[3].metric("Information Ratio", f"{metrics.get('information_ratio', 0.0):.3f}")
+        if not bool(benchmark_metrics.get("benchmark_available", False)):
+            st.info(
+                f"Benchmark data for {benchmark_symbol} is unavailable for this run "
+                f"({benchmark_metrics.get('reason', 'unknown reason')})."
+            )
 
     left_col, right_col = st.columns([1.25, 1.0])
     with left_col:
@@ -3712,9 +3844,13 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
     price_paths = analysis_result["price_paths"]
     simulation_stats = analysis_result["simulation_stats"]
     asset_metrics_df = analysis_result["asset_metrics_df"]
+    benchmark_metrics = analysis_result.get("benchmark_metrics", {})
+    return_contribution_df = analysis_result.get("return_contribution_df", pd.DataFrame())
+    risk_contribution_df = analysis_result.get("risk_contribution_df", pd.DataFrame())
+    cost_aware_rebalance = analysis_result.get("cost_aware_rebalance", {})
 
     st.subheader("Portfolio Lab")
-    lab_tabs = st.tabs(["Performance", "Optimization", "Simulation", "Assets"])
+    lab_tabs = st.tabs(["Performance", "Optimization", "Attribution", "Simulation", "Assets"])
 
     with lab_tabs[0]:
         portfolio_cumulative_fig = plot_cumulative_returns(
@@ -3734,6 +3870,27 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
         st.pyplot(corr_fig)
         st.dataframe(corr_matrix.round(3), use_container_width=True)
 
+        benchmark_symbol = str(benchmark_metrics.get("benchmark_ticker", "") or "")
+        if benchmark_symbol:
+            st.markdown("#### Benchmark-relative metrics")
+            b_cols = st.columns(4)
+            b_cols[0].metric("Benchmark", benchmark_symbol)
+            b_cols[1].metric("Beta", f"{metrics.get('beta_to_benchmark', 0.0):.3f}")
+            b_cols[2].metric("Alpha (Ann.)", f"{metrics.get('alpha_to_benchmark', 0.0):.2%}")
+            b_cols[3].metric("Active Hit Rate", f"{metrics.get('active_hit_rate', 0.0):.1%}")
+
+            capture_cols = st.columns(2)
+            up_capture = metrics.get("up_capture", np.nan)
+            down_capture = metrics.get("down_capture", np.nan)
+            capture_cols[0].metric(
+                "Up Capture",
+                "n/a" if np.isnan(up_capture) else f"{float(up_capture):.2f}",
+            )
+            capture_cols[1].metric(
+                "Down Capture",
+                "n/a" if np.isnan(down_capture) else f"{float(down_capture):.2f}",
+            )
+
     with lab_tabs[1]:
         compare_metrics = st.columns(4)
         compare_metrics[0].metric("Current Sharpe", f"{metrics['sharpe_ratio']:.3f}")
@@ -3741,7 +3898,9 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
         compare_metrics[2].metric("Max Sharpe Return", f"{max_sharpe_result.get('expected_return', 0.0):.2%}")
         compare_metrics[3].metric("Sampled Portfolios", f"{len(analysis_result['portfolio_cloud'])}")
 
-        opt_tabs = st.tabs(["Minimum Variance", "Maximum Sharpe", "Efficient Frontier", "3D Lab"])
+        opt_tabs = st.tabs(
+            ["Minimum Variance", "Maximum Sharpe", "Cost-aware Rebalance", "Efficient Frontier", "3D Lab"]
+        )
         with opt_tabs[0]:
             if min_var_result["success"]:
                 c1, c2, c3 = st.columns(3)
@@ -3775,13 +3934,67 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
                 st.warning("Maximum Sharpe optimization did not converge.")
 
         with opt_tabs[2]:
+            if cost_aware_rebalance.get("success"):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric(
+                    "Expected Return",
+                    f"{float(cost_aware_rebalance.get('expected_return', 0.0)):.2%}",
+                )
+                c2.metric(
+                    "Volatility",
+                    f"{float(cost_aware_rebalance.get('volatility', 0.0)):.2%}",
+                )
+                c3.metric(
+                    "Turnover",
+                    f"{float(cost_aware_rebalance.get('turnover', 0.0)):.2f}",
+                )
+                c4.metric(
+                    "Cost Drag",
+                    f"{float(cost_aware_rebalance.get('transaction_cost_drag', 0.0)):.2%}",
+                )
+
+                st.caption(
+                    "Utility = return - risk_penalty*variance - transaction_cost*turnover. "
+                    f"Risk aversion: {float(cost_aware_rebalance.get('risk_aversion', 0.0)):.2f}, "
+                    f"turnover cap: {float(cost_aware_rebalance.get('turnover_limit', 0.0)):.2f}, "
+                    f"max weight: {float(cost_aware_rebalance.get('max_weight', 0.0)):.2f}."
+                )
+                current_weight_by_symbol = dict(
+                    zip(
+                        analysis_result["tickers"],
+                        analysis_result["weights"],
+                        strict=False,
+                    )
+                )
+                rebalance_symbols = list(cost_aware_rebalance.get("symbols", []))
+                rebalance_weights_df = pd.DataFrame(
+                    {
+                        "Symbol": rebalance_symbols,
+                        "Current Weight": [
+                            f"{float(current_weight_by_symbol.get(symbol, 0.0)):.2%}"
+                            for symbol in rebalance_symbols
+                        ],
+                        "Rebalanced Weight": [
+                            f"{float(weight):.2%}"
+                            for weight in cost_aware_rebalance.get("weights", [])
+                        ],
+                    }
+                )
+                st.dataframe(rebalance_weights_df, use_container_width=True, hide_index=True)
+            else:
+                st.warning(
+                    "Cost-aware rebalance did not converge. "
+                    f"{cost_aware_rebalance.get('message', '')}"
+                )
+
+        with opt_tabs[3]:
             if frontier:
                 frontier_fig = plot_efficient_frontier(frontier, title="Efficient Frontier")
                 st.pyplot(frontier_fig)
             else:
                 st.warning("No efficient frontier points were generated.")
 
-        with opt_tabs[3]:
+        with opt_tabs[4]:
             try:
                 tradeoff_fig = plot_portfolio_tradeoff_3d(
                     portfolio_cloud=analysis_result["portfolio_cloud"],
@@ -3793,6 +4006,42 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
                 st.warning(f"3D portfolio view unavailable: {exc}")
 
     with lab_tabs[2]:
+        st.markdown("#### Return contribution (arithmetic approximation)")
+        if isinstance(return_contribution_df, pd.DataFrame) and not return_contribution_df.empty:
+            contrib_view = return_contribution_df.copy()
+            contrib_view["Weight"] = contrib_view["Weight"].map(lambda value: f"{value:.2%}")
+            contrib_view["TotalContributionApprox"] = contrib_view["TotalContributionApprox"].map(
+                lambda value: f"{value:.2%}"
+            )
+            contrib_view["AnnualizedContributionApprox"] = contrib_view[
+                "AnnualizedContributionApprox"
+            ].map(lambda value: f"{value:.2%}")
+            contrib_view["ContributionShare"] = contrib_view["ContributionShare"].map(
+                lambda value: f"{value:.1%}"
+            )
+            contrib_view["MeanDailyContribution"] = contrib_view["MeanDailyContribution"].map(
+                lambda value: f"{value:.4%}"
+            )
+            st.dataframe(contrib_view, use_container_width=True, hide_index=True)
+        else:
+            st.info("Return contribution table is unavailable for this run.")
+
+        st.markdown("#### Risk contribution (volatility budget)")
+        if isinstance(risk_contribution_df, pd.DataFrame) and not risk_contribution_df.empty:
+            risk_view = risk_contribution_df.copy()
+            risk_view["Weight"] = risk_view["Weight"].map(lambda value: f"{value:.2%}")
+            risk_view["MarginalVolatility"] = risk_view["MarginalVolatility"].map(
+                lambda value: f"{value:.2%}"
+            )
+            risk_view["RiskContribution"] = risk_view["RiskContribution"].map(
+                lambda value: f"{value:.2%}"
+            )
+            risk_view["RiskBudgetPct"] = risk_view["RiskBudgetPct"].map(lambda value: f"{value:.1%}")
+            st.dataframe(risk_view, use_container_width=True, hide_index=True)
+        else:
+            st.info("Risk contribution table is unavailable for this run.")
+
+    with lab_tabs[3]:
         mc1, mc2, mc3, mc4 = st.columns(4)
         mc1.metric("Mean final value", f"${simulation_stats['mean']:,.0f}")
         mc2.metric("Median final value", f"${simulation_stats['median']:,.0f}")
@@ -3811,7 +4060,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
         except Exception as exc:
             st.warning(f"3D scenario surface unavailable: {exc}")
 
-    with lab_tabs[3]:
+    with lab_tabs[4]:
         asset_metrics_view = asset_metrics_df.copy()
         asset_metrics_view["Ann. Return"] = asset_metrics_view["Ann. Return"].map(
             lambda value: f"{value:.2%}"
@@ -3938,6 +4187,11 @@ with st.sidebar:
         options=["conservative", "balanced", "aggressive"],
         index=1,
     )
+    benchmark_ticker = st.text_input(
+        "Benchmark ticker",
+        value="SPY",
+        help="Used for active risk metrics such as tracking error and information ratio.",
+    ).strip().upper()
 
     horizon_days = st.slider(
         "Investment horizon (days)",
@@ -3961,6 +4215,38 @@ with st.sidebar:
         max_value=6000,
         value=2500,
         step=250,
+    )
+
+    st.subheader("Cost-aware rebalance")
+    rebalance_max_weight = st.slider(
+        "Max weight per asset",
+        min_value=0.10,
+        max_value=1.00,
+        value=0.35,
+        step=0.01,
+    )
+    rebalance_turnover_limit = st.slider(
+        "Turnover limit",
+        min_value=0.05,
+        max_value=2.00,
+        value=0.30,
+        step=0.05,
+        help="Turnover = sum(abs(new_weight - current_weight)).",
+    )
+    rebalance_cost_bps = st.slider(
+        "Transaction cost (bps)",
+        min_value=0.0,
+        max_value=100.0,
+        value=10.0,
+        step=1.0,
+    )
+    rebalance_risk_aversion = st.slider(
+        "Risk aversion",
+        min_value=0.5,
+        max_value=10.0,
+        value=3.0,
+        step=0.5,
+        help="Higher values prioritize lower variance over expected return.",
     )
 
     run_clicked = st.button("Evaluate Portfolio", type="primary", use_container_width=True)
@@ -3998,6 +4284,11 @@ if run_clicked:
                 n_simulations=n_simulations,
                 horizon_days=horizon_days,
                 portfolio_samples=portfolio_samples,
+                benchmark_ticker=benchmark_ticker,
+                rebalance_max_weight=float(rebalance_max_weight),
+                rebalance_turnover_limit=float(rebalance_turnover_limit),
+                rebalance_cost_bps=float(rebalance_cost_bps),
+                rebalance_risk_aversion=float(rebalance_risk_aversion),
             )
             st.session_state["analysis_result"] = analysis_result
             st.rerun()
