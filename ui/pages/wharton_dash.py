@@ -22,8 +22,18 @@ if PROJECT_ROOT not in sys.path:
 
 DB_PATH = "data/wharton_production.db"
 UPLOAD_DIR = "data/wharton_uploads"
-DEFAULT_PASSWORD = "Wharton2026!"
 USER_PROFILE_KEY = "user_profile"
+
+# Password is read from .streamlit/secrets.toml for security
+# Each user must set WHARTON_PASSWORD in their local secrets file
+def _get_default_password() -> str:
+    """Get the default password from secrets or return a fallback."""
+    try:
+        return str(st.secrets.get("WHARTON_PASSWORD", "team123"))
+    except Exception:
+        return "team123"
+
+DEFAULT_PASSWORD = _get_default_password()
 TASK_EDITOR_VERSION_KEY = "wharton_task_editor_version"
 QUANT_RESULT_KEY = "wharton_quant_result"
 QUANT_ERROR_KEY = "wharton_quant_error"
@@ -404,7 +414,7 @@ def _render_login() -> None:
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Enter Cockpit", type="primary")
 
-    st.caption("Seeded accounts use the initial password `Wharton2026!`. Rotate it before real deployment.")
+    st.caption("Seeded accounts use the password from `.streamlit/secrets.toml` (WHARTON_PASSWORD) or the default `team123`.")
 
     if submitted:
         profile = authenticate_user(username, password)
