@@ -112,6 +112,7 @@ def generate_pdf_report(
                 f"Weights (%): {inputs.get('weights_pct', [])}",
                 f"Investment horizon (days): {inputs.get('horizon_days', '-')}",
                 f"Risk profile: {inputs.get('risk_profile', '-')}",
+                f"Benchmark: {inputs.get('benchmark_ticker', '-') or '-'}",
                 f"Risk-free rate: {inputs.get('risk_free_rate', 0.0):.2%}",
                 "",
                 f"Deterministic score: {score.get('score', '-')} / 100",
@@ -134,6 +135,12 @@ def generate_pdf_report(
             f"Effective holdings: {metrics.get('effective_holdings', 0.0):.2f}",
             f"Largest weight: {metrics.get('max_weight', 0.0):.2%}",
             f"Average pairwise correlation: {metrics.get('avg_correlation', 0.0):.3f}",
+            "",
+            f"Active return (annualized): {metrics.get('active_return_annualized', 0.0):.2%}",
+            f"Tracking error: {metrics.get('tracking_error', 0.0):.2%}",
+            f"Information ratio: {metrics.get('information_ratio', 0.0):.3f}",
+            f"Beta vs benchmark: {metrics.get('beta_to_benchmark', 0.0):.3f}",
+            f"Alpha vs benchmark: {metrics.get('alpha_to_benchmark', 0.0):.2%}",
             "",
             "Flags:",
             *([f"- {flag}" for flag in flags] if flags else ["- No critical flags."]),
@@ -163,6 +170,43 @@ def generate_pdf_report(
         simulation_df = report_payload.get("simulation_percentiles", pd.DataFrame())
         if isinstance(simulation_df, pd.DataFrame) and not simulation_df.empty:
             _add_dataframe_page(pdf, "Simulation Percentiles", simulation_df.round(2), max_rows=40)
+
+        return_contribution_df = report_payload.get("return_contribution", pd.DataFrame())
+        if isinstance(return_contribution_df, pd.DataFrame) and not return_contribution_df.empty:
+            _add_dataframe_page(
+                pdf,
+                "Return Contribution (Arithmetic Approximation)",
+                return_contribution_df.round(6),
+                max_rows=40,
+            )
+
+        risk_contribution_df = report_payload.get("risk_contribution", pd.DataFrame())
+        if isinstance(risk_contribution_df, pd.DataFrame) and not risk_contribution_df.empty:
+            _add_dataframe_page(
+                pdf,
+                "Risk Contribution (Volatility Budget)",
+                risk_contribution_df.round(6),
+                max_rows=40,
+            )
+
+        cost_aware = report_payload.get("cost_aware_rebalance", {}) or {}
+        if isinstance(cost_aware, dict) and cost_aware:
+            _add_text_page(
+                pdf,
+                "Cost-aware Rebalance Snapshot",
+                [
+                    f"Success: {bool(cost_aware.get('success', False))}",
+                    f"Expected return: {float(cost_aware.get('expected_return', 0.0)):.2%}",
+                    f"Volatility: {float(cost_aware.get('volatility', 0.0)):.2%}",
+                    f"Sharpe: {float(cost_aware.get('sharpe_ratio', 0.0)):.3f}",
+                    f"Turnover: {float(cost_aware.get('turnover', 0.0)):.3f}",
+                    f"Transaction cost drag: {float(cost_aware.get('transaction_cost_drag', 0.0)):.2%}",
+                    f"Turnover limit: {float(cost_aware.get('turnover_limit', 0.0)):.3f}",
+                    f"Max weight: {float(cost_aware.get('max_weight', 0.0)):.2%}",
+                    f"Risk aversion: {float(cost_aware.get('risk_aversion', 0.0)):.2f}",
+                    f"Message: {cost_aware.get('message', '-') or '-'}",
+                ],
+            )
 
         simulation_lines = [
             f"Mean final value: {simulation.get('mean', 0.0):,.0f}",
