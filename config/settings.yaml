@@ -19,3 +19,54 @@ optimization:
 simulation:
   n_simulations: 1000
   trading_days_per_year: 252
+
+storage:
+  # Storage backend type: "local" or "r2"
+  backend: "r2"
+  # Local storage settings
+  local:
+    storage_path: "data/storage"
+  # R2/S3 settings (only used when backend is "r2")
+  r2:
+    bucket_name: ""
+    endpoint_url: ""
+    region_name: "auto"
+    # Credentials should be set via environment variables or .streamlit/secrets.toml:
+    # aws_access_key_id
+    # aws_secret_access_key
+  # File upload settings
+  allowed_extensions:
+    - ".pdf"
+    - ".xlsx"
+    - ".xls"
+    - ".csv"
+    - ".docx"
+    - ".doc"
+    - ".txt"
+    - ".md"
+    - ".png"
+    - ".jpg"
+    - ".jpeg"
+    - ".gif"
+    - ".pptx"
+    - ".ppt"
+    - ".json"
+    - ".py"
+    - ".ipynb"
+    - ".zip"
+  max_file_size_mb: 50
+
+api:
+  base_path: "/api"
+  version: "v1"
+  host: "0.0.0.0"
+  port: 8080
+  debug: false
+  token_header: "X-API-Token"
+  auth_enabled: true
+  default_user_id: null
+  cors_enabled: true
+  cors_origins: ["*"]
+  rate_limit_enabled: true
+  rate_limit_requests: 60
+  rate_limit_window: 60
