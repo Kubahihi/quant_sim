@@ -45,6 +45,9 @@ logs/
 # Environment variables
 .env
 
+# Streamlit secrets (API keys, passwords)
+.streamlit/secrets.toml
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
