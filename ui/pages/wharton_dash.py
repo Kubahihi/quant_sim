@@ -805,18 +805,37 @@ def _render_chat(profile: dict[str, str | int]) -> None:
         st.rerun()
 
 
-# ─── File Vault ───────────────────────────────────────────────────────────────
+# ─── File Vault (Storage Backend Integration) ─────────────────────────────────
+
+# Import storage backend
+from src.storage import (
+    init_storage_db,
+    save_uploaded_file as storage_save_file,
+    download_file as storage_download_file,
+    file_exists as storage_file_exists,
+    list_files_with_status,
+    StorageFileNotFoundError,
+    FileValidationError,
+)
+
+
+def _init_file_vault_storage():
+    """Initialize storage layer for file vault."""
+    init_storage_db(str(DB_PATH))
+
 
 def _safe_filename(filename: str) -> str:
+    """Legacy function - kept for compatibility."""
     base = os.path.basename(filename).replace("\\", "_").strip()
     cleaned = "".join(c if c.isalnum() or c in {".", "_", "-"} else "_" for c in base)
     cleaned = cleaned.strip("._")
-    if not cleaned: cleaned = "upload.bin"
+    if not cleaned:
+        cleaned = "upload.bin"
     return cleaned[:140]
 
 
 def _validate_upload(uploaded_file: object) -> str | None:
-    """Returns error string or None if valid."""
+    """Returns error string or None if valid. (Legacy - now handled by storage layer)"""
     fname = str(uploaded_file.name)
     ext = Path(fname).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -834,31 +853,27 @@ def _save_uploaded_file(
     description: str = "",
     tags: str = "",
 ) -> None:
-    safe_name = _safe_filename(str(uploaded_file.name))
-    unique_prefix = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    stored_filename = f"{unique_prefix}_{safe_name}"
-    file_path = UPLOAD_DIR / stored_filename
-    file_bytes = uploaded_file.getbuffer()
-    size_bytes = len(file_bytes)
-    ext = Path(safe_name).suffix.lower()
-
-    with open(file_path, "wb") as fh:
-        fh.write(file_bytes)
-
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO files
-                (timestamp, filename, original_filename, uploaded_by, file_path,
-                 file_size_bytes, mime_type, project_name, description, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (_now_iso(), safe_name, str(uploaded_file.name), uploaded_by,
-             str(file_path), size_bytes, ext, project_name.strip(), description.strip(), tags.strip()),
+    """Save uploaded file using the new storage backend."""
+    try:
+        result = storage_save_file(
+            uploaded_file=uploaded_file,
+            uploaded_by=uploaded_by,
+            db_path=str(DB_PATH),
+            project_name=project_name,
+            description=description,
+            tags=tags,
         )
+    except FileValidationError as e:
+        raise ValueError(str(e))
 
 
-def _fetch_file_rows() -> list[sqlite3.Row]:
+def _fetch_file_rows() -> list[dict]:
+    """Fetch file rows with storage status."""
+    return list_files_with_status(db_path=str(DB_PATH))
+
+
+def _fetch_file_rows_legacy() -> list[sqlite3.Row]:
+    """Legacy function for backward compatibility."""
     with get_connection() as conn:
         return conn.execute(
             "SELECT id, timestamp, filename, original_filename, uploaded_by, file_path, "
@@ -939,8 +954,10 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
 
     st.markdown("#### Downloads")
     for row in file_rows:
-        file_path = Path(str(row["file_path"]))
-        fname = str(row["filename"])
+        file_id = int(row["id"])
+        fname = str(row["original_filename"])
+        status = row.get("status", "unknown")
+        status_label = row.get("status_label", "")
 
         # Filter display by search
         if search_query.strip():
@@ -949,30 +966,34 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
             if q not in haystack:
                 continue
 
-        if not file_path.exists():
-            st.warning(f"`{fname}` is indexed but missing from disk.")
-            continue
-
-        desc = str(row["description"] or "")
-        proj = str(row["project_name"] or "")
+        desc = str(row.get("description") or "")
+        proj = str(row.get("project_name") or "")
         label_parts = [fname]
         if proj: label_parts.append(f"[{proj}]")
 
         col1, col2 = st.columns([4, 1])
         with col1:
-            st.markdown(f"**{escape(fname)}**" + (f" · {escape(proj)}" if proj else ""))
+            # Show status indicator
+            status_icon = "✅" if status == "available" else "❌"
+            st.markdown(f"{status_icon} **{escape(fname)}**" + (f" · {escape(proj)}" if proj else ""))
             if desc:
                 st.caption(escape(desc))
+            if status == "missing":
+                st.warning("File is missing from storage")
         with col2:
-            with open(file_path, "rb") as fh:
-                st.download_button(
-                    "Download",
-                    data=fh.read(),
-                    file_name=fname,
-                    mime="application/octet-stream",
-                    key=f"dl_{row['id']}",
-                    use_container_width=True,
-                )
+            if status == "available":
+                try:
+                    content, download_name, content_type = storage_download_file(file_id, db_path=str(DB_PATH))
+                    st.download_button(
+                        "Download",
+                        data=content,
+                        file_name=download_name,
+                        mime=content_type,
+                        key=f"dl_{file_id}",
+                        use_container_width=True,
+                    )
+                except (StorageFileNotFoundError, FileNotFoundError) as e:
+                    st.error(f"Download failed: {e}")
 
 
 # ─── Subprojects ─────────────────────────────────────────────────────────────
