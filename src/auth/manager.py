@@ -30,6 +30,8 @@ from .database import (
     revoke_session,
     revoke_all_user_sessions,
     user_exists,
+    log_login_attempt,
+    get_recent_failed_attempts,
 )
 
 
@@ -216,13 +218,21 @@ def login_user(
     # Initialize database if needed
     init_auth_database()
     
+    # Check for brute-force (max 5 failed attempts in 10 minutes)
+    if get_recent_failed_attempts(username) >= 5:
+        return None, None, ["Too many failed attempts. Please try again in 10 minutes."]
+
     # Get user
     user = get_user_by_username(username)
     if not user:
+        log_login_attempt(username, False)
         return None, None, ["Invalid username or password"]
     
     # Verify password
-    if not verify_password(password, user["password_hash"]):
+    is_valid = verify_password(password, user["password_hash"])
+    log_login_attempt(username, is_valid)
+
+    if not is_valid:
         return None, None, ["Invalid username or password"]
     
     # Create session

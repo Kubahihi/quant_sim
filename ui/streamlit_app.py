@@ -226,7 +226,6 @@ def _bootstrap_authentication() -> int | None:
     if not status.get("completed"):
         result = migrate_existing_data()
         if result.get("success") and not result.get("already_migrated"):
-            st.info("Multi-user system initialized. Default user: admin / REMOVED")
             st.info(f"{result.get('files_migrated', {}).get('total', 0)} files migrated.")
 
     user_id = _resolve_authenticated_user_id()
