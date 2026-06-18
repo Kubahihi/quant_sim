@@ -653,7 +653,7 @@ class StorageConfig:
     """Configuration for storage backend selection."""
     
     def __init__(self):
-        self._config = None
+        self._config = {'backend': 'local'}
         self._backend = None
     
     def load_from_secrets(self):
@@ -695,8 +695,9 @@ class StorageConfig:
     
     def is_production_mode(self) -> bool:
         """Check if running in production mode (Streamlit Cloud)."""
-        # Check if running on Streamlit Cloud
-        return 'STREAMLIT_SERVER_PORT' in os.environ
+        # Explicit environment variable has priority, fallback to Streamlit Cloud indicator
+        is_prod_env = os.environ.get("QUANT_SIM_ENV") == "production"
+        return is_prod_env or 'STREAMLIT_SERVER_PORT' in os.environ
     
     def create_backend(self) -> StorageBackend:
         """Create the appropriate storage backend based on configuration."""

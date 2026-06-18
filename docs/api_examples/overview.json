@@ -1,0 +1,41 @@
+{
+  "success": true,
+  "timestamp": "2026-05-22T20:00:00.000000+00:00",
+  "data": {
+    "portfolio": {
+      "total_value": 125430.50,
+      "total_pnl": 25430.50,
+      "positions_count": 12
+    },
+    "trading": {
+      "open_trades": 3,
+      "closed_trades_30d": 8,
+      "win_rate": 62.5
+    },
+    "market": {
+      "regime": "bull",
+      "spy_price": 450.25,
+      "spy_change_percent": 0.56
+    },
+    "recent_activity": [
+      {
+        "type": "trade_closed",
+        "ticker": "MSFT",
+        "pnl": 500.00,
+        "date": "2026-05-20"
+      },
+      {
+        "type": "trade_closed",
+        "ticker": "GOOGL",
+        "pnl": 250.00,
+        "date": "2026-05-18"
+      },
+      {
+        "type": "trade_closed",
+        "ticker": "AMZN",
+        "pnl": -150.00,
+        "date": "2026-05-15"
+      }
+    ]
+  }
+}

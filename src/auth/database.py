@@ -66,6 +66,15 @@ def init_auth_database() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
+            -- Brute-force protection table
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                ip_address TEXT
+            );
+
             -- Index for faster session lookups
             CREATE INDEX IF NOT EXISTS idx_sessions_user_id 
             ON sessions(user_id);
@@ -73,6 +82,10 @@ def init_auth_database() -> None:
             -- Index for session cleanup
             CREATE INDEX IF NOT EXISTS idx_sessions_expires_at 
             ON sessions(expires_at);
+
+            -- Index for brute-force tracking
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time 
+            ON login_attempts(username, timestamp);
         """)
         conn.commit()
     finally:
@@ -337,5 +350,33 @@ def user_exists(username: str = None, email: str = None) -> bool:
         else:
             return False
         return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = None) -> None:
+    """Log a login attempt for brute-force monitoring."""
+    conn = _get_connection()
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO login_attempts (username, timestamp, success, ip_address) VALUES (?, ?, ?, ?)",
+            (username, timestamp, 1 if success else 0, ip_address),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_recent_failed_attempts(username: str, minutes: int = 10) -> int:
+    """Count failed login attempts for a user in the last X minutes."""
+    conn = _get_connection()
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > ?",
+            (username, since),
+        )
+        return cursor.fetchone()[0]
     finally:
         conn.close()

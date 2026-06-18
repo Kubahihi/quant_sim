@@ -1,0 +1,62 @@
+[
+  {
+    "attempt_id": "attempt_c1881516b0",
+    "question_id": "eco_fiscal_multiplier",
+    "selected_answer": 1,
+    "correct_answer": 1,
+    "is_correct": true,
+    "topic": "Fiscal policy",
+    "difficulty": "medium",
+    "source": "custom",
+    "language": "en",
+    "timestamp": "2026-04-19T09:52:14.595797+00:00"
+  },
+  {
+    "attempt_id": "attempt_e4ed18fe5b",
+    "question_id": "eco_cpi_real_rate",
+    "selected_answer": 1,
+    "correct_answer": 1,
+    "is_correct": true,
+    "topic": "Inflation",
+    "difficulty": "easy",
+    "source": "custom",
+    "language": "en",
+    "timestamp": "2026-04-19T09:52:43.329052+00:00"
+  },
+  {
+    "attempt_id": "attempt_5441d15acc",
+    "question_id": "eco_yield_curve_recession",
+    "selected_answer": 0,
+    "correct_answer": 1,
+    "is_correct": false,
+    "topic": "Rates",
+    "difficulty": "medium",
+    "source": "custom",
+    "language": "en",
+    "timestamp": "2026-04-19T09:52:53.911025+00:00"
+  },
+  {
+    "attempt_id": "attempt_f4982fc8e6",
+    "question_id": "q5",
+    "selected_answer": 0,
+    "correct_answer": 0,
+    "is_correct": true,
+    "topic": "Portfolio Management",
+    "difficulty": "medium",
+    "source": "ai",
+    "language": "en",
+    "timestamp": "2026-04-19T09:54:41.440449+00:00"
+  },
+  {
+    "attempt_id": "attempt_99d3d9157c",
+    "question_id": "q3",
+    "selected_answer": 2,
+    "correct_answer": 2,
+    "is_correct": true,
+    "topic": "Market Analysis",
+    "difficulty": "medium",
+    "source": "ai",
+    "language": "en",
+    "timestamp": "2026-04-19T10:00:18.358406+00:00"
+  }
+]

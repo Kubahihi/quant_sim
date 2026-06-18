@@ -1,0 +1,41 @@
+{
+  "success": true,
+  "timestamp": "2026-05-22T20:00:00.000000+00:00",
+  "data": {
+    "active_trades": [
+      {
+        "id": "swing_abc123def456",
+        "ticker": "AAPL",
+        "direction": "long",
+        "entry_price": 170.00,
+        "current_price": 175.00,
+        "stop_loss": 165.00,
+        "target_price": 185.00,
+        "pnl_percent": 2.94,
+        "days_held": 5,
+        "status": "open"
+      },
+      {
+        "id": "swing_xyz789ghi012",
+        "ticker": "NVDA",
+        "direction": "long",
+        "entry_price": 450.00,
+        "current_price": 465.00,
+        "stop_loss": 435.00,
+        "target_price": 500.00,
+        "pnl_percent": 3.33,
+        "days_held": 3,
+        "status": "open"
+      }
+    ],
+    "alerts": [
+      {
+        "type": "stop_approaching",
+        "ticker": "TSLA",
+        "message": "Price within 2.1% of stop loss",
+        "trade_id": "swing_tsla123456"
+      }
+    ],
+    "total_open": 3
+  }
+}

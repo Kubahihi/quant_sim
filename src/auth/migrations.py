@@ -37,8 +37,8 @@ MIGRATION_MARKER = DATA_DIR / ".migration_completed"
 
 # Default user credentials
 DEFAULT_USERNAME = "admin"
-DEFAULT_EMAIL = "admin@localhost"
-DEFAULT_PASSWORD = "REMOVED"  # Should be changed after first login
+DEFAULT_EMAIL = "admin@example.com" # Changed to example.com for security
+DEFAULT_PASSWORD = "[PROTECTED]"  # Should be read from st.secrets["ADMIN_BOOTSTRAP_PASSWORD"]
 
 
 def _get_migration_info() -> Dict[str, Any]:
@@ -225,7 +225,7 @@ def migrate_existing_data(dry_run: bool = False) -> Dict[str, Any]:
         "already_migrated": False,
         "default_user_id": user_id,
         "default_username": DEFAULT_USERNAME,
-        "default_password": DEFAULT_PASSWORD if not dry_run else "***",
+            "default_password": "[PROTECTED]",
         "files_migrated": {
             "portfolios": portfolios_migrated,
             "swing_tracker": swing_tracker_migrated,

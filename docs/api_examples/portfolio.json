@@ -1,0 +1,52 @@
+{
+  "success": true,
+  "timestamp": "2026-05-22T20:00:00.000000+00:00",
+  "data": {
+    "name": "default",
+    "created_at": "2026-01-01T00:00:00.000000+00:00",
+    "updated_at": "2026-05-22T19:30:00.000000+00:00",
+    "positions": [
+      {
+        "ticker": "AAPL",
+        "shares": 50,
+        "cost_basis": 150.00,
+        "target_weight": 10.0,
+        "current_weight": 7.0,
+        "price": 175.00,
+        "market_value": 8750.00,
+        "cost_value": 7500.00,
+        "pnl": 1250.00,
+        "pnl_percent": 16.67,
+        "notes": ""
+      },
+      {
+        "ticker": "MSFT",
+        "shares": 30,
+        "cost_basis": 280.00,
+        "target_weight": 15.0,
+        "current_weight": 16.8,
+        "price": 350.00,
+        "market_value": 10500.00,
+        "cost_value": 8400.00,
+        "pnl": 2100.00,
+        "pnl_percent": 25.0,
+        "notes": ""
+      },
+      {
+        "ticker": "GOOGL",
+        "shares": 25,
+        "cost_basis": 120.00,
+        "target_weight": 10.0,
+        "current_weight": 11.2,
+        "price": 140.00,
+        "market_value": 3500.00,
+        "cost_value": 3000.00,
+        "pnl": 500.00,
+        "pnl_percent": 16.67,
+        "notes": ""
+      }
+    ],
+    "total_value": 125430.50,
+    "total_pnl": 25430.50
+  }
+}

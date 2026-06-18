@@ -229,7 +229,7 @@ def save_uploaded_file(
             values.append(tags.strip())
         if "storage_backend" in existing_cols:
             columns.append("storage_backend")
-            values.append("local")
+            values.append(backend.backend_name)
         if "storage_key" in existing_cols:
             columns.append("storage_key")
             values.append(storage_key)

@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "timestamp": "2026-05-22T20:00:00.000000+00:00",
+  "error": "Authentication token required",
+  "error_code": "auth_required"
+}

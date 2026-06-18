@@ -28,9 +28,19 @@ env/
 
 # Data
 data/cache/
+data/*.db
+data/*.db-journal
+data/*.db-wal
 data/raw/
 data/processed/
 data/exports/
+data/users/
+data/wharton_uploads/
+data/storage/
+data/run_history/
+data/portfolios/
+data/swing_tracker/
+data/.migration_completed
 
 # Logs
 logs/

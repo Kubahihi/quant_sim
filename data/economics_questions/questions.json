@@ -1,0 +1,576 @@
+[
+  {
+    "id": "eco_cpi_real_rate",
+    "language": "en",
+    "question_text": "If inflation rises and the nominal policy rate stays unchanged, what happens to the real policy rate?",
+    "options": [
+      "It increases",
+      "It decreases",
+      "It stays exactly the same",
+      "It becomes equal to GDP growth"
+    ],
+    "correct_answer": 1,
+    "explanation": "Real policy rate is approximately nominal rate minus inflation. If inflation rises while nominal rate is flat, the real rate declines.",
+    "topic": "Inflation",
+    "difficulty": "easy",
+    "source": "custom",
+    "option_explanations": {
+      "0": "Incorrect. A higher inflation rate pushes the real rate lower, not higher.",
+      "1": "Correct. Real rate is nominal minus inflation.",
+      "2": "Incorrect. It would stay the same only if inflation stayed unchanged too.",
+      "3": "Incorrect. Real policy rate and GDP growth are different concepts."
+    },
+    "translations": {
+      "en": {
+        "question_text": "If inflation rises and the nominal policy rate stays unchanged, what happens to the real policy rate?",
+        "options": [
+          "It increases",
+          "It decreases",
+          "It stays exactly the same",
+          "It becomes equal to GDP growth"
+        ],
+        "explanation": "Real policy rate is approximately nominal rate minus inflation. If inflation rises while nominal rate is flat, the real rate declines.",
+        "option_explanations": {
+          "0": "Incorrect. A higher inflation rate pushes the real rate lower, not higher.",
+          "1": "Correct. Real rate is nominal minus inflation.",
+          "2": "Incorrect. It would stay the same only if inflation stayed unchanged too.",
+          "3": "Incorrect. Real policy rate and GDP growth are different concepts."
+        }
+      },
+      "cs": {
+        "question_text": "Pokud inflace roste a nominální sazba centrální banky zůstane stejná, co se stane s reálnou sazbou?",
+        "options": [
+          "Zvýší se",
+          "Sníží se",
+          "Zůstane přesně stejná",
+          "Bude rovna růstu HDP"
+        ],
+        "explanation": "Reálná sazba je přibližně nominální sazba minus inflace. Když inflace roste a nominální sazba je beze změny, reálná sazba klesá.",
+        "option_explanations": {
+          "0": "Nesprávně. Vyšší inflace snižuje reálnou sazbu.",
+          "1": "Správně. Reálná sazba = nominální sazba minus inflace.",
+          "2": "Nesprávně. Stejná by zůstala jen při stejné inflaci.",
+          "3": "Nesprávně. Reálná sazba a růst HDP nejsou stejné veličiny."
+        }
+      }
+    },
+    "created_at": "2026-04-19T09:38:58.981204+00:00"
+  },
+  {
+    "id": "eco_yield_curve_recession",
+    "language": "en",
+    "question_text": "What does an inverted yield curve most often signal in macro analysis?",
+    "options": [
+      "Stronger inflation expectations in the very short run",
+      "Potential economic slowdown or recession risk",
+      "Immediate guarantee of equity market gains",
+      "Lower long-term bond duration risk"
+    ],
+    "correct_answer": 1,
+    "explanation": "An inverted curve (short rates above long rates) has historically been associated with tighter conditions and elevated recession probability.",
+    "topic": "Rates",
+    "difficulty": "medium",
+    "source": "custom",
+    "option_explanations": {
+      "0": "Misleading. Short-run inflation can matter, but inversion is more strongly tied to growth expectations.",
+      "1": "Correct. It often reflects tighter policy and weaker expected growth.",
+      "2": "Incorrect. It is not a guarantee of equity gains.",
+      "3": "Incorrect. Duration risk is a separate concept from curve inversion."
+    },
+    "translations": {
+      "en": {
+        "question_text": "What does an inverted yield curve most often signal in macro analysis?",
+        "options": [
+          "Stronger inflation expectations in the very short run",
+          "Potential economic slowdown or recession risk",
+          "Immediate guarantee of equity market gains",
+          "Lower long-term bond duration risk"
+        ],
+        "explanation": "An inverted curve (short rates above long rates) has historically been associated with tighter conditions and elevated recession probability.",
+        "option_explanations": {
+          "0": "Misleading. Short-run inflation can matter, but inversion is more strongly tied to growth expectations.",
+          "1": "Correct. It often reflects tighter policy and weaker expected growth.",
+          "2": "Incorrect. It is not a guarantee of equity gains.",
+          "3": "Incorrect. Duration risk is a separate concept from curve inversion."
+        }
+      },
+      "cs": {
+        "question_text": "Co inverzní výnosová křivka v makro analýze nejčastěji signalizuje?",
+        "options": [
+          "Silnější očekávání inflace ve velmi krátkém období",
+          "Možné ekonomické zpomalení nebo riziko recese",
+          "Okamžitou jistotu růstu akciového trhu",
+          "Nižší dlouhodobé duracní riziko dluhopisů"
+        ],
+        "explanation": "Inverzní křivka (krátké sazby nad dlouhými) historicky souvisí s utaženými podmínkami a vyšší pravděpodobností recese.",
+        "option_explanations": {
+          "0": "Zavádějící. Krátkodobá inflace může hrát roli, ale inverze více souvisí s očekávaným růstem.",
+          "1": "Správně. Často odráží restriktivní politiku a slabší očekávaný růst.",
+          "2": "Nesprávně. Není to garance růstu akcií.",
+          "3": "Nesprávně. Durace je jiný koncept než inverze křivky."
+        }
+      }
+    },
+    "created_at": "2026-04-19T09:38:58.981204+00:00"
+  },
+  {
+    "id": "eco_fiscal_multiplier",
+    "language": "en",
+    "question_text": "In a demand-constrained economy, what is the most likely short-term effect of targeted fiscal expansion?",
+    "options": [
+      "Lower aggregate demand and lower output",
+      "Higher aggregate demand and potentially higher output",
+      "No effect unless interest rates are zero",
+      "Automatic decline in unemployment to zero"
+    ],
+    "correct_answer": 1,
+    "explanation": "Fiscal expansion can lift aggregate demand and output in the short run, especially when private demand is weak.",
+    "topic": "Fiscal policy",
+    "difficulty": "medium",
+    "source": "custom",
+    "option_explanations": {
+      "0": "Incorrect. This is opposite to the expected demand effect.",
+      "1": "Correct. Additional public demand can increase near-term economic activity.",
+      "2": "Incorrect. Effects can exist even when rates are above zero.",
+      "3": "Incorrect. Policy can help labor markets but not instantly eliminate unemployment."
+    },
+    "translations": {
+      "en": {
+        "question_text": "In a demand-constrained economy, what is the most likely short-term effect of targeted fiscal expansion?",
+        "options": [
+          "Lower aggregate demand and lower output",
+          "Higher aggregate demand and potentially higher output",
+          "No effect unless interest rates are zero",
+          "Automatic decline in unemployment to zero"
+        ],
+        "explanation": "Fiscal expansion can lift aggregate demand and output in the short run, especially when private demand is weak.",
+        "option_explanations": {
+          "0": "Incorrect. This is opposite to the expected demand effect.",
+          "1": "Correct. Additional public demand can increase near-term economic activity.",
+          "2": "Incorrect. Effects can exist even when rates are above zero.",
+          "3": "Incorrect. Policy can help labor markets but not instantly eliminate unemployment."
+        }
+      },
+      "cs": {
+        "question_text": "Jaký je v ekonomice s omezenou poptávkou nejpravděpodobnější krátkodobý efekt cílené fiskální expanze?",
+        "options": [
+          "Nižší agregátní poptávka a nižší výstup",
+          "Vyšší agregátní poptávka a potenciálně vyšší výstup",
+          "Žádný efekt, pokud sazby nejsou na nule",
+          "Automatický pokles nezaměstnanosti na nulu"
+        ],
+        "explanation": "Fiskální expanze může v krátkém období zvýšit agregátní poptávku i výstup, zejména když je soukromá poptávka slabá.",
+        "option_explanations": {
+          "0": "Nesprávně. Je to opačný směr očekávaného efektu.",
+          "1": "Správně. Vyšší veřejná poptávka může zvýšit ekonomickou aktivitu.",
+          "2": "Nesprávně. Efekt může existovat i při sazbách nad nulou.",
+          "3": "Nesprávně. Politika může pomoci, ale neodstraní nezaměstnanost okamžitě."
+        }
+      }
+    },
+    "created_at": "2026-04-19T09:38:58.981204+00:00"
+  },
+  {
+    "id": "q1",
+    "language": "en",
+    "question_text": "What is the primary goal of a balanced risk profile in investing?",
+    "options": [
+      "To maximize returns",
+      "To minimize risk",
+      "To balance returns and risk",
+      "To diversify a portfolio"
+    ],
+    "correct_answer": 2,
+    "explanation": "A balanced risk profile aims to find a middle ground between maximizing returns and minimizing risk.",
+    "topic": "Investing",
+    "difficulty": "easy",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the primary goal of a balanced risk profile in investing?",
+        "options": [
+          "To maximize returns",
+          "To minimize risk",
+          "To balance returns and risk",
+          "To diversify a portfolio"
+        ],
+        "explanation": "A balanced risk profile aims to find a middle ground between maximizing returns and minimizing risk.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:53:52.505726+00:00"
+  },
+  {
+    "id": "q2",
+    "language": "en",
+    "question_text": "What is the Sharpe ratio used to measure in finance?",
+    "options": [
+      "Risk-adjusted return",
+      "Volatility",
+      "Annualized return",
+      "Max drawdown"
+    ],
+    "correct_answer": 0,
+    "explanation": "The Sharpe ratio is a measure of risk-adjusted return, helping investors understand the relationship between risk and return.",
+    "topic": "Finance",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the Sharpe ratio used to measure in finance?",
+        "options": [
+          "Risk-adjusted return",
+          "Volatility",
+          "Annualized return",
+          "Max drawdown"
+        ],
+        "explanation": "The Sharpe ratio is a measure of risk-adjusted return, helping investors understand the relationship between risk and return.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:53:52.505726+00:00"
+  },
+  {
+    "id": "q3",
+    "language": "en",
+    "question_text": "What is the significance of the 'neutral' regime in the given context?",
+    "options": [
+      "It indicates a high-risk market",
+      "It indicates a low-return market",
+      "It indicates a stable market with no clear trend",
+      "It indicates a high-return market"
+    ],
+    "correct_answer": 2,
+    "explanation": "A 'neutral' regime suggests that the market is not showing a clear trend, making it stable but without strong directional movement.",
+    "topic": "Market Analysis",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the significance of the 'neutral' regime in the given context?",
+        "options": [
+          "It indicates a high-risk market",
+          "It indicates a low-return market",
+          "It indicates a stable market with no clear trend",
+          "It indicates a high-return market"
+        ],
+        "explanation": "A 'neutral' regime suggests that the market is not showing a clear trend, making it stable but without strong directional movement.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:53:52.505726+00:00"
+  },
+  {
+    "id": "q4",
+    "language": "en",
+    "question_text": "What does the 'annualized return' metric represent?",
+    "options": [
+      "The return over the entire investment period",
+      "The return over a year, adjusted for the time period",
+      "The risk associated with an investment",
+      "The volatility of an investment"
+    ],
+    "correct_answer": 1,
+    "explanation": "Annualized return is the return of an investment over a year, adjusted for the time period of the investment.",
+    "topic": "Investing",
+    "difficulty": "easy",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What does the 'annualized return' metric represent?",
+        "options": [
+          "The return over the entire investment period",
+          "The return over a year, adjusted for the time period",
+          "The risk associated with an investment",
+          "The volatility of an investment"
+        ],
+        "explanation": "Annualized return is the return of an investment over a year, adjusted for the time period of the investment.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:53:52.505726+00:00"
+  },
+  {
+    "id": "q5",
+    "language": "en",
+    "question_text": "What is the purpose of calculating the Sharpe ratio in portfolio management?",
+    "options": [
+      "To compare the risk-adjusted returns of different portfolios",
+      "To calculate the total return of a portfolio",
+      "To determine the volatility of a portfolio",
+      "To find the max drawdown of a portfolio"
+    ],
+    "correct_answer": 0,
+    "explanation": "The Sharpe ratio helps in comparing the risk-adjusted returns of different portfolios, aiding in investment decisions.",
+    "topic": "Portfolio Management",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the purpose of calculating the Sharpe ratio in portfolio management?",
+        "options": [
+          "To compare the risk-adjusted returns of different portfolios",
+          "To calculate the total return of a portfolio",
+          "To determine the volatility of a portfolio",
+          "To find the max drawdown of a portfolio"
+        ],
+        "explanation": "The Sharpe ratio helps in comparing the risk-adjusted returns of different portfolios, aiding in investment decisions.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:53:52.505726+00:00"
+  },
+  {
+    "id": "q6",
+    "language": "en",
+    "question_text": "How does the 'avg_correlation' metric help in portfolio management?",
+    "options": [
+      "It helps in diversifying the portfolio by identifying uncorrelated assets",
+      "It helps in maximizing returns by identifying highly correlated assets",
+      "It helps in minimizing risk by identifying negatively correlated assets",
+      "It does not play a significant role in portfolio management"
+    ],
+    "correct_answer": 0,
+    "explanation": "The 'avg_correlation' metric aids in diversification by identifying assets that do not move in tandem, thereby reducing overall portfolio risk.",
+    "topic": "Portfolio Management",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "How does the 'avg_correlation' metric help in portfolio management?",
+        "options": [
+          "It helps in diversifying the portfolio by identifying uncorrelated assets",
+          "It helps in maximizing returns by identifying highly correlated assets",
+          "It helps in minimizing risk by identifying negatively correlated assets",
+          "It does not play a significant role in portfolio management"
+        ],
+        "explanation": "The 'avg_correlation' metric aids in diversification by identifying assets that do not move in tandem, thereby reducing overall portfolio risk.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:53:52.505726+00:00"
+  },
+  {
+    "id": "eco_ai_20260419_095729_e084d6",
+    "language": "en",
+    "question_text": "What is the primary goal of a balanced risk profile in investing?",
+    "options": [
+      "To maximize returns",
+      "To minimize risk",
+      "To balance returns and risk",
+      "To diversify portfolio"
+    ],
+    "correct_answer": 2,
+    "explanation": "A balanced risk profile aims to strike a balance between potential returns and risk, rather than prioritizing one over the other.",
+    "topic": "Risk Management",
+    "difficulty": "easy",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the primary goal of a balanced risk profile in investing?",
+        "options": [
+          "To maximize returns",
+          "To minimize risk",
+          "To balance returns and risk",
+          "To diversify portfolio"
+        ],
+        "explanation": "A balanced risk profile aims to strike a balance between potential returns and risk, rather than prioritizing one over the other.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  },
+  {
+    "id": "eco_ai_20260419_095729_271ac8",
+    "language": "en",
+    "question_text": "What is the Sharpe ratio used to measure in finance?",
+    "options": [
+      "Risk-adjusted return",
+      "Volatility",
+      "Max drawdown",
+      "Correlation"
+    ],
+    "correct_answer": 0,
+    "explanation": "The Sharpe ratio is a measure of risk-adjusted return, calculating the excess return of an investment over the risk-free rate, relative to its volatility.",
+    "topic": "Financial Metrics",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the Sharpe ratio used to measure in finance?",
+        "options": [
+          "Risk-adjusted return",
+          "Volatility",
+          "Max drawdown",
+          "Correlation"
+        ],
+        "explanation": "The Sharpe ratio is a measure of risk-adjusted return, calculating the excess return of an investment over the risk-free rate, relative to its volatility.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  },
+  {
+    "id": "eco_ai_20260419_095729_9fea47",
+    "language": "en",
+    "question_text": "What is the expected return view (annualized) according to the given context?",
+    "options": [
+      "10%",
+      "15%",
+      "20%",
+      "25.83%"
+    ],
+    "correct_answer": 3,
+    "explanation": "The expected return view (annualized) is given as 25.83% in the context.",
+    "topic": "Investment Returns",
+    "difficulty": "easy",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the expected return view (annualized) according to the given context?",
+        "options": [
+          "10%",
+          "15%",
+          "20%",
+          "25.83%"
+        ],
+        "explanation": "The expected return view (annualized) is given as 25.83% in the context.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  },
+  {
+    "id": "eco_ai_20260419_095729_22dde9",
+    "language": "en",
+    "question_text": "What is the sentiment score of the news according to the given context?",
+    "options": [
+      "0.1",
+      "0.17",
+      "0.17087149694762171",
+      "0.2"
+    ],
+    "correct_answer": 2,
+    "explanation": "The sentiment score of the news is given as 0.17087149694762171 in the context.",
+    "topic": "News Sentiment",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the sentiment score of the news according to the given context?",
+        "options": [
+          "0.1",
+          "0.17",
+          "0.17087149694762171",
+          "0.2"
+        ],
+        "explanation": "The sentiment score of the news is given as 0.17087149694762171 in the context.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  },
+  {
+    "id": "eco_ai_20260419_095729_d5eadb",
+    "language": "en",
+    "question_text": "What is the primary focus of the topic according to the given context?",
+    "options": [
+      "Financial markets",
+      "Investment strategies",
+      "Basic economists and their schools",
+      "Risk management"
+    ],
+    "correct_answer": 2,
+    "explanation": "The primary focus of the topic is basic economists and their schools, according to the given context.",
+    "topic": "Economics",
+    "difficulty": "easy",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the primary focus of the topic according to the given context?",
+        "options": [
+          "Financial markets",
+          "Investment strategies",
+          "Basic economists and their schools",
+          "Risk management"
+        ],
+        "explanation": "The primary focus of the topic is basic economists and their schools, according to the given context.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  },
+  {
+    "id": "eco_ai_20260419_095729_ef2e75",
+    "language": "en",
+    "question_text": "What is the annualized return of the given portfolio?",
+    "options": [
+      "0.1",
+      "0.15",
+      "0.2136105996264286",
+      "0.25"
+    ],
+    "correct_answer": 2,
+    "explanation": "The annualized return of the given portfolio is 0.2136105996264286.",
+    "topic": "Portfolio Performance",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the annualized return of the given portfolio?",
+        "options": [
+          "0.1",
+          "0.15",
+          "0.2136105996264286",
+          "0.25"
+        ],
+        "explanation": "The annualized return of the given portfolio is 0.2136105996264286.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  },
+  {
+    "id": "q7",
+    "language": "en",
+    "question_text": "What is the volatility of the given portfolio?",
+    "options": [
+      "0.1",
+      "0.12",
+      "0.13017853994504347",
+      "0.15"
+    ],
+    "correct_answer": 2,
+    "explanation": "The volatility of the given portfolio is 0.13017853994504347.",
+    "topic": "Portfolio Risk",
+    "difficulty": "medium",
+    "source": "ai",
+    "option_explanations": {},
+    "translations": {
+      "en": {
+        "question_text": "What is the volatility of the given portfolio?",
+        "options": [
+          "0.1",
+          "0.12",
+          "0.13017853994504347",
+          "0.15"
+        ],
+        "explanation": "The volatility of the given portfolio is 0.13017853994504347.",
+        "option_explanations": {}
+      }
+    },
+    "created_at": "2026-04-19T09:57:29.724539+00:00"
+  }
+]
