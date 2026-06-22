@@ -203,7 +203,6 @@ def _auto_login_for_smoke_tests() -> int | None:
 
     try:
         from src.auth import login_user
-        import os
         from src.auth.migrations import DEFAULT_USERNAME, create_default_user
 
         create_default_user()
