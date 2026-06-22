@@ -883,7 +883,10 @@ def _fetch_file_rows_legacy() -> list[sqlite3.Row]:
 
 def _render_file_center(profile: dict[str, str | int]) -> None:
     st.markdown("### Persistent File Vault")
-    st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
+    from src.storage.wharton_adapter import get_storage_backend
+    backend_name = get_storage_backend().backend_name
+    storage_type_str = "R2 (persistent)" if backend_name == 'r2' else "local disk (non-persistent on Streamlit Cloud)"
+    st.caption(f"Files stored via {storage_type_str} · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
     with st.expander("📤 Upload Files", expanded=True):
         with st.form("wharton_file_upload_form", clear_on_submit=True):
@@ -1152,6 +1155,16 @@ def _load_modular_history():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date) -> pd.DataFrame:
+    import pandas as pd
+    import streamlit as st
+    
+    if "manual_price_data" in st.session_state:
+        prices = st.session_state["manual_price_data"]
+        available_symbols = [s for s in symbols if s in prices.columns]
+        if not available_symbols:
+            return pd.DataFrame()
+        return prices[available_symbols]
+
     modules = _load_quant_modules()
     fetcher = modules["yahoo_fetcher"].YahooFetcher()
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
@@ -1276,7 +1289,7 @@ def _compute_quant_run(
             "news_api_key": "",
         }
         try:
-            news_api_key = str(st.secrets.get("NEWS_API_KEY", ""))
+            news_api_key = str(st.secrets.get("NEWSAPI_KEY", "") or st.secrets.get("NEWS_API_KEY", ""))
             if news_api_key: config["news_api_key"] = news_api_key
         except Exception:
             pass
@@ -1328,6 +1341,19 @@ def _compute_quant_run(
 def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
     default_start = default_end - timedelta(days=365 * 2)
+
+    with st.expander("📂 Offline Data Override (use if Yahoo Finance is unavailable)"):
+        st.caption("Upload a CSV with columns: Date, TICKER1, TICKER2, ... (close prices)")
+        csv_file = st.file_uploader("Price CSV", type=["csv"], key="manual_price_csv")
+        if csv_file:
+            try:
+                import pandas as pd
+                df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
+                st.session_state["manual_price_data"] = df
+                st.success(f"✅ Loaded {len(df)} rows × {len(df.columns)} tickers from CSV")
+                st.dataframe(df.tail(5))
+            except Exception as e:
+                st.error(f"CSV parse error: {e}")
 
     with st.expander("⚙️ Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
         with st.form("wharton_quant_config_form"):

@@ -41,6 +41,7 @@ data/run_history/
 data/portfolios/
 data/swing_tracker/
 data/.migration_completed
+data/*.bak*
 
 # Logs
 logs/

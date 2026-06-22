@@ -7,6 +7,7 @@ Includes:
 - Production-ready error handling
 """
 
+import os
 import streamlit as st
 from typing import Dict, Any, Optional, List
 from .backend import (
@@ -35,7 +36,7 @@ def run_storage_startup_check() -> Dict[str, Any]:
         ConfigurationError: If required configuration is missing
     """
     # Check if running in production
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     
     # Initialize storage
     init_result = initialize_storage()
@@ -97,7 +98,7 @@ def run_enhanced_startup_check() -> Dict[str, Any]:
         "warnings": [],
     }
     
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     results["production_mode"] = is_production
     
     try:
@@ -266,7 +267,7 @@ def validate_storage_for_production() -> bool:
     Returns:
         True if storage is ready for production, False otherwise
     """
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     
     if not is_production:
         return True  # Development mode is always valid
@@ -367,7 +368,7 @@ def check_migration_needed() -> bool:
     Returns:
         True if migration is needed
     """
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     
     if not is_production:
         return False  # No migration needed in development

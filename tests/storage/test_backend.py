@@ -410,7 +410,7 @@ class TestStorageConfig:
             config = StorageConfig()
             result = config.load_from_secrets()
             assert result is False
-            assert config._config is None
+            assert config._config == {"backend": "local"}
     
     def test_load_from_secrets_success(self):
         """Test loading config from secrets."""

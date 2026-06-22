@@ -33,11 +33,44 @@ def _get_db_path() -> Path:
 
 
 def _get_connection() -> sqlite3.Connection:
-    """Get a database connection with proper settings."""
-    conn = sqlite3.connect(str(_get_db_path()))
+    """Get a database connection with proper settings. Uses Turso if configured."""
+    turso_url = None
+    turso_token = None
+    try:
+        import streamlit as st
+        turso_url = st.secrets.get("TURSO_DATABASE_URL")
+        turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        pass
+    
+    if not turso_url:
+        turso_url = os.environ.get("TURSO_DATABASE_URL")
+    if not turso_token:
+        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+
+    db_path = _get_db_path()
+    
+    if turso_url and turso_token:
+        try:
+            import libsql_experimental as libsql
+        except ImportError:
+            try:
+                import libsql
+            except ImportError:
+                libsql = sqlite3
+                turso_url = None
+        
+        if turso_url:
+            conn = libsql.connect(str(db_path), sync_url=turso_url, auth_token=turso_token)
+            conn.sync()
+            conn.row_factory = sqlite3.Row
+            return conn
+
+    # Local SQLite fallback
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")  # Better concurrency
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -88,6 +121,8 @@ def init_auth_database() -> None:
             ON login_attempts(username, timestamp);
         """)
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -117,6 +152,8 @@ def create_user(
             (username, email, password_hash, created_at),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
         
         user_id = cursor.lastrowid
         return {
@@ -203,6 +240,8 @@ def create_session(user_id: int) -> str:
             (token, user_id, created_at, expires_at, created_at),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
         return token
     finally:
         conn.close()
@@ -240,6 +279,8 @@ def validate_session_token(token: str) -> bool:
                 (now, token),
             )
             conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
             return True
         return False
     finally:
@@ -274,6 +315,8 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
                 (now, token),
             )
             conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
             return dict(row)
         return None
     finally:
@@ -286,6 +329,8 @@ def revoke_session(token: str) -> None:
     try:
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -296,6 +341,8 @@ def revoke_all_user_sessions(user_id: int) -> None:
     try:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -315,6 +362,8 @@ def cleanup_expired_sessions() -> int:
             (now,),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
         return cursor.rowcount
     finally:
         conn.close()
@@ -364,6 +413,8 @@ def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = 
             (username, timestamp, 1 if success else 0, ip_address),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 

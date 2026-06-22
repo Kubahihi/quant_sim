@@ -260,6 +260,18 @@ Increase session expiry in `src/auth/database.py`:
 SESSION_EXPIRY_HOURS = 48  # Change from 24 to 48
 ```
 
+## Production: Persistent User Database (Turso)
+1. Sign up at turso.tech (free tier: 5 GB, 500M reads/month)
+2. Install turso CLI and run: `turso db create quant-sim-auth`
+3. Get URL: `turso db show quant-sim-auth --url`
+4. Get token: `turso db tokens create quant-sim-auth`
+5. Add to Streamlit Cloud secrets:
+```toml
+TURSO_DATABASE_URL = "libsql://quant-sim-auth-xxx.turso.io"
+TURSO_AUTH_TOKEN = "your-token-here"
+```
+Without these secrets, auth works locally (SQLite) but resets on each Streamlit Cloud redeploy.
+
 ## Support
 
 For issues or questions:
