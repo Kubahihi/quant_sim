@@ -33,6 +33,7 @@ for module_name, module_obj in list(sys.modules.items()):
     if not resolved.startswith(PROJECT_ROOT):
         sys.modules.pop(module_name, None)
 
+from src.auth.manager import login_user
 from ui.economics_questions import render_economics_questions_section
 from ui.dashboard_shell import (
     PAGE_LABELS,
@@ -202,10 +203,12 @@ def _auto_login_for_smoke_tests() -> int | None:
 
     try:
         from src.auth import login_user
-        from src.auth.migrations import DEFAULT_PASSWORD, DEFAULT_USERNAME, create_default_user
+        import os
+        from src.auth.migrations import DEFAULT_USERNAME, create_default_user
 
         create_default_user()
-        token, user, errors = login_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
+        password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD", "")
+        token, user, errors = login_user(DEFAULT_USERNAME, password)
         if errors or not token or not user:
             return None
 
