@@ -94,3 +94,58 @@ def calculate_cvar(
     """Calculate Conditional Value at Risk (Expected Shortfall)"""
     var = calculate_var(returns, confidence_level)
     return float(-returns[returns <= -var].mean())
+
+
+def calculate_parametric_var(
+    returns: pd.Series,
+    confidence_level: float = 0.95,
+) -> float:
+    """Calculate Value at Risk using parametric (normal) method"""
+    from scipy.stats import norm
+    mean = returns.mean()
+    std = returns.std()
+    return float(-(mean + norm.ppf(1 - confidence_level) * std))
+
+
+def calculate_parametric_cvar(
+    returns: pd.Series,
+    confidence_level: float = 0.95,
+) -> float:
+    """Calculate Conditional Value at Risk using parametric method"""
+    from scipy.stats import norm
+    mean = returns.mean()
+    std = returns.std()
+    alpha = 1 - confidence_level
+    return float(-(mean - std * (norm.pdf(norm.ppf(alpha)) / alpha)))
+
+
+def calculate_drawdown_series(returns: pd.Series) -> pd.Series:
+    """Calculate drawdown series over time"""
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.expanding().max()
+    drawdown = (cumulative - running_max) / running_max
+    return drawdown
+
+
+def calculate_rolling_volatility(
+    returns: pd.Series,
+    window: int = 60,
+    periods_per_year: int = 252,
+) -> pd.Series:
+    """Calculate rolling annualized volatility"""
+    return returns.rolling(window=window).std() * np.sqrt(periods_per_year)
+
+
+def calculate_rolling_sharpe(
+    returns: pd.Series,
+    risk_free_rate: float = 0.03,
+    window: int = 60,
+    periods_per_year: int = 252,
+) -> pd.Series:
+    """Calculate rolling annualized Sharpe ratio"""
+    daily_rf = risk_free_rate / periods_per_year
+    excess_returns = returns - daily_rf
+    roll_mean = excess_returns.rolling(window=window).mean()
+    roll_std = excess_returns.rolling(window=window).std()
+    return (roll_mean / roll_std) * np.sqrt(periods_per_year)
+

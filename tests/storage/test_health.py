@@ -130,7 +130,7 @@ class TestDisplayStorageStatus:
             
             display_storage_status()
             
-            mock_success.assert_called_once_with("✅ Healthy")
+            mock_success.assert_called_once_with(" Healthy")
             mock_caption.assert_any_call("Backend: local")
     
     @patch('src.storage.health.check_storage_health')
@@ -151,7 +151,7 @@ class TestDisplayStorageStatus:
             
             display_storage_status()
             
-            mock_error.assert_called_with("❌ Unhealthy")
+            mock_error.assert_called_with(" Unhealthy")
             mock_caption.assert_any_call("Error: Connection failed")
     
     @patch('src.storage.health.check_storage_health')

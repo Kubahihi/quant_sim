@@ -45,7 +45,7 @@ def get_storage_backend(storage_path: Optional[str] = None) -> StorageBackend:
     except Exception as e:
         try:
             import streamlit as st
-            st.warning(f"⚠️ R2 storage init failed ({e}), using local storage. Files will not persist.")
+            st.warning(f" R2 storage init failed ({e}), using local storage. Files will not persist.")
         except Exception:
             pass
 
@@ -638,10 +638,10 @@ def list_files_with_status(
         # Determine status
         if not exists_in_storage:
             status = "missing"
-            status_label = "❌ Missing from storage"
+            status_label = " Missing from storage"
         else:
             status = "available"
-            status_label = "✅ Available"
+            status_label = " Available"
         
         # Format size
         if file_size < 1024:

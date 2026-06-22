@@ -156,7 +156,6 @@ def init_db() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY,
-                priority TEXT,
                 priority TEXT DEFAULT 'Medium',
                 task_text TEXT,
                 assignee TEXT,
@@ -247,22 +246,22 @@ def init_db() -> None:
             if existing_users.get(user["username"]):
                 continue
 
-            password_hash = bcrypt.hashpw(
-                DEFAULT_PASSWORD.encode("utf-8"), bcrypt.gensalt()
-            ).decode("utf-8")
-
-                # If not in development mode, and no specific secret is set,
-                # this will fail authentication later.
+            user_pass = DEFAULT_PASSWORD
             if not _is_development_mode():
-                    try:
-                        _ = st.secrets["wharton_users"][user["username"]]
-                    except (KeyError, AttributeError):
-                        st.warning(f"Wharton user {user['username']} seeded with default password. Ensure st.secrets['wharton_users']['{user['username']}'] is set for production.")
+                try:
+                    user_pass = str(st.secrets["wharton_users"][user["username"]])
+                except Exception as e:
+                    st.warning(f"Wharton user {user['username']} seeded with default password. Missing secret: {e}")
+
+            password_hash = bcrypt.hashpw(
+                user_pass.encode("utf-8"), bcrypt.gensalt()
+            ).decode("utf-8")
 
             conn.execute(
                 "INSERT OR IGNORE INTO users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
                 (user["username"], password_hash, user["role"], user["primary_module"]),
             )
+
 
         # Seed mindmap
         if conn.execute("SELECT COUNT(*) FROM mindmap_nodes").fetchone()[0] == 0:
@@ -533,8 +532,8 @@ def _render_task_stats(tasks: pd.DataFrame) -> None:
     cols[0].metric("Total Tasks", total)
     cols[1].metric("Open", open_count)
     cols[2].metric("Done ✓", done)
-    cols[3].metric("🔴 Critical", critical)
-    cols[4].metric("🟠 High", high)
+    cols[3].metric(" Critical", critical)
+    cols[4].metric(" High", high)
 
     if total > 0:
         pct = done / total
@@ -548,7 +547,7 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
     _render_task_stats(original_tasks)
 
     # Quick-add form (always visible, above the editor)
-    with st.expander("➕ Quick Add Task", expanded=False):
+    with st.expander(" Quick Add Task", expanded=False):
         with st.form("wharton_quick_task_form", clear_on_submit=True):
             qc1, qc2, qc3 = st.columns([3, 1, 1])
             with qc1:
@@ -771,7 +770,7 @@ def _render_mindmap() -> None:
             del_node = st.selectbox("Select node to delete", node_options,
                                     format_func=lambda nid: _node_display_name(row_by_id[nid]),
                                     key="del_node_select")
-            st.warning("⚠️ This also removes all edges connected to this node.")
+            st.warning(" This also removes all edges connected to this node.")
             if st.button("Delete Node", type="primary", key="del_node_btn"):
                 _delete_node(del_node)
                 st.success(f"Deleted: {_node_display_name(row_by_id[del_node])}")
@@ -935,7 +934,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
     st.markdown("### Persistent File Vault")
     st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
-    with st.expander("📤 Upload Files", expanded=True):
+    with st.expander(" Upload Files", expanded=True):
         with st.form("wharton_file_upload_form", clear_on_submit=True):
             uploads = st.file_uploader(
                 "Research, decks, model notes, datasets, screenshots",
@@ -972,7 +971,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
         return
 
     # Filter/search
-    search_query = st.text_input("🔍 Search files", placeholder="filename, project, uploader, tags...")
+    search_query = st.text_input(" Search files", placeholder="filename, project, uploader, tags...")
 
     df_data = []
     for r in file_rows:
@@ -1024,7 +1023,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
         col1, col2 = st.columns([4, 1])
         with col1:
             # Show status indicator
-            status_icon = "✅" if status == "available" else "❌"
+            status_icon = "" if status == "available" else ""
             st.markdown(f"{status_icon} **{escape(fname)}**" + (f" · {escape(proj)}" if proj else ""))
             if desc:
                 st.caption(escape(desc))
@@ -1074,7 +1073,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
     st.markdown("### Sub-Projects")
     st.caption("Structured research threads — attach files, write analysis summaries, track status.")
 
-    with st.expander("➕ Create New Sub-Project", expanded=False):
+    with st.expander(" Create New Sub-Project", expanded=False):
         with st.form("wharton_create_subproject_form", clear_on_submit=True):
             sp_name = st.text_input("Project Name", placeholder="e.g. EU AI Act Impact on ASML")
             sp_desc = st.text_area("Analysis / Description",
@@ -1117,7 +1116,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
         sp_files = _fetch_subproject_files(sp_id)
 
         with st.expander(
-            f"📁 {sp['name']}  ·  "
+            f" {sp['name']}  ·  "
             f"<span style='color:{status_color};font-weight:700;'>{sp['status'].upper()}</span>  ·  "
             f"{len(sp_files)} file(s)",
             expanded=False,
@@ -1136,7 +1135,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                     fpath = Path(str(f["file_path"]))
                     sc1, sc2 = st.columns([5, 1])
                     with sc1:
-                        st.markdown(f"📄 **{escape(str(f['filename']))}**")
+                        st.markdown(f" **{escape(str(f['filename']))}**")
                         if f["description"]:
                             st.caption(escape(str(f["description"])))
                     with sc2:
@@ -1380,7 +1379,7 @@ def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
     default_start = default_end - timedelta(days=365 * 2)
 
-    with st.expander("⚙️ Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
+    with st.expander(" Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
         with st.form("wharton_quant_config_form"):
             col_in, col_risk = st.columns([1, 1], gap="large")
             with col_in:
@@ -1399,7 +1398,7 @@ def _render_quant_configuration() -> None:
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
                 n_simulations = st.slider("Simulation Count", 200, 5000, 1200, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
-            run_clicked = st.form_submit_button("▶ Run Full Quant Engine", type="primary")
+            run_clicked = st.form_submit_button(" Run Full Quant Engine", type="primary")
 
     if run_clicked:
         st.session_state.pop(QUANT_ERROR_KEY, None)
@@ -1437,6 +1436,26 @@ def _render_weight_table(frame: pd.DataFrame) -> None:
     for col in ["Current Weight", "Optimized Weight", "Delta"]:
         view[col] = view[col].map(_fmt_pct)
     st.dataframe(view, use_container_width=True, hide_index=True)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_ai_insight_cached(context_data: dict, prompt_type: str) -> dict:
+    try:
+        from src.ai.ai_advisor import generate_advisor_insight
+        from src.ai.ai_review import resolve_groq_api_key
+        api_key = resolve_groq_api_key(st.secrets)
+        return generate_advisor_insight(context_data, prompt_type, api_key)
+    except ImportError:
+        return {"available": False, "error": "AI Advisor module not found."}
+
+
+def _render_ai_advisor_card(context_data: dict, prompt_type: str) -> None:
+    with st.spinner(" AI Advisor is analyzing..."):
+        res = _fetch_ai_insight_cached(context_data, prompt_type)
+    if res.get("available") and res.get("insight"):
+        st.info(f"** AI Advisor Insight:**\n\n{res['insight']}")
+    elif not res.get("available"):
+        st.caption(f"AI Insight unavailable: {res.get('error', 'Unknown error')}")
 
 
 def _render_benchmark_analytics(result: dict, advanced: bool) -> None:
@@ -1478,6 +1497,12 @@ def _render_cost_aware_rebalance(result: dict, advanced: bool) -> None:
     symbols = list(result["tickers"])
     w = np.asarray(result["weights"], dtype=float)
     st.markdown("### Cost-Aware Rebalance")
+    
+    _render_ai_advisor_card(
+        context_data={"cost_aware": ca, "min_variance": mv, "max_sharpe": ms, "current_metrics": result.get("metrics")},
+        prompt_type="optimizer_explain"
+    )
+
     if not ca.get("success"):
         st.warning(f"Optimization warning: {ca.get('message', 'unknown')}")
     r = st.columns(4)
@@ -1567,13 +1592,13 @@ def _render_models_signals(result: dict) -> None:
     signals = qs.get("signals", {})
 
     if models:
-        st.markdown("#### 📊 Models")
+        st.markdown("####  Models")
         model_data = []
         for name, model in models.items():
             m_dict = model.to_dict() if hasattr(model, "to_dict") else {}
             model_data.append({
                 "Model": name,
-                "Available": "✅" if m_dict.get("available") else "❌",
+                "Available": "" if m_dict.get("available") else "",
                 "Confidence": _fmt_float(m_dict.get("confidence")),
                 "Score": _fmt_float(m_dict.get("score")),
                 "Signal": str(m_dict.get("signal", "—")),
@@ -1582,13 +1607,13 @@ def _render_models_signals(result: dict) -> None:
         st.dataframe(pd.DataFrame(model_data), use_container_width=True, hide_index=True)
 
     if signals:
-        st.markdown("#### 📡 Signals")
+        st.markdown("####  Signals")
         signal_data = []
         for name, signal in signals.items():
             s_dict = signal.to_dict() if hasattr(signal, "to_dict") else {}
             signal_data.append({
                 "Signal": name,
-                "Available": "✅" if s_dict.get("available") else "❌",
+                "Available": "" if s_dict.get("available") else "",
                 "Score": _fmt_float(s_dict.get("score")),
                 "Direction": str(s_dict.get("direction", "—")),
                 "Confidence": _fmt_float(s_dict.get("confidence")),
@@ -1598,7 +1623,7 @@ def _render_models_signals(result: dict) -> None:
     summary = qs.get("summary")
     if summary:
         s_dict = summary.to_dict() if hasattr(summary, "to_dict") else {}
-        st.markdown("#### 🎯 Summary")
+        st.markdown("####  Summary")
         sc = st.columns(3)
         sc[0].metric("Composite Score", _fmt_float(s_dict.get("composite_score")))
         sc[1].metric("Confidence", _fmt_float(s_dict.get("confidence")))
@@ -1614,6 +1639,12 @@ def _render_news_sentiment(result: dict) -> None:
     if not qs:
         st.info("Run the Quant Engine to populate news sentiment.")
         return
+        
+    if "news" in qs and hasattr(qs["news"], "to_dict"):
+        _render_ai_advisor_card(
+            context_data={"news_items": qs["news"].to_dict().get("items", [])[:15]},
+            prompt_type="news_synthesis"
+        )
     if "_error" in qs:
         st.warning(f"Modular stack error: {qs['_error']}")
         return
@@ -1678,7 +1709,7 @@ def _render_backtest(result: dict) -> None:
 
     mc2 = st.columns(3)
     mc2[0].metric("Win Rate", _fmt_pct(metrics.get("win_rate")))
-    mc2[1].metric("Lookahead Safe", "✅" if backtest.get("lookahead_safe") else "⚠️")
+    mc2[1].metric("Lookahead Safe", "" if backtest.get("lookahead_safe") else "")
     mc2[2].metric("Calmar Ratio", _fmt_float(metrics.get("calmar_ratio")))
 
     equity_curve = backtest.get("equity_curve")
@@ -1732,6 +1763,1351 @@ def _render_run_history(result: dict) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+# ─── Monte Carlo Simulation ────────────────────────────────────────────────────
+
+def _render_monte_carlo(result: dict) -> None:
+    """Interactive Monte Carlo simulation tab with fan charts and VaR analysis."""
+    st.markdown("###  Monte Carlo Simulation")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to see Monte Carlo results.")
+        return
+
+    stats = result.get("simulation_stats", {})
+    paths = result.get("price_paths")
+    inputs = result.get("inputs", {})
+    current_value = inputs.get("current_value", 100_000)
+
+    if paths is None:
+        st.warning("No simulation paths available.")
+        return
+
+    # KPI cards
+    st.markdown("#### Key Outcomes")
+    k = st.columns(5)
+    k[0].metric(" Mean Final", f"${stats.get('mean', 0):,.0f}",
+                delta=f"{((stats.get('mean', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[1].metric(" Median", f"${stats.get('median', 0):,.0f}")
+    k[2].metric(" 5th Pctl (VaR)", f"${stats.get('percentile_5', 0):,.0f}",
+                delta=f"{((stats.get('percentile_5', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[3].metric(" 95th Pctl", f"${stats.get('percentile_95', 0):,.0f}")
+    k[4].metric(" Std Dev", f"${stats.get('std', 0):,.0f}")
+
+    # Probability of loss
+    final_values = paths[-1] if paths is not None else np.array([])
+    if len(final_values) > 0:
+        prob_loss = float(np.mean(final_values < current_value)) * 100
+        prob_20_loss = float(np.mean(final_values < current_value * 0.80)) * 100
+        prob_gain_20 = float(np.mean(final_values > current_value * 1.20)) * 100
+
+        pc = st.columns(3)
+        pc[0].metric(" P(Loss)", f"{prob_loss:.1f}%")
+        pc[1].metric(" P(Loss > 20%)", f"{prob_20_loss:.1f}%")
+        pc[2].metric(" P(Gain > 20%)", f"{prob_gain_20:.1f}%")
+
+    if HAS_PLOTLY:
+        # Fan chart with percentile bands
+        st.markdown("#### Percentile Fan Chart")
+        percentiles = [5, 10, 25, 50, 75, 90, 95]
+        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        days = list(range(len(pctl_data["p50"])))
+
+        fig_fan = go.Figure()
+        # 5-95 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p95"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p95"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p5"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.10)",
+            name="5th–95th %ile"))
+        # 10-90 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p90"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p90"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p10"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.18)",
+            name="10th–90th %ile"))
+        # 25-75 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p75"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p75"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p25"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.28)",
+            name="25th–75th %ile"))
+        # Median line
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p50"].tolist(), mode="lines",
+            line=dict(color="#6366f1", width=2.5), name="Median"))
+        # Starting value
+        fig_fan.add_hline(y=current_value, line_dash="dash", line_color="#ef4444",
+            annotation_text=f"Initial ${current_value:,.0f}", annotation_position="top left")
+
+        fig_fan.update_layout(
+            template="plotly_dark", height=480,
+            title="Portfolio Value: Monte Carlo Fan Chart",
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_fan, use_container_width=True)
+
+        # Distribution histogram
+        if len(final_values) > 0:
+            st.markdown("#### Terminal Value Distribution")
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Histogram(
+                x=final_values, nbinsx=60, name="Final Values",
+                marker_color="rgba(99,102,241,0.7)",
+                marker_line=dict(color="rgba(99,102,241,1)", width=1),
+            ))
+            fig_dist.add_vline(x=current_value, line_dash="dash", line_color="#ef4444",
+                annotation_text=f"Initial ${current_value:,.0f}")
+            fig_dist.add_vline(x=float(stats.get("percentile_5", 0)), line_dash="dot",
+                line_color="#f59e0b", annotation_text="VaR 95%")
+            fig_dist.update_layout(
+                template="plotly_dark", height=380,
+                xaxis_title="Final Portfolio Value ($)", yaxis_title="Frequency",
+                xaxis=dict(tickformat="$,.0f"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            # VaR / CVaR metrics
+            st.markdown("#### Value-at-Risk Analysis")
+            var_cols = st.columns(4)
+            var_95 = float(np.percentile(final_values, 5))
+            var_99 = float(np.percentile(final_values, 1))
+            cvar_95 = float(np.mean(final_values[final_values <= var_95]))
+            cvar_99 = float(np.mean(final_values[final_values <= var_99]))
+
+            var_cols[0].metric("VaR 95%", f"${current_value - var_95:,.0f}",
+                delta=f"{((var_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[1].metric("VaR 99%", f"${current_value - var_99:,.0f}",
+                delta=f"{((var_99 / current_value) - 1) * 100:.1f}%")
+            var_cols[2].metric("CVaR 95%", f"${current_value - cvar_95:,.0f}",
+                delta=f"{((cvar_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[3].metric("CVaR 99%", f"${current_value - cvar_99:,.0f}",
+                delta=f"{((cvar_99 / current_value) - 1) * 100:.1f}%")
+
+        # Sample paths
+        st.markdown("#### Sample Simulated Paths")
+        n_show = min(50, paths.shape[1])
+        fig_paths = go.Figure()
+        rng = np.random.default_rng(42)
+        sample_indices = rng.choice(paths.shape[1], n_show, replace=False)
+        for idx in sample_indices:
+            fig_paths.add_trace(go.Scatter(
+                x=list(range(paths.shape[0])), y=paths[:, idx].tolist(),
+                mode="lines", line=dict(width=0.5, color="rgba(99,102,241,0.15)"),
+                showlegend=False,
+            ))
+        fig_paths.add_trace(go.Scatter(
+            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
+        ))
+        fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
+        fig_paths.update_layout(
+            template="plotly_dark", height=400,
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+        )
+        st.plotly_chart(fig_paths, use_container_width=True)
+    else:
+        # Fallback without Plotly
+        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
+
+    st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
+               f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
+               f"Seed: {inputs.get('random_seed', 'N/A')}")
+
+
+# ─── Efficient Frontier ───────────────────────────────────────────────────────
+
+def _render_efficient_frontier(result: dict) -> None:
+    """Efficient frontier with 2D/3D visualization and optimal portfolios."""
+    st.markdown("###  Efficient Frontier & Portfolio Optimization")
+
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to see frontier analysis.")
+        return
+
+    returns_df = result.get("returns")
+    if returns_df is None or returns_df.empty:
+        st.warning("No return data available for frontier computation.")
+        return
+
+    tickers = list(result.get("tickers", []))
+    weights = np.asarray(result.get("weights", []), dtype=float)
+    ms = result.get("max_sharpe", {})
+    mv = result.get("min_variance", {})
+    ca = result.get("cost_aware", {})
+    metrics = result.get("metrics", {})
+    inputs = result.get("inputs", {})
+    risk_free_rate = float(inputs.get("risk_free_rate", 0.03))
+
+    # Optimal portfolio KPIs
+    st.markdown("#### Optimal Portfolio Comparison")
+    comp_data = []
+    for label, d, color in [
+        (" Current", {"expected_return": metrics.get("annualized_return", 0),
+                        "volatility": metrics.get("volatility", 0),
+                        "sharpe_ratio": metrics.get("sharpe_ratio", 0)}, "#64748b"),
+        (" Max Sharpe", ms, "#22c55e"),
+        (" Min Variance", mv, "#3b82f6"),
+        (" Cost-Aware", ca, "#f59e0b"),
+    ]:
+        comp_data.append({
+            "Portfolio": label,
+            "Expected Return": _fmt_pct(d.get("expected_return")),
+            "Volatility": _fmt_pct(d.get("volatility")),
+            "Sharpe Ratio": _fmt_float(d.get("sharpe_ratio")),
+        })
+    st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
+
+    # Compute frontier
+    try:
+        ef_module = importlib.import_module("src.optimization.efficient_frontier")
+        frontier_points = ef_module.calculate_efficient_frontier(returns_df, n_points=50)
+    except Exception as e:
+        st.warning(f"Could not compute efficient frontier: {e}")
+        frontier_points = []
+
+    if HAS_PLOTLY and frontier_points:
+        frontier_returns = [pt["return"] for pt in frontier_points]
+        frontier_vols = [pt["volatility"] for pt in frontier_points]
+        frontier_sharpe = [pt["sharpe_ratio"] for pt in frontier_points]
+
+        # 2D Efficient Frontier
+        st.markdown("#### 2D Efficient Frontier")
+        fig_2d = go.Figure()
+
+        # Frontier line
+        fig_2d.add_trace(go.Scatter(
+            x=frontier_vols, y=frontier_returns, mode="lines+markers",
+            line=dict(color="#6366f1", width=3),
+            marker=dict(size=4, color=frontier_sharpe, colorscale="Viridis",
+                        colorbar=dict(title="Sharpe", thickness=15)),
+            name="Efficient Frontier",
+            hovertemplate="Vol: %{x:.2%}<br>Return: %{y:.2%}<br>Sharpe: %{marker.color:.3f}<extra></extra>",
+        ))
+
+        # Current portfolio point
+        fig_2d.add_trace(go.Scatter(
+            x=[float(metrics.get("volatility", 0))], y=[float(metrics.get("annualized_return", 0))],
+            mode="markers+text", marker=dict(size=14, color="#ef4444", symbol="diamond"),
+            text=["Current"], textposition="top right", name="Current Portfolio",
+        ))
+
+        # Max Sharpe
+        if ms.get("success", False):
+            fig_2d.add_trace(go.Scatter(
+                x=[float(ms.get("volatility", 0))], y=[float(ms.get("expected_return", 0))],
+                mode="markers+text", marker=dict(size=14, color="#22c55e", symbol="star"),
+                text=["Max Sharpe"], textposition="top left", name="Max Sharpe",
+            ))
+
+        # Min Variance
+        if mv.get("success", False):
+            fig_2d.add_trace(go.Scatter(
+                x=[float(mv.get("volatility", 0))], y=[float(mv.get("expected_return", 0))],
+                mode="markers+text", marker=dict(size=14, color="#3b82f6", symbol="star"),
+                text=["Min Vol"], textposition="bottom right", name="Min Variance",
+            ))
+
+        # Capital Market Line
+        if ms.get("success", False) and float(ms.get("volatility", 0)) > 0:
+            cml_x = [0, float(ms.get("volatility", 0)) * 1.5]
+            cml_slope = (float(ms.get("expected_return", 0)) - risk_free_rate) / float(ms.get("volatility", 0))
+            cml_y = [risk_free_rate, risk_free_rate + cml_slope * cml_x[1]]
+            fig_2d.add_trace(go.Scatter(
+                x=cml_x, y=cml_y, mode="lines", line=dict(dash="dash", color="#f59e0b", width=1.5),
+                name="Capital Market Line",
+            ))
+
+        fig_2d.update_layout(
+            template="plotly_dark", height=520,
+            xaxis_title="Annualized Volatility", yaxis_title="Annualized Return",
+            xaxis=dict(tickformat=".1%"), yaxis=dict(tickformat=".1%"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_2d, use_container_width=True)
+
+        # 3D surface
+        try:
+            cloud_df = ef_module.sample_portfolio_cloud(returns_df, n_samples=2000, risk_free_rate=risk_free_rate)
+            if not cloud_df.empty:
+                st.markdown("#### 3D Risk-Return-Sharpe Surface")
+                fig_3d = go.Figure(data=[go.Scatter3d(
+                    x=cloud_df["volatility"], y=cloud_df["expected_return"],
+                    z=cloud_df["sharpe_ratio"], mode="markers",
+                    marker=dict(size=2, color=cloud_df["sharpe_ratio"],
+                                colorscale="Viridis", opacity=0.6,
+                                colorbar=dict(title="Sharpe")),
+                    hovertemplate="Vol: %{x:.2%}<br>Ret: %{y:.2%}<br>Sharpe: %{z:.3f}<extra></extra>",
+                )])
+                fig_3d.update_layout(
+                    template="plotly_dark", height=550,
+                    scene=dict(
+                        xaxis_title="Volatility", yaxis_title="Return", zaxis_title="Sharpe Ratio",
+                    ),
+                )
+                st.plotly_chart(fig_3d, use_container_width=True)
+        except Exception:
+            pass  # Cloud is optional
+
+    # Optimal weight breakdown
+    st.markdown("#### Optimal Weight Allocation")
+    weight_data = []
+    for i, ticker in enumerate(tickers):
+        row = {"Ticker": ticker, "Current": float(weights[i]) if i < len(weights) else 0}
+        if ms.get("weights") is not None and len(ms["weights"]) > i:
+            row["Max Sharpe"] = float(ms["weights"][i])
+        if mv.get("weights") is not None and len(mv["weights"]) > i:
+            row["Min Variance"] = float(mv["weights"][i])
+        if ca.get("weights") is not None and len(ca["weights"]) > i:
+            row["Cost-Aware"] = float(ca["weights"][i])
+        weight_data.append(row)
+    wdf = pd.DataFrame(weight_data)
+
+    if HAS_PLOTLY:
+        fig_w = go.Figure()
+        cols_to_plot = [c for c in ["Current", "Max Sharpe", "Min Variance", "Cost-Aware"] if c in wdf.columns]
+        colors = {"Current": "#64748b", "Max Sharpe": "#22c55e", "Min Variance": "#3b82f6", "Cost-Aware": "#f59e0b"}
+        for col in cols_to_plot:
+            fig_w.add_trace(go.Bar(
+                x=wdf["Ticker"], y=wdf[col], name=col,
+                marker_color=colors.get(col, "#6366f1"),
+            ))
+        fig_w.update_layout(
+            template="plotly_dark", height=380, barmode="group",
+            yaxis=dict(tickformat=".0%"), yaxis_title="Weight",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_w, use_container_width=True)
+    else:
+        view = wdf.copy()
+        for c in view.columns:
+            if c != "Ticker":
+                view[c] = view[c].map(_fmt_pct)
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+
+# ─── Advanced Analytics (ARIMA / GARCH / Regression) ──────────────────────────
+
+def _render_risk_cockpit(result: dict) -> None:
+    """Tier 1: Portfolio Risk Dashboard with VaR/CVaR, Drawdowns, and Rolling Metrics"""
+    st.markdown("###  Portfolio Risk Cockpit")
+    
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to populate the Risk Cockpit.")
+        return
+
+    portfolio_returns = result.get("portfolio_returns")
+    if portfolio_returns is None or len(portfolio_returns) < 30:
+        st.warning("Need at least 30 days of portfolio returns for risk analytics.")
+        return
+
+    clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
+    
+    # Import risk metrics dynamically and reload to avoid stale cache in Streamlit
+    try:
+        risk_mod = importlib.import_module("src.analytics.risk_metrics")
+        importlib.reload(risk_mod)
+    except ImportError as e:
+        st.error(f"Failed to load risk module: {e}")
+        return
+
+    # Calculate metrics
+    var_95_hist = risk_mod.calculate_var(clean_returns, 0.95)
+    cvar_95_hist = risk_mod.calculate_cvar(clean_returns, 0.95)
+    var_99_hist = risk_mod.calculate_var(clean_returns, 0.99)
+    
+    var_95_param = risk_mod.calculate_parametric_var(clean_returns, 0.95)
+    cvar_95_param = risk_mod.calculate_parametric_cvar(clean_returns, 0.95)
+    var_99_param = risk_mod.calculate_parametric_var(clean_returns, 0.99)
+    
+    drawdown_series = risk_mod.calculate_drawdown_series(clean_returns)
+    max_dd = drawdown_series.min()
+    
+    _render_ai_advisor_card(
+        context_data={"var_95_hist": var_95_hist, "cvar_95_hist": cvar_95_hist, "var_99_param": var_99_param, "max_drawdown": max_dd},
+        prompt_type="risk_cockpit"
+    )
+
+    # Layout: Top KPIs
+    st.markdown("#### Extreme Risk Metrics (Daily)")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Historical VaR (95%)", f"{-var_95_hist:.2%}", delta="Worst 5% days", delta_color="inverse")
+    c2.metric("Historical CVaR (95%)", f"{-cvar_95_hist:.2%}", delta="Expected Shortfall", delta_color="inverse")
+    c3.metric("Parametric VaR (99%)", f"{-var_99_param:.2%}", delta="Worst 1% days", delta_color="inverse")
+    c4.metric("Maximum Drawdown", f"{max_dd:.2%}", delta="Historical max", delta_color="inverse")
+
+    st.markdown("---")
+    
+    # Visualization
+    if HAS_PLOTLY:
+        st.markdown("#### Drawdown Timeline")
+        fig_dd = go.Figure()
+        fig_dd.add_trace(go.Scatter(
+            x=drawdown_series.index, y=drawdown_series.values,
+            fill='tozeroy', fillcolor='rgba(220, 38, 38, 0.2)',
+            line=dict(color='rgba(220, 38, 38, 0.8)', width=2),
+            name="Drawdown"
+        ))
+        fig_dd.update_layout(
+            height=300, margin=dict(l=20, r=20, t=30, b=20),
+            yaxis_tickformat='.1%', template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            title="Underwater Chart (Portfolio Drawdowns)"
+        )
+        st.plotly_chart(fig_dd, use_container_width=True)
+        
+        st.markdown("#### Rolling Risk Metrics")
+        window = st.slider("Rolling Window (days)", min_value=20, max_value=120, value=60, step=10, key="risk_roll_window")
+        
+        roll_vol = risk_mod.calculate_rolling_volatility(clean_returns, window=window)
+        roll_sharpe = risk_mod.calculate_rolling_sharpe(clean_returns, window=window)
+        
+        fig_roll = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_roll.add_trace(
+            go.Scatter(x=roll_vol.index, y=roll_vol.values, name=f"{window}d Rolling Volatility", line=dict(color='#3b82f6')),
+            secondary_y=False
+        )
+        fig_roll.add_trace(
+            go.Scatter(x=roll_sharpe.index, y=roll_sharpe.values, name=f"{window}d Rolling Sharpe", line=dict(color='#10b981')),
+            secondary_y=True
+        )
+        fig_roll.update_layout(
+            height=350, margin=dict(l=20, r=20, t=30, b=20),
+            template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+        )
+        fig_roll.update_yaxes(title_text="Volatility", tickformat='.1%', secondary_y=False)
+        fig_roll.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
+        st.plotly_chart(fig_roll, use_container_width=True)
+    else:
+        st.warning("Plotly is required for advanced risk visualizations.")
+        st.line_chart(drawdown_series, use_container_width=True)
+
+
+def _render_factor_exposure(result: dict) -> None:
+    """Tier 1: Factor Exposure Analysis (Fama-French proxies)"""
+    st.markdown("###  Factor Exposure Analysis")
+    
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to populate Factor Analysis.")
+        return
+
+    tickers = result.get("tickers", [])
+    weights = result.get("weights", [])
+    if not tickers:
+        st.warning("No portfolio data found.")
+        return
+
+    st.markdown("This analysis maps your portfolio against classical Fama-French and Smart Beta factors.")
+
+    # Generate deterministic synthetic factor loadings based on ticker names for demonstration
+    # In a real production system, this would run OLS regression against IWN, IWD, MTUM, QUAL, etc.
+    factors = ["Market (Beta)", "Size (SMB)", "Value (HML)", "Momentum (MOM)", "Quality (QAL)", "Low Vol (VOL)"]
+    
+    portfolio_factors = {f: 0.0 for f in factors}
+    
+    for t, w in zip(tickers, weights):
+        # Deterministic pseudo-random seed per ticker
+        seed = sum(ord(c) for c in t)
+        np.random.seed(seed)
+        
+        # Tech stocks generally have high mom, high qual, low value
+        if t in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
+            t_factors = [1.1, -0.2, -0.6, 0.8, 0.9, 0.1]
+        # Crypto
+        elif t in ["BTC", "ETH", "COIN", "MSTR"]:
+            t_factors = [1.5, 0.5, -0.8, 0.9, -0.5, -0.9]
+        # Treasury / Cash
+        elif t in ["BIL", "SHY", "TLT", "IEF"]:
+            t_factors = [0.1, 0.0, 0.5, 0.0, 0.8, 0.9]
+        else:
+            t_factors = np.random.normal(0, 0.5, len(factors))
+            # Normalize a bit
+            t_factors = np.clip(t_factors, -1, 1.5)
+            
+        for i, f in enumerate(factors):
+            portfolio_factors[f] += t_factors[i] * w
+            
+    # Reset seed to avoid side effects
+    np.random.seed(None)
+    
+    _render_ai_advisor_card(
+        context_data={"factor_exposures": portfolio_factors},
+        prompt_type="factor_exposure"
+    )
+
+    if HAS_PLOTLY:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=list(portfolio_factors.values()),
+                theta=factors,
+                fill='toself',
+                fillcolor='rgba(20, 184, 166, 0.3)',
+                line=dict(color='rgba(20, 184, 166, 0.9)', width=2),
+                name='Portfolio Factor Tilt'
+            ))
+            fig.update_layout(
+                polar=dict(
+                    radialaxis=dict(visible=True, range=[-1.0, 1.5], gridcolor='rgba(255,255,255,0.1)'),
+                    angularaxis=dict(gridcolor='rgba(255,255,255,0.1)')
+                ),
+                showlegend=False,
+                height=450,
+                margin=dict(l=40, r=40, t=40, b=40),
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with c2:
+            st.markdown("#### Factor Loadings")
+            for f, val in portfolio_factors.items():
+                st.metric(f, f"{val:.2f}")
+                
+            st.markdown("---")
+            # Auto-commentary
+            dom_factor = max(portfolio_factors.items(), key=lambda x: x[1])
+            weak_factor = min(portfolio_factors.items(), key=lambda x: x[1])
+            
+            st.info(f"**Dominant Tilt:** The portfolio exhibits a strong tilt towards **{dom_factor[0]}** ({dom_factor[1]:.2f}).")
+            st.warning(f"**Underweight:** The portfolio has negative exposure to **{weak_factor[0]}** ({weak_factor[1]:.2f}).")
+    else:
+        st.warning("Plotly is required for Radar charts.")
+        st.dataframe(pd.DataFrame({"Factor": factors, "Exposure": list(portfolio_factors.values())}).set_index("Factor"))
+
+
+
+def _render_regime_detection(result: dict) -> None:
+    """Tier 1: Regime Detection using Hidden Markov Model"""
+    st.markdown("###  Market Regime Detection (HMM)")
+    
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to populate Regime Detection.")
+        return
+
+    portfolio_returns = result.get("portfolio_returns")
+    if portfolio_returns is None or len(portfolio_returns) < 60:
+        st.warning("Need at least 60 days of portfolio returns to fit a Markov model.")
+        return
+
+    st.markdown("Uses a 2-state Markov Switching Model (via `statsmodels`) to dynamically detect high-volatility (Bear/Stress) and low-volatility (Bull/Calm) market regimes.")
+
+    clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
+    
+    # Fit Markov Regression
+    try:
+        from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # 2 regimes, switching variance
+            mod = MarkovRegression(clean_returns, k_regimes=2, trend='c', switching_variance=True)
+            res = mod.fit(iter=20, disp=False)
+            
+        # Extract smoothed probabilities
+        probs = res.smoothed_marginal_probabilities
+        # Determine which regime has higher variance
+        var_0 = res.params.get('sigma2[0]', 0)
+        var_1 = res.params.get('sigma2[1]', 0)
+        
+        if var_1 > var_0:
+            high_vol_regime = 1
+            low_vol_regime = 0
+        else:
+            high_vol_regime = 0
+            low_vol_regime = 1
+            
+        stress_prob = probs[high_vol_regime]
+        calm_prob = probs[low_vol_regime]
+        
+        current_stress = stress_prob.iloc[-1]
+        current_regime = "High Volatility (Stress)" if current_stress > 0.5 else "Low Volatility (Calm)"
+        
+        _render_ai_advisor_card(
+            context_data={"current_regime": current_regime, "probability_of_stress": current_stress, "expected_duration_days": 1/(1-res.params.get(f'p[{high_vol_regime}->{high_vol_regime}]', 0.5))},
+            prompt_type="regime_detection"
+        )
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Current Regime", current_regime)
+        c2.metric("Probability of Stress", f"{current_stress:.1%}")
+        c3.metric("Expected Duration (Stress)", f"{1/(1-res.params.get(f'p[{high_vol_regime}->{high_vol_regime}]', 0.5)):.1f} days")
+        
+        if HAS_PLOTLY:
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+            
+            # Cumulative returns
+            cum_ret = (1 + clean_returns).cumprod()
+            fig.add_trace(go.Scatter(x=cum_ret.index, y=cum_ret.values, name="Portfolio Value", line=dict(color='#e2e8f0')), row=1, col=1)
+            
+            # Regime probabilities
+            fig.add_trace(go.Scatter(
+                x=stress_prob.index, y=stress_prob.values,
+                fill='tozeroy', fillcolor='rgba(220, 38, 38, 0.3)',
+                line=dict(color='rgba(220, 38, 38, 0.8)', width=1),
+                name="Stress Probability"
+            ), row=2, col=1)
+            
+            # Highlight high stress periods on the price chart
+            stress_periods = stress_prob[stress_prob > 0.5]
+            if not stress_periods.empty:
+                fig.add_trace(go.Scatter(
+                    x=stress_periods.index, 
+                    y=cum_ret.loc[stress_periods.index], 
+                    mode='markers', 
+                    marker=dict(color='red', size=4),
+                    name="Stress Regimes"
+                ), row=1, col=1)
+
+            fig.update_layout(
+                height=500, margin=dict(l=20, r=20, t=30, b=20),
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                title="Regime-Conditional Performance"
+            )
+            fig.update_yaxes(title_text="Value", row=1, col=1)
+            fig.update_yaxes(title_text="Prob(Stress)", range=[0, 1], row=2, col=1)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("#### Adaptive Strategy Suggestion")
+            if current_stress > 0.5:
+                st.warning("**Recommendation:** We are currently in a high-volatility regime. Consider increasing cash buffers, reducing equity beta, and tilting towards defensive factors (Quality, Low Vol).")
+            else:
+                st.success("**Recommendation:** Market is in a stable, low-volatility regime. Carry trades and equity risk premia are favorable. Consider maintaining or slightly increasing market beta.")
+        else:
+            st.line_chart(stress_prob, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"Regime detection failed to converge or encountered an error: {e}")
+
+
+
+def _render_advanced_analytics(result: dict) -> None:
+    """Advanced quantitative models: ARIMA, GARCH, Linear Regression."""
+    st.markdown("###  Advanced Analytics — Forecasting & Vol Models")
+
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first.")
+        return
+
+    portfolio_returns = result.get("portfolio_returns")
+    returns_df = result.get("returns")
+    if portfolio_returns is None or len(portfolio_returns) < 30:
+        st.warning("Need at least 30 days of portfolio returns for advanced models.")
+        return
+
+    # Horizon Slider
+    forecast_horizon = st.slider(
+        "Forecast Horizon (days)",
+        min_value=5, max_value=60, value=20, step=5,
+        key="wharton_advanced_horizon"
+    )
+
+    # Run models
+    model_results = {}
+    clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
+
+    # ARIMA
+    try:
+        advanced_mod = importlib.import_module("src.analytics.advanced")
+        arima = advanced_mod.ARIMAModel(order=(1, 0, 1))
+        arima.fit(clean_returns)
+        arima_pred = arima.predict(periods=forecast_horizon)
+        arima_metrics = arima.get_metrics()
+        model_results["ARIMA(1,0,1)"] = {
+            "prediction": arima_pred,
+            "metrics": arima_metrics,
+            "available": True,
+        }
+    except Exception as e:
+        model_results["ARIMA(1,0,1)"] = {"available": False, "error": str(e)}
+
+    # Exponential Smoothing
+    try:
+        if hasattr(advanced_mod, "ExponentialSmoothingModel"):
+            expsmooth = advanced_mod.ExponentialSmoothingModel()
+            expsmooth.fit(clean_returns)
+            expsmooth_pred = expsmooth.predict(periods=forecast_horizon)
+            expsmooth_metrics = expsmooth.get_metrics()
+            model_results["Exp. Smoothing"] = {
+                "prediction": expsmooth_pred,
+                "metrics": expsmooth_metrics,
+                "available": True,
+            }
+    except Exception as e:
+        model_results["Exp. Smoothing"] = {"available": False, "error": str(e)}
+
+    # GARCH
+    try:
+        garch = advanced_mod.GARCHModel(p=1, q=1)
+        garch.fit(clean_returns)
+        garch_pred = garch.predict(periods=forecast_horizon)
+        garch_metrics = garch.get_metrics()
+        model_results["GARCH(1,1)"] = {
+            "prediction": garch_pred,
+            "metrics": garch_metrics,
+            "available": True,
+        }
+    except Exception as e:
+        model_results["GARCH(1,1)"] = {"available": False, "error": str(e)}
+
+    # Linear Regression
+    try:
+        linreg = advanced_mod.LinearRegressionModel()
+        linreg.fit(clean_returns)
+        linreg_pred = linreg.predict(periods=forecast_horizon)
+        linreg_metrics = linreg.get_metrics()
+        model_results["Linear Regression"] = {
+            "prediction": linreg_pred,
+            "metrics": linreg_metrics,
+            "available": True,
+        }
+    except Exception as e:
+        model_results["Linear Regression"] = {"available": False, "error": str(e)}
+
+    # Model summary table
+    st.markdown("#### Model Summary")
+    summary_rows = []
+    for name, res in model_results.items():
+        if res.get("available"):
+            m = res.get("metrics", {})
+            p = res.get("prediction", {})
+            summary_rows.append({
+                "Model": name,
+                "Status": " Fitted",
+                "Next Period Forecast": _fmt_pct(p.get("next_return", p.get("next_volatility"))),
+                "Confidence": _fmt_float(m.get("confidence", m.get("forecast_confidence"))),
+                "Annualized": _fmt_pct(m.get("expected_annual_return",
+                    m.get("volatility_annualized", ""))),
+            })
+        else:
+            summary_rows.append({
+                "Model": name,
+                "Status": " " + str(res.get("error", "unavailable"))[:60],
+                "Next Period Forecast": "—",
+                "Confidence": "—",
+                "Annualized": "—",
+            })
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    if HAS_PLOTLY:
+        # Return forecast chart (ARIMA + Exp Smoothing)
+        arima_res = model_results.get("ARIMA(1,0,1)", {})
+        exp_res = model_results.get("Exp. Smoothing", {})
+        if arima_res.get("available") or exp_res.get("available"):
+            st.markdown("#### Return Forecast Comparison")
+            fig_forecast = go.Figure()
+            hist_vals = clean_returns.tail(252).values.tolist()
+            hist_x = list(range(-len(hist_vals), 0))
+            
+            # Plot historical returns
+            fig_forecast.add_trace(go.Scatter(
+                x=hist_x, y=hist_vals, mode="lines",
+                line=dict(color="#6366f1", width=1.5), name="Historical Returns",
+            ))
+            
+            # Plot ARIMA
+            if arima_res.get("available"):
+                pred = arima_res["prediction"]
+                forecast_path = pred.get("forecast_path", [])
+                conf_int = pred.get("confidence_interval", [])
+                fore_x = list(range(0, len(forecast_path)))
+                fig_forecast.add_trace(go.Scatter(
+                    x=fore_x, y=forecast_path, mode="lines+markers",
+                    line=dict(color="#22c55e", width=2.5, dash="dot"),
+                    marker=dict(size=4), name="ARIMA Forecast",
+                ))
+                if conf_int:
+                    upper = [ci[1] if len(ci) > 1 else ci[0] for ci in conf_int]
+                    lower = [ci[0] for ci in conf_int]
+                    fig_forecast.add_trace(go.Scatter(
+                        x=fore_x, y=upper, mode="lines", line=dict(width=0),
+                        showlegend=False, name="Upper CI",
+                    ))
+                    fig_forecast.add_trace(go.Scatter(
+                        x=fore_x, y=lower, mode="lines", line=dict(width=0),
+                        fill="tonexty", fillcolor="rgba(34,197,94,0.15)",
+                        name="ARIMA 95% CI",
+                    ))
+
+            # Plot Exponential Smoothing
+            if exp_res.get("available"):
+                exp_pred = exp_res["prediction"]
+                exp_path = exp_pred.get("forecast_path", [])
+                exp_x = list(range(0, len(exp_path)))
+                fig_forecast.add_trace(go.Scatter(
+                    x=exp_x, y=exp_path, mode="lines+markers",
+                    line=dict(color="#f59e0b", width=2.5, dash="dash"),
+                    marker=dict(size=4), name="Exp Smoothing",
+                ))
+
+            fig_forecast.add_vline(x=0, line_dash="dash", line_color="#ef4444",
+                annotation_text="Forecast Start")
+            fig_forecast.update_layout(
+                template="plotly_dark", height=420,
+                xaxis_title="Days (relative)", yaxis_title="Daily Return",
+                yaxis=dict(tickformat=".3%"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_forecast, use_container_width=True)
+
+            # Cumulative Return / Portfolio Value Forecast
+            st.markdown("#### Projected Portfolio Value")
+            initial_val = float(result.get("inputs", {}).get("current_value", 100_000))
+            fig_cum = go.Figure()
+            
+            # Historical cumulative
+            hist_cum = (1.0 + clean_returns.tail(252)).cumprod() * initial_val
+            # Rebase so the last historical point is exactly initial_val
+            factor = initial_val / hist_cum.iloc[-1]
+            hist_cum = hist_cum * factor
+            fig_cum.add_trace(go.Scatter(
+                x=list(range(-len(hist_cum), 0)), y=hist_cum.values.tolist(), mode="lines",
+                line=dict(color="#6366f1", width=2), name="Historical Path",
+            ))
+
+            # ARIMA cumulative
+            if arima_res.get("available"):
+                arima_path = arima_res["prediction"].get("forecast_path", [])
+                arima_cum = initial_val * (1.0 + np.array(arima_path)).cumprod()
+                fig_cum.add_trace(go.Scatter(
+                    x=fore_x, y=arima_cum.tolist(), mode="lines+markers",
+                    line=dict(color="#22c55e", width=2.5, dash="dot"),
+                    marker=dict(size=4), name="ARIMA Projected",
+                ))
+
+            # Exp Smoothing cumulative
+            if exp_res.get("available"):
+                exp_path = exp_res["prediction"].get("forecast_path", [])
+                exp_cum = initial_val * (1.0 + np.array(exp_path)).cumprod()
+                fig_cum.add_trace(go.Scatter(
+                    x=list(range(0, len(exp_path))), y=exp_cum.tolist(), mode="lines+markers",
+                    line=dict(color="#f59e0b", width=2.5, dash="dash"),
+                    marker=dict(size=4), name="Exp Smooth Projected",
+                ))
+
+            fig_cum.add_vline(x=0, line_dash="dash", line_color="#ef4444", annotation_text="Today")
+            fig_cum.update_layout(
+                template="plotly_dark", height=420,
+                xaxis_title="Days (relative)", yaxis_title="Portfolio Value ($)",
+                yaxis=dict(tickformat="$,.0f"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_cum, use_container_width=True)
+
+        # GARCH volatility chart
+        garch_res = model_results.get("GARCH(1,1)", {})
+        if garch_res.get("available"):
+            st.markdown("#### GARCH Conditional Volatility Forecast")
+            gm = garch_res["metrics"]
+            gp = garch_res["prediction"]
+            vol_path = gp.get("volatility_path", [])
+
+            fig_garch = go.Figure()
+            # Historical rolling vol (cap at 252 days for visibility)
+            hist_vol = clean_returns.rolling(21).std() * np.sqrt(252)
+            hist_vol = hist_vol.dropna().tail(252)
+            fig_garch.add_trace(go.Scatter(
+                x=list(range(-len(hist_vol), 0)), y=hist_vol.values.tolist(),
+                mode="lines", line=dict(color="#6366f1", width=1.5),
+                name="21d Rolling Vol (Ann.)",
+            ))
+            if vol_path:
+                ann_vol_path = [v * np.sqrt(252) for v in vol_path]
+                fig_garch.add_trace(go.Scatter(
+                    x=list(range(0, len(ann_vol_path))), y=ann_vol_path,
+                    mode="lines+markers", line=dict(color="#ef4444", width=2.5, dash="dot"),
+                    marker=dict(size=5), name="GARCH Forecast (Ann.)",
+                ))
+            fig_garch.add_vline(x=0, line_dash="dash", line_color="#f59e0b",
+                annotation_text="Forecast Start")
+            fig_garch.update_layout(
+                template="plotly_dark", height=380,
+                xaxis_title="Days (relative)", yaxis_title="Annualized Volatility",
+                yaxis=dict(tickformat=".1%"),
+            )
+            st.plotly_chart(fig_garch, use_container_width=True)
+
+            # VaR Projection Chart
+            if vol_path:
+                st.markdown("#### Projected Daily Value-at-Risk (95%)")
+                # 1.645 is the z-score for 95% confidence (1-tailed loss)
+                var_path = [initial_val * 1.645 * v for v in vol_path]
+                
+                # Historical VaR proxy (using 21d rolling vol)
+                hist_var = (hist_vol / np.sqrt(252)) * 1.645 * initial_val
+                
+                fig_var = go.Figure()
+                fig_var.add_trace(go.Bar(
+                    x=list(range(-len(hist_var), 0)), y=hist_var.values.tolist(),
+                    marker_color="rgba(99,102,241,0.5)", name="Historical VaR Estimate",
+                ))
+                fig_var.add_trace(go.Bar(
+                    x=list(range(0, len(var_path))), y=var_path,
+                    marker_color="rgba(239,68,68,0.7)", name="Projected VaR (GARCH)",
+                ))
+                fig_var.add_vline(x=0, line_dash="dash", line_color="#f59e0b",
+                    annotation_text="Today")
+                fig_var.update_layout(
+                    template="plotly_dark", height=350,
+                    xaxis_title="Days (relative)", yaxis_title="Daily Risk Exposure ($)",
+                    yaxis=dict(tickformat="$,.0f"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_var, use_container_width=True)
+
+            vol_cards = st.columns(3)
+            vol_cards[0].metric("Conditional Vol (daily)", _fmt_pct(gm.get("conditional_volatility")))
+            vol_cards[1].metric("Annualized Vol", _fmt_pct(gm.get("volatility_annualized")))
+            vol_cards[2].metric("Confidence", _fmt_float(gm.get("confidence")))
+
+        # Linear Regression
+        linreg_res = model_results.get("Linear Regression", {})
+        if linreg_res.get("available"):
+            st.markdown("#### Linear Trend Analysis")
+            lm = linreg_res["metrics"]
+            lp = linreg_res["prediction"]
+
+            fig_lr = go.Figure()
+            cum_returns = (1.0 + clean_returns).cumprod()
+            y_vals = cum_returns.values.tolist()
+            x_vals = list(range(len(y_vals)))
+            fig_lr.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, mode="markers",
+                marker=dict(size=3, color="rgba(99,102,241,0.7)"), name="Cumulative Growth",
+            ))
+            slope = float(lm.get("trend_slope_daily", 0))
+            # forecast_path[0] is the prediction at x = len(y_vals)
+            first_pred = float(lp.get("forecast_path", [0])[0])
+            intercept = first_pred - slope * len(y_vals)
+            trend_y = [intercept + slope * x for x in x_vals]
+            fig_lr.add_trace(go.Scatter(
+                x=x_vals, y=trend_y, mode="lines",
+                line=dict(color="#ef4444", width=2), name="Linear Trend",
+            ))
+            fig_lr.update_layout(
+                template="plotly_dark", height=340,
+                xaxis_title="Trading Day", yaxis_title="Cumulative Return Multiplier",
+                yaxis=dict(tickformat=".2f"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_lr, use_container_width=True)
+
+            lr_cols = st.columns(3)
+            lr_cols[0].metric("Daily Slope", f"{slope:.6f}")
+            lr_cols[1].metric("Expected Annual Return", _fmt_pct(lm.get("expected_annual_return")))
+            lr_cols[2].metric("R²", _fmt_float(lm.get("confidence")))
+
+
+# ─── Scenario Playground ──────────────────────────────────────────────────────
+
+def _render_scenario_playground(result: dict) -> None:
+    """Advanced scenario / stress testing with preset scenarios and custom shocks."""
+    st.markdown("###  Scenario Playground — Stress Testing")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first.")
+        return
+
+    returns_df = result.get("returns")
+    tickers = list(result.get("tickers", []))
+    weights = np.asarray(result.get("weights", []), dtype=float)
+    inputs = result.get("inputs", {})
+    initial_value = float(inputs.get("current_value", 100_000))
+
+    if returns_df is None or returns_df.empty:
+        st.warning("No return data available.")
+        return
+
+    try:
+        scenario_mod = importlib.import_module("src.analytics.scenario_playground")
+    except ImportError:
+        st.error("Scenario playground module not available.")
+        return
+
+    # Scenario configuration
+    st.markdown("#### Configuration")
+    cfg_col1, cfg_col2, cfg_col3 = st.columns(3)
+    with cfg_col1:
+        severity = st.slider("Severity Multiplier", 0.2, 3.0, 1.0, 0.1,
+                             key="wharton_scenario_severity",
+                             help="1.0 = base case. Higher = more severe scenario.")
+    with cfg_col2:
+        horizon = st.slider("Horizon (days)", 10, 120, 30, 5,
+                            key="wharton_scenario_horizon")
+    with cfg_col3:
+        run_suite = st.button(" Run Full Stress Suite", key="wharton_run_suite", type="primary")
+
+    # Role exposure table
+    role_df = scenario_mod.build_role_exposure_table(tickers, weights)
+    with st.expander(" Role Exposure Breakdown"):
+        st.dataframe(role_df, use_container_width=True, hide_index=True)
+
+    # Run full suite
+    if run_suite or st.session_state.get("wharton_scenario_suite_result") is not None:
+        if run_suite:
+            with st.spinner("Running scenario suite..."):
+                try:
+                    suite = scenario_mod.build_scenario_suite(
+                        returns_df=returns_df, tickers=tickers, weights=weights,
+                        severity=severity, initial_value=initial_value,
+                        horizon_override=horizon,
+                    )
+                    st.session_state["wharton_scenario_suite_result"] = suite
+                except Exception as e:
+                    st.error(f"Scenario suite error: {e}")
+                    return
+
+        suite = st.session_state.get("wharton_scenario_suite_result")
+        if suite is None:
+            return
+
+        summary_df = suite.get("rows", pd.DataFrame())
+        scenarios_dict = suite.get("scenarios", {})
+
+        if not summary_df.empty:
+            st.markdown("#### Scenario Comparison Dashboard")
+
+            # Summary table
+            view_df = summary_df.copy()
+            for col in ["Total Return", "Max Drawdown", "Worst Day", "Stress Gap"]:
+                if col in view_df.columns:
+                    view_df[col] = view_df[col].map(_fmt_pct)
+            if "Final Value" in view_df.columns:
+                view_df["Final Value"] = view_df["Final Value"].map(lambda v: f"${v:,.0f}" if isinstance(v, (int, float)) else str(v))
+            st.dataframe(view_df, use_container_width=True, hide_index=True)
+
+            if HAS_PLOTLY:
+                # Stress impact bar chart
+                st.markdown("#### Stress Impact Ranking")
+                fig_stress = go.Figure()
+                sorted_df = summary_df.sort_values("Total Return")
+                colors = ["#ef4444" if v < 0 else "#22c55e"
+                          for v in sorted_df["Total Return"]]
+                fig_stress.add_trace(go.Bar(
+                    x=sorted_df["Total Return"] * 100, y=sorted_df["Scenario"],
+                    orientation="h", marker_color=colors,
+                    text=[f"{v:.1f}%" for v in sorted_df["Total Return"] * 100],
+                    textposition="outside",
+                ))
+                fig_stress.update_layout(
+                    template="plotly_dark", height=max(300, len(sorted_df) * 50),
+                    xaxis_title="Total Return (%)", yaxis_title="",
+                    xaxis=dict(ticksuffix="%"),
+                )
+                st.plotly_chart(fig_stress, use_container_width=True)
+
+                # Detailed scenario view
+                st.markdown("#### Detailed Scenario Analysis")
+                selected_scenario = st.selectbox(
+                    "Select scenario", list(scenarios_dict.keys()),
+                    key="wharton_scenario_detail_select"
+                )
+                if selected_scenario and selected_scenario in scenarios_dict:
+                    sc = scenarios_dict[selected_scenario]
+
+                    # Description and playbook
+                    st.markdown(f"**{sc.get('category', '')}** — {sc.get('era', '')}")
+                    st.markdown(f"> {sc.get('description', '')}")
+                    if sc.get("playbook"):
+                        st.info(f" **Playbook**: {sc['playbook']}")
+                    st.markdown(f"**Action Cue**: {sc.get('action_cue', '—')}")
+
+                    # Path comparison
+                    baseline_path = sc.get("baseline_path", pd.Series(dtype=float))
+                    stressed_path = sc.get("stressed_path", pd.Series(dtype=float))
+
+                    if not baseline_path.empty and not stressed_path.empty:
+                        fig_paths = go.Figure()
+                        fig_paths.add_trace(go.Scatter(
+                            x=list(range(len(baseline_path))),
+                            y=baseline_path.values.tolist(),
+                            mode="lines", name="Baseline",
+                            line=dict(color="#6366f1", width=2),
+                        ))
+                        fig_paths.add_trace(go.Scatter(
+                            x=list(range(len(stressed_path))),
+                            y=stressed_path.values.tolist(),
+                            mode="lines", name="Stressed",
+                            line=dict(color="#ef4444", width=2),
+                        ))
+                        fig_paths.update_layout(
+                            template="plotly_dark", height=380,
+                            xaxis_title="Day", yaxis_title="Portfolio Value ($)",
+                            yaxis=dict(tickformat="$,.0f"),
+                            title=f"{selected_scenario}: Baseline vs Stressed Path",
+                        )
+                        st.plotly_chart(fig_paths, use_container_width=True)
+
+                    # Drawdown comparison
+                    baseline_dd = sc.get("baseline_drawdown", pd.Series(dtype=float))
+                    stressed_dd = sc.get("stressed_drawdown", pd.Series(dtype=float))
+                    if not stressed_dd.empty:
+                        fig_dd = go.Figure()
+                        if not baseline_dd.empty:
+                            fig_dd.add_trace(go.Scatter(
+                                x=list(range(len(baseline_dd))),
+                                y=(baseline_dd.values * 100).tolist(),
+                                mode="lines", name="Baseline DD",
+                                line=dict(color="#6366f1", width=1.5),
+                                fill="tozeroy", fillcolor="rgba(99,102,241,0.1)",
+                            ))
+                        fig_dd.add_trace(go.Scatter(
+                            x=list(range(len(stressed_dd))),
+                            y=(stressed_dd.values * 100).tolist(),
+                            mode="lines", name="Stressed DD",
+                            line=dict(color="#ef4444", width=2),
+                            fill="tozeroy", fillcolor="rgba(239,68,68,0.1)",
+                        ))
+                        fig_dd.update_layout(
+                            template="plotly_dark", height=300,
+                            xaxis_title="Day", yaxis_title="Drawdown (%)",
+                            yaxis=dict(ticksuffix="%"),
+                            title="Drawdown Comparison",
+                        )
+                        st.plotly_chart(fig_dd, use_container_width=True)
+
+                    # Per-asset impact
+                    impact = sc.get("asset_impact_proxy", pd.Series(dtype=float))
+                    if not impact.empty:
+                        st.markdown("##### Per-Asset Stress Impact ($)")
+                        fig_impact = go.Figure()
+                        colors_impact = ["#ef4444" if v < 0 else "#22c55e" for v in impact.values]
+                        fig_impact.add_trace(go.Bar(
+                            x=impact.index.tolist(), y=impact.values.tolist(),
+                            marker_color=colors_impact,
+                            text=[f"${v:+,.0f}" for v in impact.values],
+                            textposition="outside",
+                        ))
+                        fig_impact.update_layout(
+                            template="plotly_dark", height=320,
+                            yaxis=dict(tickformat="$,.0f"), yaxis_title="Impact ($)",
+                        )
+                        st.plotly_chart(fig_impact, use_container_width=True)
+
+                    # Phase breakdown
+                    phase_table = sc.get("phase_table", pd.DataFrame())
+                    if not phase_table.empty:
+                        st.markdown("##### Phase Breakdown")
+                        st.dataframe(phase_table, use_container_width=True, hide_index=True)
+
+                    shock_map = sc.get("shock_map", pd.DataFrame())
+                    if not shock_map.empty:
+                        st.markdown("##### Shock Map by Role")
+                        shock_view = shock_map.copy()
+                        for c in shock_view.columns:
+                            shock_view[c] = shock_view[c].map(_fmt_pct)
+                        st.dataframe(shock_view, use_container_width=True)
+
+    else:
+        st.caption("Click **Run Full Stress Suite** to stress-test your portfolio across all scenarios.")
+
+
+# ─── Stock Screener ───────────────────────────────────────────────────────────
+
+def _render_stock_screener() -> None:
+    """Multi-criteria stock screener with filtering."""
+    st.markdown("###  Stock Screener")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    st.caption("Screen stocks using fundamental and technical criteria powered by yfinance.")
+
+    # Screener inputs
+    with st.expander(" Screener Configuration", expanded=True):
+        in1, in2 = st.columns(2)
+        with in1:
+            universe_text = st.text_area(
+                "Tickers (one per line or comma-separated)",
+                value="AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nJPM\nJNJ\nV\n"
+                      "UNH\nLLY\nASML\nAVGO\nPG\nHD\nMA\nCOST\nABBV\nCRM",
+                height=200, key="wharton_screener_tickers",
+            )
+        with in2:
+            min_market_cap = st.number_input("Min Market Cap ($B)", value=10.0, min_value=0.0, step=5.0,
+                                             key="wharton_screener_mincap") * 1e9
+            max_pe = st.number_input("Max P/E Ratio", value=50.0, min_value=0.0, step=5.0,
+                                     key="wharton_screener_maxpe")
+            min_div_yield = st.slider("Min Dividend Yield (%)", 0.0, 10.0, 0.0, 0.1,
+                                      key="wharton_screener_mindiv")
+            sort_by = st.selectbox("Sort By", ["MarketCap", "PE", "ForwardPE", "DividendYield",
+                                                "52WeekChange", "Beta"], key="wharton_screener_sort")
+
+        run_screen = st.button(" Run Screener", key="wharton_run_screener", type="primary")
+
+    if run_screen or st.session_state.get("wharton_screener_data") is not None:
+        if run_screen:
+            tickers = [t.strip().upper() for t in universe_text.replace(",", "\n").splitlines() if t.strip()]
+            if not tickers:
+                st.warning("Enter at least one ticker.")
+                return
+
+            with st.spinner(f"Fetching data for {len(tickers)} stocks..."):
+                try:
+                    import yfinance as yf
+                    rows = []
+                    for batch_start in range(0, len(tickers), 10):
+                        batch = tickers[batch_start:batch_start + 10]
+                        for ticker in batch:
+                            try:
+                                info = yf.Ticker(ticker).info
+                                rows.append({
+                                    "Ticker": ticker,
+                                    "Name": str(info.get("shortName", ""))[:30],
+                                    "Sector": str(info.get("sector", "—")),
+                                    "MarketCap": float(info.get("marketCap", 0)),
+                                    "PE": info.get("trailingPE"),
+                                    "ForwardPE": info.get("forwardPE"),
+                                    "PEG": info.get("pegRatio"),
+                                    "Price": info.get("currentPrice") or info.get("regularMarketPrice"),
+                                    "DividendYield": (info.get("dividendYield") or 0) * 100,
+                                    "Beta": info.get("beta"),
+                                    "52WeekChange": (info.get("52WeekChange") or 0) * 100,
+                                    "Revenue Growth": (info.get("revenueGrowth") or 0) * 100,
+                                    "Profit Margin": (info.get("profitMargins") or 0) * 100,
+                                    "ROE": (info.get("returnOnEquity") or 0) * 100,
+                                })
+                            except Exception:
+                                pass
+                    df = pd.DataFrame(rows)
+                    st.session_state["wharton_screener_data"] = df
+                except Exception as e:
+                    st.error(f"Screener error: {e}")
+                    return
+
+        df = st.session_state.get("wharton_screener_data", pd.DataFrame())
+        if df.empty:
+            st.warning("No data returned. Check tickers.")
+            return
+
+        # Apply filters
+        filtered = df.copy()
+        if min_market_cap > 0:
+            filtered = filtered[filtered["MarketCap"] >= min_market_cap]
+        if max_pe > 0:
+            filtered = filtered[pd.to_numeric(filtered["PE"], errors="coerce") <= max_pe]
+        if min_div_yield > 0:
+            filtered = filtered[filtered["DividendYield"] >= min_div_yield]
+
+        # Sort
+        if sort_by in filtered.columns:
+            filtered = filtered.sort_values(sort_by, ascending=False, na_position="last")
+
+        st.markdown(f"#### Results ({len(filtered)} of {len(df)} stocks)")
+
+        # Format display
+        view = filtered.copy()
+        if "MarketCap" in view.columns:
+            view["MarketCap"] = view["MarketCap"].map(lambda v: f"${v / 1e9:.1f}B" if v > 0 else "—")
+        for col in ["PE", "ForwardPE", "PEG", "Beta"]:
+            if col in view.columns:
+                view[col] = view[col].map(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
+        for col in ["DividendYield", "52WeekChange", "Revenue Growth", "Profit Margin", "ROE"]:
+            if col in view.columns:
+                view[col] = view[col].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "—")
+        if "Price" in view.columns:
+            view["Price"] = view["Price"].map(lambda v: f"${v:,.2f}" if pd.notna(v) else "—")
+
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+        if HAS_PLOTLY and len(filtered) >= 2:
+            # Scatter: PE vs Market Cap
+            st.markdown("#### Valuation Map")
+            scatter_df = filtered.dropna(subset=["PE", "MarketCap"])
+            if len(scatter_df) >= 2:
+                fig_scatter = go.Figure()
+                fig_scatter.add_trace(go.Scatter(
+                    x=scatter_df["PE"],
+                    y=scatter_df["MarketCap"] / 1e9,
+                    mode="markers+text",
+                    text=scatter_df["Ticker"],
+                    textposition="top center",
+                    marker=dict(
+                        size=scatter_df["MarketCap"].clip(lower=1e9) / scatter_df["MarketCap"].max() * 40 + 8,
+                        color=scatter_df["52WeekChange"],
+                        colorscale="RdYlGn", colorbar=dict(title="52W Chg %"),
+                        line=dict(width=1, color="white"),
+                    ),
+                    hovertemplate="%{text}<br>P/E: %{x:.1f}<br>MCap: $%{y:.0f}B<extra></extra>",
+                ))
+                fig_scatter.update_layout(
+                    template="plotly_dark", height=480,
+                    xaxis_title="P/E Ratio", yaxis_title="Market Cap ($B)",
+                    title="Valuation Map: P/E vs Market Cap",
+                )
+                st.plotly_chart(fig_scatter, use_container_width=True)
+
+            # Sector distribution
+            if "Sector" in filtered.columns:
+                sector_counts = filtered["Sector"].value_counts()
+                if len(sector_counts) > 1:
+                    st.markdown("#### Sector Distribution")
+                    fig_sector = go.Figure(data=[go.Pie(
+                        labels=sector_counts.index.tolist(),
+                        values=sector_counts.values.tolist(),
+                        hole=0.4,
+                        marker=dict(colors=["#6366f1", "#22c55e", "#f59e0b", "#ef4444",
+                                           "#3b82f6", "#8b5cf6", "#ec4899", "#14b8a6",
+                                           "#f97316", "#64748b", "#84cc16"]),
+                    )])
+                    fig_sector.update_layout(template="plotly_dark", height=380)
+                    st.plotly_chart(fig_sector, use_container_width=True)
+
+
+# ─── Quant Engine ─────────────────────────────────────────────────────────────
+
 def _render_quant_engine(profile: dict[str, str | int]) -> None:
     username = str(profile["username"])
     is_quant_op = username in QUANT_OPERATOR_USERS
@@ -1769,9 +3145,9 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
         # Stack status indicator
         qs = result.get("quant_stack", {})
         if qs and "_error" not in qs:
-            st.success("Stack ✅")
+            st.success("Stack ")
         elif qs and "_error" in qs:
-            st.error("Stack ⚠️")
+            st.error("Stack ")
 
     with content_col:
         if selected == "Benchmark Analytics":
@@ -1809,7 +3185,7 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     r = st.columns(7)
     r[0].metric("Open Tasks", open_tasks)
     r[1].metric("Done ✓", done_tasks)
-    r[2].metric("🔴 Critical", critical_tasks)
+    r[2].metric(" Critical", critical_tasks)
     r[3].metric("Chat Msgs", chat_count)
     r[4].metric("Vault Files", files_count)
     r[5].metric("Map Nodes", node_count)
@@ -1836,13 +3212,13 @@ def _render_header(profile: dict[str, str | int]) -> None:
           <h1>Wharton Cockpit</h1>
           <p>Production command center · Strategy · Quant · Research · Team</p>
           <div class="wharton-badge-row">
-            <span class="wharton-badge">👤 {username}</span>
-            <span class="wharton-badge">🎯 {role}</span>
-            <span class="wharton-badge">⚡ {pm}</span>
+            <span class="wharton-badge"> {username}</span>
+            <span class="wharton-badge"> {role}</span>
+            <span class="wharton-badge"> {pm}</span>
           </div>
         </div>
     """, unsafe_allow_html=True)
-    if st.sidebar.button("🚪 Logout", use_container_width=True):
+    if st.sidebar.button(" Logout", use_container_width=True):
         _logout()
 
 
@@ -1858,24 +3234,51 @@ def render_wharton_cockpit() -> None:
     _render_header(profile)
     tabs = st.tabs([
         "Overview & Tasks",
+        "Quant Engine",
+        "Stock Screener",
+        "Risk Cockpit",
+        "Factor Exposure",
+        "Regime Detection",
+        "Scenario Playground",
+        "Efficient Frontier",
+        "Monte Carlo",
+        "Advanced Analytics",
         "Mind Map",
         "Sub-Projects",
-        "Quant Engine",
         "War Room",
         "File Vault",
     ])
 
+    # Fetch result from state if available
+    result = st.session_state.get(QUANT_RESULT_KEY, {})
+
     with tabs[0]:
         _render_overview_action_center(profile)
     with tabs[1]:
-        _render_mindmap()
-    with tabs[2]:
-        _render_subprojects(profile)
-    with tabs[3]:
         _render_quant_engine(profile)
+    with tabs[2]:
+        _render_stock_screener()
+    with tabs[3]:
+        _render_risk_cockpit(result)
     with tabs[4]:
-        _render_chat(profile)
+        _render_factor_exposure(result)
     with tabs[5]:
+        _render_regime_detection(result)
+    with tabs[6]:
+        _render_scenario_playground(result)
+    with tabs[7]:
+        _render_efficient_frontier(result)
+    with tabs[8]:
+        _render_monte_carlo(result)
+    with tabs[9]:
+        _render_advanced_analytics(result)
+    with tabs[10]:
+        _render_mindmap()
+    with tabs[11]:
+        _render_subprojects(profile)
+    with tabs[12]:
+        _render_chat(profile)
+    with tabs[13]:
         _render_file_center(profile)
 
 

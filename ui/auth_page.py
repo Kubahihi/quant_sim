@@ -213,7 +213,7 @@ def init_multi_user_mode() -> int | None:
         # Auto-run migration on first startup
         result = migrate_existing_data()
         if result.get("success") and not result.get("already_migrated"):
-            st.info(f"🎉 Multi-user system initialized! Default user: admin / REMOVED")
+            st.info(f" Multi-user system initialized! Default user: admin / REMOVED")
             st.info(f"   {result.get('files_migrated', {}).get('total', 0)} files migrated.")
     
     # Check authentication
