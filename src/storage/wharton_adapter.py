@@ -32,18 +32,26 @@ MAX_FILE_SIZE_MB = 50
 
 def get_storage_backend(storage_path: Optional[str] = None) -> StorageBackend:
     """
-    Get the storage backend based on configuration.
-    
-    Args:
-        storage_path: Optional custom storage path
-        
-    Returns:
-        StorageBackend instance
+    Get storage backend. Uses R2 in production (when [storage] secrets are set),
+    falls back to local storage for development.
     """
-    if storage_path is None:
-        storage_path = DEFAULT_STORAGE_PATH
+    from .backend import storage_config
     
-    return LocalStorageBackend(storage_path)
+    try:
+        loaded = storage_config.load_from_secrets()
+        if loaded:
+            backend = storage_config.create_backend()
+            return backend
+    except Exception as e:
+        try:
+            import streamlit as st
+            st.warning(f"⚠️ R2 storage init failed ({e}), using local storage. Files will not persist.")
+        except Exception:
+            pass
+
+    # Local fallback
+    path = storage_path or DEFAULT_STORAGE_PATH
+    return LocalStorageBackend(path)
 
 
 def get_file_manager(
