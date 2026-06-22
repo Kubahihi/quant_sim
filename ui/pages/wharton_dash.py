@@ -556,7 +556,7 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
             with qc2:
                 quick_priority = st.selectbox("Priority", TASK_PRIORITIES, index=2)
             with qc3:
-                quick_assignee = st.text_input("Assignee", value=str(profile["username"]))
+                quick_assignee = st.text_input("Assign to (optional)", value=str(profile["username"]))
             if st.form_submit_button("Add Task", type="primary", use_container_width=True):
                 if quick_text.strip():
                     with get_connection() as conn:
