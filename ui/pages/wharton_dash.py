@@ -339,7 +339,7 @@ def _render_login() -> None:
         st.stop()
 
     with st.form("wharton_login_form", clear_on_submit=False):
-        username = st.selectbox("Username", options=usernames)
+        # duplicate username selectbox removed
         username = st.selectbox("Username", options=usernames, key="wharton_login_username")
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Enter Cockpit", type="primary", use_container_width=True)
