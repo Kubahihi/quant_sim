@@ -38,7 +38,6 @@ MIGRATION_MARKER = DATA_DIR / ".migration_completed"
 # Default user credentials
 DEFAULT_USERNAME = "admin"
 DEFAULT_EMAIL = "admin@example.com" # Changed to example.com for security
-DEFAULT_PASSWORD = "[PROTECTED]"  # Should be read from st.secrets["ADMIN_BOOTSTRAP_PASSWORD"]
 
 
 def _get_migration_info() -> Dict[str, Any]:
@@ -164,8 +163,18 @@ def create_default_user() -> Optional[Dict[str, Any]]:
     if user_exists(username=DEFAULT_USERNAME):
         return None
     
-    # Create default user
-    password_hash = hash_password(DEFAULT_PASSWORD)
+    # Read password from secrets or env – never use a hardcoded fallback
+    import os
+    try:
+        import streamlit as st
+        password = st.secrets.get("ADMIN_BOOTSTRAP_PASSWORD") or os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
+    except Exception:
+        password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
+
+    if not password:
+        return None  # No password configured – skip admin creation silently
+
+    password_hash = hash_password(str(password))
     try:
         user = create_user(DEFAULT_USERNAME, DEFAULT_EMAIL, password_hash)
         return user
