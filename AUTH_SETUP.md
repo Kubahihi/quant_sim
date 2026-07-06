@@ -32,7 +32,7 @@ When you first run the Streamlit app after adding the auth system, it will autom
 - Username: `admin`
 - Password: `REMOVED`
 
-⚠️ **Important:** Change the default password after first login!
+ **Important:** Change the default password after first login!
 
 ### 3. Run the Application
 
@@ -61,7 +61,7 @@ You'll be presented with a login screen. Use the default credentials or register
 
 ### Logout
 
-Click the "🚪 Logout" button in the sidebar.
+Click the " Logout" button in the sidebar.
 
 ## Data Storage
 
@@ -208,7 +208,7 @@ from src.auth.migrations import rollback_migration
 rollback_migration()
 ```
 
-⚠️ **Warning:** This only removes the marker file, not the migrated data.
+ **Warning:** This only removes the marker file, not the migrated data.
 
 ## Testing
 

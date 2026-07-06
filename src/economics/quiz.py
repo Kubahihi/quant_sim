@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -326,20 +326,29 @@ def _dedupe_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return output
 
 
-def load_question_bank(base_dir: str | Path = "data/economics_questions") -> List[Dict[str, Any]]:
-    data_dir = _ensure_data_dir(base_dir)
-    path = data_dir / "questions.json"
+def load_question_bank(base_dir: str | Path = "data/economics_questions", user_id: int | None = None) -> List[Dict[str, Any]]:
+    raw = None
+    if user_id is not None:
+        from src.auth.database import load_user_data
+        content = load_user_data(user_id, "economics_questions", "questions.json")
+        if content:
+            try:
+                raw = json.loads(content)
+            except Exception:
+                raw = []
 
-    if not path.exists():
-        default_rows = [normalize_question(item, default_source="custom") for item in DEFAULT_ECONOMICS_QUESTIONS]
-        default_rows = [row for row in default_rows if row is not None]
-        path.write_text(json.dumps(default_rows, ensure_ascii=False, indent=2), encoding="utf-8")
-        return default_rows
-
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        raw = []
+    if raw is None:
+        data_dir = _ensure_data_dir(base_dir)
+        path = data_dir / "questions.json"
+        if not path.exists():
+            default_rows = [normalize_question(item, default_source="custom") for item in DEFAULT_ECONOMICS_QUESTIONS]
+            default_rows = [row for row in default_rows if row is not None]
+            path.write_text(json.dumps(default_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+            return default_rows
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            raw = []
 
     rows: List[Dict[str, Any]] = []
     if isinstance(raw, list):
@@ -362,10 +371,8 @@ def load_question_bank(base_dir: str | Path = "data/economics_questions") -> Lis
 def save_question_bank(
     questions: List[Dict[str, Any]],
     base_dir: str | Path = "data/economics_questions",
+    user_id: int | None = None,
 ) -> None:
-    data_dir = _ensure_data_dir(base_dir)
-    path = data_dir / "questions.json"
-
     normalized_rows: List[Dict[str, Any]] = []
     for item in questions:
         source_hint = str(item.get("source", "custom")) if isinstance(item, dict) else "custom"
@@ -374,19 +381,37 @@ def save_question_bank(
             normalized_rows.append(normalized)
 
     deduped = _dedupe_questions(normalized_rows)
-    path.write_text(json.dumps(deduped, ensure_ascii=False, indent=2), encoding="utf-8")
+    content = json.dumps(deduped, ensure_ascii=False, indent=2)
+
+    if user_id is not None:
+        from src.auth.database import save_user_data
+        save_user_data(user_id, "economics_questions", "questions.json", content)
+    else:
+        data_dir = _ensure_data_dir(base_dir)
+        path = data_dir / "questions.json"
+        path.write_text(content, encoding="utf-8")
 
 
-def load_attempt_log(base_dir: str | Path = "data/economics_questions") -> List[Dict[str, Any]]:
-    data_dir = _ensure_data_dir(base_dir)
-    path = data_dir / "attempts.json"
-    if not path.exists():
-        return []
+def load_attempt_log(base_dir: str | Path = "data/economics_questions", user_id: int | None = None) -> List[Dict[str, Any]]:
+    raw = None
+    if user_id is not None:
+        from src.auth.database import load_user_data
+        content = load_user_data(user_id, "economics_questions", "attempts.json")
+        if content:
+            try:
+                raw = json.loads(content)
+            except Exception:
+                raw = []
 
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    if raw is None:
+        data_dir = _ensure_data_dir(base_dir)
+        path = data_dir / "attempts.json"
+        if not path.exists():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
 
     attempts: List[Dict[str, Any]] = []
     if isinstance(raw, list):
@@ -415,10 +440,16 @@ def load_attempt_log(base_dir: str | Path = "data/economics_questions") -> List[
 def save_attempt_log(
     attempts: List[Dict[str, Any]],
     base_dir: str | Path = "data/economics_questions",
+    user_id: int | None = None,
 ) -> None:
-    data_dir = _ensure_data_dir(base_dir)
-    path = data_dir / "attempts.json"
-    path.write_text(json.dumps(attempts, ensure_ascii=False, indent=2), encoding="utf-8")
+    content = json.dumps(attempts, ensure_ascii=False, indent=2)
+    if user_id is not None:
+        from src.auth.database import save_user_data
+        save_user_data(user_id, "economics_questions", "attempts.json", content)
+    else:
+        data_dir = _ensure_data_dir(base_dir)
+        path = data_dir / "attempts.json"
+        path.write_text(content, encoding="utf-8")
 
 
 def get_localized_question(question: Dict[str, Any], language: str) -> Dict[str, Any]:

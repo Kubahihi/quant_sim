@@ -20,6 +20,7 @@ def run_quant_stack(
     returns_df: pd.DataFrame,
     config: Dict[str, Any],
     history_dir: str = "data/run_history",
+    user_id: int | None = None,
 ) -> Dict[str, Any]:
     context = {
         "returns_df": returns_df,
@@ -68,7 +69,7 @@ def run_quant_stack(
             "news_relevance_coverage": float(news.context.get("relevance_coverage", 0.0)),
         },
     )
-    prior_run = next(iter(list_run_records(base_dir=history_dir, limit=1)), None)
+    prior_run = next(iter(list_run_records(base_dir=history_dir, limit=1, user_id=user_id)), None)
     summary = build_summary(models, signals, news=news, backtest=backtest, prior_run=prior_run)
 
     run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
@@ -111,7 +112,7 @@ def run_quant_stack(
             "fetch_errors": list(news.context.get("fetch_errors", [])),
         },
     )
-    history_path = save_run_record(record, base_dir=history_dir)
+    history_path = save_run_record(record, base_dir=history_dir, user_id=user_id)
 
     return {
         "models": models,

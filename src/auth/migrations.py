@@ -249,6 +249,109 @@ def migrate_existing_data(dry_run: bool = False) -> Dict[str, Any]:
     }
 
 
+def migrate_local_files_to_database(user_id: int) -> Dict[str, Any]:
+    """
+    Migrate any existing local JSON files for a user into the database.
+    
+    This is called automatically on startup for users who have existing
+    local data from before the database-first storage was introduced.
+    Safe to run multiple times (idempotent).
+    
+    Returns a summary of how many records were imported.
+    """
+    from .database import save_user_data, load_user_data
+    imported: Dict[str, int] = {
+        "portfolios": 0,
+        "swing_tracker": 0,
+        "run_history": 0,
+    }
+
+    # Portfolios: data/users/{user_id}/portfolios/*.json
+    portfolio_dir = DATA_DIR / "users" / str(user_id) / "portfolios"
+    if portfolio_dir.exists():
+        for f in portfolio_dir.glob("*.json"):
+            existing = load_user_data(user_id, "portfolios", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "portfolios", f.name, content)
+                    imported["portfolios"] += 1
+                except Exception:
+                    pass
+
+    # Legacy portfolios: data/portfolios/*.json
+    legacy_portfolio_dir = DATA_DIR / "portfolios"
+    if legacy_portfolio_dir.exists():
+        for f in legacy_portfolio_dir.glob("*.json"):
+            existing = load_user_data(user_id, "portfolios", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "portfolios", f.name, content)
+                    imported["portfolios"] += 1
+                except Exception:
+                    pass
+
+    # Swing tracker: data/users/{user_id}/swing_tracker/trades.json
+    swing_file = DATA_DIR / "users" / str(user_id) / "swing_tracker" / "trades.json"
+    if swing_file.exists():
+        existing = load_user_data(user_id, "swing_tracker", "trades.json")
+        if existing is None:
+            try:
+                content = swing_file.read_text(encoding="utf-8")
+                save_user_data(user_id, "swing_tracker", "trades.json", content)
+                imported["swing_tracker"] += 1
+            except Exception:
+                pass
+
+    # Legacy swing tracker
+    legacy_swing = DATA_DIR / "swing_tracker" / "trades.json"
+    if legacy_swing.exists():
+        existing = load_user_data(user_id, "swing_tracker", "trades.json")
+        if existing is None:
+            try:
+                content = legacy_swing.read_text(encoding="utf-8")
+                save_user_data(user_id, "swing_tracker", "trades.json", content)
+                imported["swing_tracker"] += 1
+            except Exception:
+                pass
+
+    # Run history: data/users/{user_id}/run_history/*.json
+    run_history_dir = DATA_DIR / "users" / str(user_id) / "run_history"
+    if run_history_dir.exists():
+        for f in run_history_dir.glob("*.json"):
+            existing = load_user_data(user_id, "run_history", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "run_history", f.name, content)
+                    imported["run_history"] += 1
+                except Exception:
+                    pass
+
+    # Legacy run history
+    legacy_run_dir = DATA_DIR / "run_history"
+    if legacy_run_dir.exists():
+        for f in legacy_run_dir.glob("*.json"):
+            existing = load_user_data(user_id, "run_history", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "run_history", f.name, content)
+                    imported["run_history"] += 1
+                except Exception:
+                    pass
+
+    total = sum(imported.values())
+    return {
+        "success": True,
+        "user_id": user_id,
+        "imported": imported,
+        "total": total,
+        "message": f"Imported {total} local file(s) into database for user {user_id}.",
+    }
+
+
 def get_migration_status() -> Dict[str, Any]:
     """Get current migration status."""
     return _get_migration_info()

@@ -132,6 +132,18 @@ def init_auth_database() -> None:
             -- Index for brute-force tracking
             CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time 
             ON login_attempts(username, timestamp);
+
+            -- Generic User Data table (for portfolios, swing_tracker, run_history)
+            CREATE TABLE IF NOT EXISTS user_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                data_type TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE (user_id, data_type, file_name)
+            );
         """)
         conn.commit()
         if hasattr(conn, 'sync'):
@@ -292,8 +304,8 @@ def validate_session_token(token: str) -> bool:
                 (now, token),
             )
             conn.commit()
-        if hasattr(conn, 'sync'):
-            conn.sync()
+            if hasattr(conn, 'sync'):
+                conn.sync()
             return True
         return False
     finally:
@@ -328,8 +340,8 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
                 (now, token),
             )
             conn.commit()
-        if hasattr(conn, 'sync'):
-            conn.sync()
+            if hasattr(conn, 'sync'):
+                conn.sync()
             return _row_to_dict(cursor, row)
         return None
     finally:
@@ -444,3 +456,70 @@ def get_recent_failed_attempts(username: str, minutes: int = 10) -> int:
         return cursor.fetchone()[0]
     finally:
         conn.close()
+
+
+def save_user_data(user_id: int, data_type: str, file_name: str, content_json: str) -> None:
+    """Save or update JSON data for a user."""
+    conn = _get_connection()
+    try:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO user_data (user_id, data_type, file_name, content_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, data_type, file_name) DO UPDATE SET
+                content_json = excluded.content_json,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, data_type, file_name, content_json, updated_at)
+        )
+        conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
+    finally:
+        conn.close()
+
+
+def load_user_data(user_id: int, data_type: str, file_name: str) -> Optional[str]:
+    """Load JSON data for a user. Returns None if not found."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT content_json FROM user_data WHERE user_id = ? AND data_type = ? AND file_name = ?",
+            (user_id, data_type, file_name)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        return None
+    finally:
+        conn.close()
+
+
+def list_user_data(user_id: int, data_type: str) -> list[str]:
+    """List all file names for a user and data type."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT file_name FROM user_data WHERE user_id = ? AND data_type = ?",
+            (user_id, data_type)
+        )
+        return [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def delete_user_data(user_id: int, data_type: str, file_name: str) -> bool:
+    """Delete specific data for a user. Returns True if deleted."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM user_data WHERE user_id = ? AND data_type = ? AND file_name = ?",
+            (user_id, data_type, file_name)
+        )
+        conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()

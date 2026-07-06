@@ -70,20 +70,31 @@ def _resolve_storage_path(storage_path: str | Path | None = None, user_id: int |
 
 def load_trade_book(storage_path: str | Path | None = None, user_id: int | None = None) -> list[SwingTrade]:
     """
-    Load trade book from storage.
+    Load trade book from DB or local file.
     
     Args:
         storage_path: Explicit storage path (overrides user_id).
         user_id: User ID for user-specific storage (used if storage_path not provided).
     """
-    path = _ensure_storage(_resolve_storage_path(storage_path, user_id))
-    if not path.exists():
-        return []
+    payload = None
 
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    if storage_path is None and user_id is not None:
+        from src.auth.database import load_user_data
+        content = load_user_data(user_id, "swing_tracker", "trades.json")
+        if content:
+            try:
+                payload = json.loads(content)
+            except Exception:
+                pass
+    
+    if payload is None:
+        path = _ensure_storage(_resolve_storage_path(storage_path, user_id))
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
 
     raw_trades = payload.get("trades", [])
     if not isinstance(raw_trades, list):
@@ -104,21 +115,28 @@ def save_trade_book(
     trades: Iterable[SwingTrade],
     storage_path: str | Path | None = None,
     user_id: int | None = None,
-) -> Path:
+) -> Path | str:
     """
-    Save trade book to storage.
+    Save trade book to DB or local file.
     
     Args:
         trades: The trades to save.
         storage_path: Explicit storage path (overrides user_id).
         user_id: User ID for user-specific storage (used if storage_path not provided).
     """
-    path = _ensure_storage(_resolve_storage_path(storage_path, user_id))
     refreshed, _ = refresh_trade_book(list(trades))
     payload = _default_payload()
     payload["trades"] = [item.to_dict() for item in refreshed]
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    content = json.dumps(payload, indent=2)
+
+    if storage_path is None and user_id is not None:
+        from src.auth.database import save_user_data
+        save_user_data(user_id, "swing_tracker", "trades.json", content)
+        return f"db://user_{user_id}/swing_tracker/trades.json"
+    else:
+        path = _ensure_storage(_resolve_storage_path(storage_path, user_id))
+        path.write_text(content, encoding="utf-8")
+        return path
 
 
 def new_trade_id() -> str:

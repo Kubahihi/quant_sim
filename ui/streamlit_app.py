@@ -221,7 +221,11 @@ def _auto_login_for_smoke_tests() -> int | None:
 
 def _bootstrap_authentication() -> int | None:
     from src.auth import init_auth_database
-    from src.auth.migrations import get_migration_status, migrate_existing_data
+    from src.auth.migrations import (
+        get_migration_status,
+        migrate_existing_data,
+        migrate_local_files_to_database,
+    )
 
     init_auth_database()
     status = get_migration_status()
@@ -233,6 +237,17 @@ def _bootstrap_authentication() -> int | None:
     user_id = _resolve_authenticated_user_id()
     if user_id is None:
         user_id = _auto_login_for_smoke_tests()
+
+    # On first login after deployment, migrate any existing local files to the DB
+    if user_id is not None:
+        migration_session_key = f"db_migration_done_{user_id}"
+        if not st.session_state.get(migration_session_key):
+            try:
+                migrate_local_files_to_database(user_id)
+            except Exception:
+                pass  # Non-fatal – never break the login flow
+            st.session_state[migration_session_key] = True
+
     return user_id
 
 
@@ -978,7 +993,7 @@ def _compute_analysis(
         "backtest_result": quant_stack["backtest"],
         "run_record": quant_stack["run_record"],
         "history_path": quant_stack["history_path"],
-        "history_records": list_run_records(limit=40),
+        "history_records": list_run_records(limit=40, user_id=user_id),
         "warnings": alignment_warnings,
         "missing_tickers": missing_tickers,
     }
@@ -3813,8 +3828,8 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
             right_run = st.selectbox("Compare run", options=run_ids, index=0)
             if left_run and right_run and left_run != right_run:
                 try:
-                    left_data = load_run_record(left_run)
-                    right_data = load_run_record(right_run)
+                    left_data = load_run_record(left_run, user_id=user_id)
+                    right_data = load_run_record(right_run, user_id=user_id)
                     comparison = compare_runs(left_data, right_data)
                     st.dataframe(
                         pd.DataFrame([comparison["metric_diff"]]),

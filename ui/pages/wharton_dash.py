@@ -1335,6 +1335,7 @@ def _compute_quant_run(
             portfolio_returns=portfolio_returns,
             returns_df=returns,
             config=config,
+            user_id=st.session_state.get("user_id"),
         )
     except Exception as stack_err:
         quant_stack_result = {"_error": str(stack_err)}
@@ -1737,7 +1738,7 @@ def _render_run_history(result: dict) -> None:
 
     try:
         history_mod = _load_modular_history()
-        records = history_mod.list_run_records(base_dir="data/run_history", limit=40)
+        records = history_mod.list_run_records(base_dir="data/run_history", limit=40, user_id=st.session_state.get("user_id"))
     except Exception as e:
         st.warning(f"Could not load run history: {e}")
         return
