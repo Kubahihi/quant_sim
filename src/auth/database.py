@@ -26,6 +26,16 @@ if os.environ.get("AUTH_TEST_DB_PATH"):
 SESSION_EXPIRY_HOURS = 24
 
 
+def _row_to_dict(cursor, row) -> dict[str, Any] | None:
+    """Safely convert a DB row to a dict, handling both sqlite3.Row and plain tuples."""
+    if row is None:
+        return None
+    if hasattr(row, 'keys'):
+        return dict(row)
+    cols = [col[0] for col in cursor.description]
+    return dict(zip(cols, row))
+
+
 def _get_db_path() -> Path:
     """Get the database path, creating parent directories if needed."""
     AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -63,7 +73,10 @@ def _get_connection() -> sqlite3.Connection:
         if turso_url:
             conn = libsql.connect(str(db_path), sync_url=turso_url, auth_token=turso_token)
             conn.sync()
-            conn.row_factory = sqlite3.Row
+            try:
+                conn.row_factory = sqlite3.Row
+            except AttributeError:
+                pass
             return conn
 
     # Local SQLite fallback
@@ -177,7 +190,7 @@ def get_user_by_username(username: str) -> Optional[dict[str, Any]]:
         )
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -194,7 +207,7 @@ def get_user_by_id(user_id: int) -> Optional[dict[str, Any]]:
         )
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -211,7 +224,7 @@ def get_user_by_email(email: str) -> Optional[dict[str, Any]]:
         )
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -317,7 +330,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
             conn.commit()
         if hasattr(conn, 'sync'):
             conn.sync()
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -377,7 +390,7 @@ def list_users(limit: int = 100) -> list[dict[str, Any]]:
             "SELECT id, username, email, created_at FROM users WHERE is_active = 1 ORDER BY id LIMIT ?",
             (limit,),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
     finally:
         conn.close()
 

@@ -251,7 +251,8 @@ def init_db() -> None:
                 try:
                     user_pass = str(st.secrets["wharton_users"][user["username"]])
                 except Exception as e:
-                    st.warning(f"Wharton user {user['username']} seeded with default password. Missing secret: {e}")
+                    # Ignore missing secret quietly
+                    pass
 
             password_hash = bcrypt.hashpw(
                 user_pass.encode("utf-8"), bcrypt.gensalt()
