@@ -932,6 +932,10 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
     st.markdown("### Persistent File Vault")
     st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
+    from src.storage.wharton_adapter import get_storage_backend
+    if get_storage_backend().backend_name == "local":
+        st.error("⚠️ **VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
+
     with st.expander(" Upload Files", expanded=True):
         with st.form("wharton_file_upload_form", clear_on_submit=True):
             uploads = st.file_uploader(
