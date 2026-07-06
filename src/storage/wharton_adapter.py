@@ -17,6 +17,7 @@ import uuid
 from .backend import StorageBackend, LocalStorageBackend
 from .file_manager import FileManager
 from .exceptions import FileValidationError, StorageFileNotFoundError
+from src.auth.database import get_db_connection
 
 
 # Default configuration
@@ -100,7 +101,7 @@ def init_storage_db(db_path: Optional[str] = None) -> None:
     
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     
     # Get existing columns
@@ -208,7 +209,7 @@ def save_uploaded_file(
     stored_filename = original_filename
     
     # Save metadata to database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     try:
         # Get existing columns
         existing_cols = {
@@ -293,7 +294,7 @@ def download_file(
         db_path = DEFAULT_DB_PATH
     
     # Get file metadata from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -350,7 +351,7 @@ def file_exists(
         db_path = DEFAULT_DB_PATH
     
     # Get storage key from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -396,7 +397,7 @@ def verify_file_integrity(
         db_path = DEFAULT_DB_PATH
     
     # Get stored hash from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -452,7 +453,7 @@ def delete_file(
         db_path = DEFAULT_DB_PATH
     
     # Get storage key from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -478,7 +479,7 @@ def delete_file(
     backend.delete(storage_key)
     
     # Delete from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     try:
         conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
         conn.commit()
@@ -508,7 +509,7 @@ def get_file_status(
         db_path = DEFAULT_DB_PATH
     
     # Get file metadata from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -591,7 +592,7 @@ def list_files_with_status(
         db_path = DEFAULT_DB_PATH
     
     # Get all files from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(

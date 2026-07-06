@@ -121,11 +121,8 @@ NODE_COLORS = {
 
 def get_connection() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
-    connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+    from src.auth.database import get_db_connection
+    return get_db_connection(DB_PATH)
 
 
 def _now_iso() -> str:
@@ -137,7 +134,7 @@ def init_db() -> None:
 
     with get_connection() as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
                 username TEXT UNIQUE,
                 password_hash TEXT,
@@ -240,7 +237,7 @@ def init_db() -> None:
         # Seed users
         existing_users = {
             str(row["username"]): str(row["password_hash"] or "")
-            for row in conn.execute("SELECT username, password_hash FROM users").fetchall()
+            for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
         }
         for user in DEFAULT_USERS:
             if existing_users.get(user["username"]):
@@ -259,7 +256,7 @@ def init_db() -> None:
             ).decode("utf-8")
 
             conn.execute(
-                "INSERT OR IGNORE INTO users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO wharton_users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
                 (user["username"], password_hash, user["role"], user["primary_module"]),
             )
 
@@ -282,14 +279,14 @@ def init_db() -> None:
 def _fetch_users() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
-            "SELECT id, username, role, primary_module FROM users ORDER BY username COLLATE NOCASE"
+            "SELECT id, username, role, primary_module FROM wharton_users ORDER BY username COLLATE NOCASE"
         ).fetchall()
 
 
 def authenticate_user(username: str, password: str) -> dict[str, str | int] | None:
     with get_connection() as conn:
         user = conn.execute(
-            "SELECT id, username, password_hash, role, primary_module FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, role, primary_module FROM wharton_users WHERE username = ?",
             (username,),
         ).fetchone()
     if user is None:

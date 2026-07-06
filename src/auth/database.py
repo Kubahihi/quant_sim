@@ -42,7 +42,7 @@ def _get_db_path() -> Path:
     return AUTH_DB_PATH
 
 
-def _get_connection() -> sqlite3.Connection:
+def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
     """Get a database connection with proper settings. Uses Turso if configured."""
     turso_url = None
     turso_token = None
@@ -57,8 +57,6 @@ def _get_connection() -> sqlite3.Connection:
         turso_url = os.environ.get("TURSO_DATABASE_URL")
     if not turso_token:
         turso_token = os.environ.get("TURSO_AUTH_TOKEN")
-
-    db_path = _get_db_path()
     
     if turso_url and turso_token:
         try:
@@ -85,6 +83,11 @@ def _get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+def _get_connection() -> sqlite3.Connection:
+    """Backward compatibility for existing internal calls."""
+    return get_db_connection(_get_db_path())
 
 
 def init_auth_database() -> None:
