@@ -36,6 +36,56 @@ def _row_to_dict(cursor, row) -> dict[str, Any] | None:
     return dict(zip(cols, row))
 
 
+class DictRow:
+    """A wrapper around a tuple row that supports both index and key access like sqlite3.Row."""
+    def __init__(self, cursor, row):
+        self._row = row
+        self._cols = [col[0].lower() for col in cursor.description] if cursor.description else []
+    def __getitem__(self, key):
+        if isinstance(key, int) or isinstance(key, slice):
+            return self._row[key]
+        if isinstance(key, str):
+            try:
+                return self._row[self._cols.index(key.lower())]
+            except ValueError:
+                raise KeyError(f"Column {key} not found.")
+        raise TypeError("Invalid key type")
+    def keys(self):
+        return self._cols
+    def __len__(self):
+        return len(self._row)
+    def __iter__(self):
+        return iter(self._row)
+
+class LibsqlCursorWrapper:
+    def __init__(self, cursor):
+        self._cursor = cursor
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None: return None
+        if isinstance(row, tuple) and not hasattr(row, 'keys'): return DictRow(self._cursor, row)
+        return row
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        if not rows: return []
+        if isinstance(rows[0], tuple) and not hasattr(rows[0], 'keys'): return [DictRow(self._cursor, r) for r in rows]
+        return rows
+
+class LibsqlConnectionWrapper:
+    """Wraps a libsql connection to return DictRow objects when fetching."""
+    def __init__(self, conn):
+        self._conn = conn
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+    def execute(self, *args, **kwargs):
+        cursor = self._conn.execute(*args, **kwargs)
+        return LibsqlCursorWrapper(cursor)
+    def cursor(self):
+        return LibsqlCursorWrapper(self._conn.cursor())
+
+
 def _get_db_path() -> Path:
     """Get the database path, creating parent directories if needed."""
     AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +124,8 @@ def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
             try:
                 conn.row_factory = sqlite3.Row
             except AttributeError:
-                pass
+                # libsql_experimental doesn't support row_factory, use wrapper
+                return LibsqlConnectionWrapper(conn)
             return conn
 
     # Local SQLite fallback
