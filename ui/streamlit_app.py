@@ -3595,7 +3595,7 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
     advanced_models = analysis_result.get("advanced_models", {})
 
     st.subheader("Analysis Lab")
-    analysis_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "History", "Compare"])
+    analysis_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "History", "Compare", "Forecasts", "Scenarios"])
 
     with analysis_tabs[0]:
         st.caption(
@@ -3832,6 +3832,20 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
                     st.warning(f"Comparison failed: {exc}")
         else:
             st.info("Need at least two saved runs for comparison.")
+            
+    with analysis_tabs[7]:
+        from ui.pages.wharton_dash import _render_advanced_analytics
+        # The result object expected by wharton_dash is just a dictionary like analysis_result
+        # The only missing key might be 'inputs'. Let's ensure it has something basic.
+        if "inputs" not in analysis_result:
+            analysis_result["inputs"] = {"current_value": 100000}
+        _render_advanced_analytics(analysis_result)
+        
+    with analysis_tabs[8]:
+        from ui.pages.wharton_dash import _render_scenario_playground
+        if "inputs" not in analysis_result:
+            analysis_result["inputs"] = {"current_value": 100000}
+        _render_scenario_playground(analysis_result)
 
 
 def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
