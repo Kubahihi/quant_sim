@@ -658,15 +658,26 @@ class StorageConfig:
     
     def load_from_secrets(self):
         """Load configuration from Streamlit secrets."""
-        if 'storage' not in st.secrets:
+        storage_secrets = {}
+        if 'storage' in st.secrets:
+            storage_secrets = st.secrets['storage']
+        else:
+            # Fallback for users who define secrets globally without [storage] section
+            storage_secrets = st.secrets
+
+        if not storage_secrets.get('R2_BUCKET'):
             return False
-        
-        storage_secrets = st.secrets['storage']
-        
+
+        # Endpoint URLs should not include the bucket name at the end
+        endpoint_url = storage_secrets.get('R2_ENDPOINT_URL', '')
+        bucket = storage_secrets.get('R2_BUCKET', '')
+        if endpoint_url and bucket and endpoint_url.endswith(f"/{bucket}"):
+            endpoint_url = endpoint_url[:-len(f"/{bucket}")]
+
         self._config = {
-            'backend': storage_secrets.get('STORAGE_BACKEND', 'local'),
-            'r2_bucket': storage_secrets.get('R2_BUCKET'),
-            'r2_endpoint_url': storage_secrets.get('R2_ENDPOINT_URL'),
+            'backend': storage_secrets.get('STORAGE_BACKEND', 'r2'),  # default to r2 if bucket is found
+            'r2_bucket': bucket,
+            'r2_endpoint_url': endpoint_url,
             'r2_access_key_id': storage_secrets.get('R2_ACCESS_KEY_ID'),
             'r2_secret_access_key': storage_secrets.get('R2_SECRET_ACCESS_KEY'),
             'r2_region': storage_secrets.get('R2_REGION', 'auto')
