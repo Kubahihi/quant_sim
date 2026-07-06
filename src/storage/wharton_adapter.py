@@ -180,8 +180,8 @@ def save_uploaded_file(
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     
-    # Get file content
-    file_bytes = uploaded_file.getbuffer()
+    # Get file content as bytes (boto3 rejects memoryview from getbuffer)
+    file_bytes = uploaded_file.getvalue()
     original_filename = str(uploaded_file.name)
     
     # Validate file
