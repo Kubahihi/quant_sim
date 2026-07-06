@@ -79,6 +79,20 @@ class LibsqlConnectionWrapper:
         self._conn = conn
     def __getattr__(self, name):
         return getattr(self._conn, name)
+    def __enter__(self):
+        if hasattr(self._conn, '__enter__'):
+            self._conn.__enter__()
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self._conn, '__exit__'):
+            return self._conn.__exit__(exc_type, exc_val, exc_tb)
+        # Fallback if connection doesn't natively support context manager
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        self._conn.close()
+        return False
     def execute(self, *args, **kwargs):
         cursor = self._conn.execute(*args, **kwargs)
         return LibsqlCursorWrapper(cursor)
