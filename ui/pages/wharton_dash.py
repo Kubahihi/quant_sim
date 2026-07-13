@@ -171,9 +171,22 @@ def init_db() -> None:
                 thesis TEXT,
                 client_goal_tags TEXT,
                 team_member TEXT,
-                quant_snapshot_json TEXT
+                quant_snapshot_json TEXT,
+                updated_at TEXT,
+                updated_by TEXT
             )
         """)
+        # Existing installations may already have the original decision_log table.
+        # Keep its author and decision snapshot intact while adding collaboration data.
+        decision_log_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(decision_log)").fetchall()
+        }
+        for col, definition in [
+            ("updated_at", "TEXT"),
+            ("updated_by", "TEXT"),
+        ]:
+            if col not in decision_log_cols:
+                conn.execute(f"ALTER TABLE decision_log ADD COLUMN {col} {definition}")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
@@ -3376,7 +3389,7 @@ def _fetch_ticker_fundamentals(ticker: str) -> dict:
 def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
     import json
     st.markdown("### Investment Decision Log")
-    st.caption("Chronological record of strategy decisions — tracks fundamental metrics at time of decision for longitudinal analysis.")
+    st.caption("Chronological record of strategy decisions — every team member can edit an entry. Changes made by a different member are highlighted in purple.")
 
     # ── Form to log a new decision ────────────────────────────────────────────
     with st.expander("Log New Decision", expanded=False):
@@ -3424,8 +3437,8 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
                     tags_str = ",".join(tags)
                     with get_connection() as conn:
                         conn.execute(
-                            "INSERT INTO decision_log (ticker, action, date, thesis, client_goal_tags, team_member, quant_snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (ticker.upper(), action, _now_iso(), thesis, tags_str, str(profile["username"]), snap_json),
+                            "INSERT INTO decision_log (ticker, action, date, thesis, client_goal_tags, team_member, quant_snapshot_json, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (ticker.upper(), action, _now_iso(), thesis, tags_str, str(profile["username"]), snap_json, None, None),
                         )
                         conn.commit()
                         if hasattr(conn, 'sync'): conn.sync()
@@ -3501,12 +3514,14 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
             pass
         funds = snap.get('_fundamentals', {})
         first_tkr_metrics = next(iter(funds.values()), {}) if funds else {}
+        edited_by = r['updated_by'] if r['updated_by'] else ''
         row_dict = {
             'Date': r['date'][:16],
             'Action': r['action'],
             'Ticker(s)': r['ticker'],
             'Goals': r['client_goal_tags'],
-            'Member': r['team_member'],
+            'Author': r['team_member'],
+            'Last edit': edited_by or '—',
         }
         for label in ('Price', 'Forward P/E', 'PEG Ratio', 'Price CAGR (3Y)', 'EV/EBITDA', 'Upside to Target'):
             row_dict[label] = first_tkr_metrics.get(label, {}).get('formatted', '—')
@@ -3528,13 +3543,64 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
                         'Rebalance': '#6366f1', 'Other': '#64748b'}.get(str(r['action']), '#64748b')
         exp_label = f"{r['date'][:10]}  |  {r['action']} {r['ticker']}  |  {r['team_member']}"
         with st.expander(exp_label, expanded=False):
+            updated_by = str(r['updated_by'] or '')
+            was_edited_by_teammate = bool(updated_by and updated_by != str(r['team_member']))
+            if was_edited_by_teammate:
+                st.markdown(
+                    f"<div style='background:#f3e8ff;color:#6b21a8;border-left:4px solid #9333ea;"
+                    f"padding:0.55rem 0.75rem;border-radius:4px;margin-bottom:0.75rem;font-weight:600'>"
+                    f"Edited by {escape(updated_by)} on {escape(str(r['updated_at'] or 'an unknown date'))}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            elif updated_by:
+                st.caption(f"Last updated by {updated_by} on {r['updated_at']}")
             st.markdown(
                 f"<span style='background:{action_color};color:#fff;padding:2px 10px;"
                 f"border-radius:4px;font-weight:700'>{r['action']}</span>  "
                 f"<span style='color:#94a3b8'>Goals: {r['client_goal_tags'] or '—'}</span>",
                 unsafe_allow_html=True
             )
-            st.markdown(f"\n**Thesis:**\n> {r['thesis']}")
+            thesis_style = "color:#6b21a8;background:#faf5ff;padding:0.75rem;border-radius:4px;" if was_edited_by_teammate else ""
+            st.markdown(
+                f"<p><strong>Thesis:</strong></p><div style='{thesis_style}'>{escape(str(r['thesis']))}</div>",
+                unsafe_allow_html=True,
+            )
+            # This is intentionally a container rather than a nested expander:
+            # Streamlit does not support expanders inside expanders.
+            with st.container():
+                st.markdown("**Edit this decision**")
+                allowed_actions = ["Buy", "Sell", "Hold", "Rebalance", "Other"]
+                current_action = str(r['action'])
+                action_index = allowed_actions.index(current_action) if current_action in allowed_actions else len(allowed_actions) - 1
+                current_tags = [tag for tag in str(r['client_goal_tags'] or '').split(',') if tag]
+                with st.form(f"edit_decision_{r['id']}"):
+                    edit_ticker = st.text_input("Ticker(s)", value=str(r['ticker']), key=f"decision_ticker_{r['id']}")
+                    edit_action = st.selectbox("Action", allowed_actions, index=action_index, key=f"decision_action_{r['id']}")
+                    edit_tags = st.multiselect(
+                        "Client Goals Addressed",
+                        ["Growth", "Income", "Risk Tolerance", "Community/Impact"],
+                        default=[tag for tag in current_tags if tag in {"Growth", "Income", "Risk Tolerance", "Community/Impact"}],
+                        key=f"decision_tags_{r['id']}",
+                    )
+                    edit_thesis = st.text_area("Investment Thesis / Rationale", value=str(r['thesis']), height=150, key=f"decision_thesis_{r['id']}")
+                    if st.form_submit_button("Save team edit", type="primary"):
+                        if not edit_ticker.strip() or not edit_thesis.strip():
+                            st.warning("Ticker and Thesis are required.")
+                        else:
+                            with get_connection() as conn:
+                                conn.execute(
+                                    "UPDATE decision_log SET ticker = ?, action = ?, thesis = ?, client_goal_tags = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                                    (
+                                        edit_ticker.strip().upper(), edit_action, edit_thesis.strip(), ",".join(edit_tags),
+                                        _now_iso(), str(profile["username"]), r['id'],
+                                    ),
+                                )
+                                conn.commit()
+                                if hasattr(conn, 'sync'):
+                                    conn.sync()
+                            st.success("Decision updated. Team edits are marked in purple when the editor is not the original author.")
+                            st.rerun()
             if funds:
                 for tkr, mets in funds.items():
                     st.markdown(f'**{tkr} — Fundamentals at Decision Date**')
