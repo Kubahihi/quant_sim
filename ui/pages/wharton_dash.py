@@ -40,10 +40,8 @@ def _is_development_mode() -> bool:
 
 def _get_default_password() -> str:
     try:
-        return str(st.secrets.get("WHARTON_PASSWORD", "team123"))
         return str(st.secrets.get("WHARTON_PASSWORD", "CHANGE_ME_IN_SECRETS"))
     except Exception:
-        return "team123"
         return "CHANGE_ME_IN_SECRETS"
 
 # This is now a fallback for seeding, not a direct password.
@@ -162,13 +160,18 @@ def init_db() -> None:
             )
         """)
         # Extended files table with project/description support
+        # login_attempts table is managed by src.auth.database.py, so we don't recreate it here.
+        # Adding decision_log for P1a Strategy Narrative
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS login_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                success INTEGER NOT NULL,
-                ip_address TEXT
+            CREATE TABLE IF NOT EXISTS decision_log (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT,
+                action TEXT,
+                date TEXT,
+                thesis TEXT,
+                client_goal_tags TEXT,
+                team_member TEXT,
+                quant_snapshot_json TEXT
             )
         """)
         conn.execute("""
@@ -240,9 +243,6 @@ def init_db() -> None:
             for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
         }
         for user in DEFAULT_USERS:
-            if existing_users.get(user["username"]):
-                continue
-
             user_pass = DEFAULT_PASSWORD
             if not _is_development_mode():
                 try:
@@ -251,14 +251,27 @@ def init_db() -> None:
                     # Ignore missing secret quietly
                     pass
 
-            password_hash = bcrypt.hashpw(
-                user_pass.encode("utf-8"), bcrypt.gensalt()
-            ).decode("utf-8")
+            if existing_users.get(user["username"]):
+                stored_hash = existing_users[user["username"]]
+                if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
+                    continue
+                # Password changed, update it
+                password_hash = bcrypt.hashpw(
+                    user_pass.encode("utf-8"), bcrypt.gensalt()
+                ).decode("utf-8")
+                conn.execute(
+                    "UPDATE wharton_users SET password_hash = ? WHERE username = ?",
+                    (password_hash, user["username"])
+                )
+            else:
+                password_hash = bcrypt.hashpw(
+                    user_pass.encode("utf-8"), bcrypt.gensalt()
+                ).decode("utf-8")
 
-            conn.execute(
-                "INSERT OR IGNORE INTO wharton_users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
-                (user["username"], password_hash, user["role"], user["primary_module"]),
-            )
+                conn.execute(
+                    "INSERT INTO wharton_users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
+                    (user["username"], password_hash, user["role"], user["primary_module"]),
+                )
 
 
         # Seed mindmap
@@ -352,10 +365,20 @@ def _render_login() -> None:
         return
 
     if submitted:
+        from src.auth.database import log_login_attempt, get_recent_failed_attempts
+        
+        failed_attempts = get_recent_failed_attempts(username, minutes=LOGIN_ATTEMPT_WINDOW_MINUTES)
+        if failed_attempts >= MAX_LOGIN_ATTEMPTS:
+            st.error(f"Too many failed attempts. Try again in {LOGIN_ATTEMPT_WINDOW_MINUTES} minutes.")
+            return
+
         profile = authenticate_user(username, password)
         if profile is None:
+            log_login_attempt(username, success=False)
             st.error("Wrong credentials.")
             return
+            
+        log_login_attempt(username, success=True)
         st.session_state[USER_PROFILE_KEY] = profile
         st.rerun()
 
@@ -516,6 +539,8 @@ def _apply_task_editor_changes(state: dict, original: pd.DataFrame, default_assi
                 "INSERT INTO tasks (priority, task_text, assignee, is_done) VALUES (?, ?, ?, ?)",
                 (payload["priority"], payload["task_text"], payload["assignee"], payload["is_done"]),
             )
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _render_task_stats(tasks: pd.DataFrame) -> None:
@@ -530,8 +555,8 @@ def _render_task_stats(tasks: pd.DataFrame) -> None:
     cols[0].metric("Total Tasks", total)
     cols[1].metric("Open", open_count)
     cols[2].metric("Done ✓", done)
-    cols[3].metric(" Critical", critical)
-    cols[4].metric(" High", high)
+    cols[3].metric("Critical", critical)
+    cols[4].metric("High", high)
 
     if total > 0:
         pct = done / total
@@ -545,7 +570,7 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
     _render_task_stats(original_tasks)
 
     # Quick-add form (always visible, above the editor)
-    with st.expander(" Quick Add Task", expanded=False):
+    with st.expander("Quick Add Task", expanded=False):
         with st.form("wharton_quick_task_form", clear_on_submit=True):
             qc1, qc2, qc3 = st.columns([3, 1, 1])
             with qc1:
@@ -561,8 +586,11 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
                             "INSERT INTO tasks (priority, task_text, assignee, is_done) VALUES (?, ?, ?, 0)",
                             (quick_priority, quick_text.strip(), quick_assignee.strip() or str(profile["username"])),
                         )
+                        conn.commit()
+                        if hasattr(conn, 'sync'): conn.sync()
                     st.toast("Task added.")
                     st.rerun()
+
 
     editor_version = int(st.session_state.get(TASK_EDITOR_VERSION_KEY, 0))
     editor_key = f"wharton_tasks_editor_{editor_version}"
@@ -635,17 +663,23 @@ def _insert_node(label: str, node_type: str) -> None:
     with get_connection() as conn:
         conn.execute("INSERT INTO mindmap_nodes (id, label, type) VALUES (?, ?, ?)",
                      (node_id, label.strip(), node_type))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _delete_node(node_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM mindmap_edges WHERE source = ? OR target = ?", (node_id, node_id))
         conn.execute("DELETE FROM mindmap_nodes WHERE id = ?", (node_id,))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _delete_edge(edge_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM mindmap_edges WHERE id = ?", (edge_id,))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _insert_edge(source: str, target: str) -> bool:
@@ -654,6 +688,8 @@ def _insert_edge(source: str, target: str) -> bool:
         if conn.execute("SELECT 1 FROM mindmap_edges WHERE id = ?", (eid,)).fetchone():
             return False
         conn.execute("INSERT INTO mindmap_edges (id, source, target) VALUES (?, ?, ?)", (eid, source, target))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
     return True
 
 
@@ -826,6 +862,8 @@ def _save_chat_message(username: str, message: str) -> None:
             "INSERT INTO chat (timestamp, username, message) VALUES (?, ?, ?)",
             (_now_iso(), username, message),
         )
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _render_chat(profile: dict[str, str | int]) -> None:
@@ -933,39 +971,43 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
     st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
     from src.storage.wharton_adapter import get_storage_backend
-    if get_storage_backend().backend_name == "local":
+    is_local_backend = get_storage_backend().backend_name == "local"
+    if is_local_backend:
         st.error("⚠️ **VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
 
-    with st.expander(" Upload Files", expanded=True):
-        with st.form("wharton_file_upload_form", clear_on_submit=True):
-            uploads = st.file_uploader(
-                "Research, decks, model notes, datasets, screenshots",
-                accept_multiple_files=True,
-            )
-            uc1, uc2 = st.columns(2)
-            with uc1:
-                upload_project = st.text_input("Project / Category (optional)", placeholder="e.g. EU Regulation Analysis")
-            with uc2:
-                upload_tags = st.text_input("Tags (optional)", placeholder="e.g. risk, asml, q2")
-            upload_desc = st.text_area("Description (optional)", placeholder="Briefly describe what this file contains and covers.", height=80)
-            submitted = st.form_submit_button("Save Files", type="primary", use_container_width=True)
+    if is_local_backend and not _is_development_mode():
+        st.error("Uploads are disabled in production when running on local storage to prevent data loss.")
+    else:
+        with st.expander(" Upload Files", expanded=True):
+            with st.form("wharton_file_upload_form", clear_on_submit=True):
+                uploads = st.file_uploader(
+                    "Research, decks, model notes, datasets, screenshots",
+                    accept_multiple_files=True,
+                )
+                uc1, uc2 = st.columns(2)
+                with uc1:
+                    upload_project = st.text_input("Project / Category (optional)", placeholder="e.g. EU Regulation Analysis")
+                with uc2:
+                    upload_tags = st.text_input("Tags (optional)", placeholder="e.g. risk, asml, q2")
+                upload_desc = st.text_area("Description (optional)", placeholder="Briefly describe what this file contains and covers.", height=80)
+                submitted = st.form_submit_button("Save Files", type="primary", use_container_width=True)
 
-        if submitted:
-            if not uploads:
-                st.warning("Select at least one file.")
-            else:
-                errors = []
-                saved = 0
-                for f in uploads:
-                    err = _validate_upload(f)
-                    if err:
-                        errors.append(err)
-                    else:
-                        _save_uploaded_file(f, str(profile["username"]), upload_project, upload_desc, upload_tags)
-                        saved += 1
-                if saved: st.success(f"Saved {saved} file(s).")
-                for e in errors: st.error(e)
-                if saved: st.rerun()
+            if submitted:
+                if not uploads:
+                    st.warning("Select at least one file.")
+                else:
+                    errors = []
+                    saved = 0
+                    for f in uploads:
+                        err = _validate_upload(f)
+                        if err:
+                            errors.append(err)
+                        else:
+                            _save_uploaded_file(f, str(profile["username"]), upload_project, upload_desc, upload_tags)
+                            saved += 1
+                    if saved: st.success(f"Saved {saved} file(s).")
+                    for e in errors: st.error(e)
+                    if saved: st.rerun()
 
     file_rows = _fetch_file_rows()
     if not file_rows:
@@ -1094,6 +1136,8 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                             (_now_iso(), str(profile["username"]), sp_name.strip(),
                              sp_desc.strip(), sp_status, sp_tags.strip()),
                         )
+                        conn.commit()
+                        if hasattr(conn, 'sync'): conn.sync()
                     st.success(f"Sub-project '{sp_name.strip()}' created.")
                     st.rerun()
                 else:
@@ -1119,10 +1163,11 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 
         with st.expander(
             f" {sp['name']}  ·  "
-            f"<span style='color:{status_color};font-weight:700;'>{sp['status'].upper()}</span>  ·  "
+            f"{sp['status'].upper()}  ·  "
             f"{len(sp_files)} file(s)",
             expanded=False,
         ):
+            st.markdown(f"<span style='color:{status_color};font-weight:700;padding: 0.2rem 0.5rem; border: 1px solid {status_color}; border-radius: 4px; display: inline-block; margin-bottom: 0.5rem;'>{sp['status'].upper()}</span>", unsafe_allow_html=True)
             st.markdown(f"""
                 <div class="subproject-card">
                   <div class="wharton-section-kicker">Created by {escape(str(sp['created_by']))} · {escape(str(sp['created_at']))}</div>
@@ -2231,36 +2276,67 @@ def _render_factor_exposure(result: dict) -> None:
 
     st.markdown("This analysis maps your portfolio against classical Fama-French and Smart Beta factors.")
 
-    # Generate deterministic synthetic factor loadings based on ticker names for demonstration
-    # In a real production system, this would run OLS regression against IWN, IWD, MTUM, QUAL, etc.
     factors = ["Market (Beta)", "Size (SMB)", "Value (HML)", "Momentum (MOM)", "Quality (QAL)", "Low Vol (VOL)"]
-    
     portfolio_factors = {f: 0.0 for f in factors}
-    
-    for t, w in zip(tickers, weights):
-        # Deterministic pseudo-random seed per ticker
-        seed = sum(ord(c) for c in t)
-        np.random.seed(seed)
+    is_synthetic = False
+
+    try:
+        start_date_str = result.get("inputs", {}).get("start_date")
+        end_date_str = result.get("inputs", {}).get("end_date")
+        if not start_date_str or not end_date_str:
+            raise ValueError("Missing start/end dates for factor regression.")
         
-        # Tech stocks generally have high mom, high qual, low value
-        if t in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
-            t_factors = [1.1, -0.2, -0.6, 0.8, 0.9, 0.1]
-        # Crypto
-        elif t in ["BTC", "ETH", "COIN", "MSTR"]:
-            t_factors = [1.5, 0.5, -0.8, 0.9, -0.5, -0.9]
-        # Treasury / Cash
-        elif t in ["BIL", "SHY", "TLT", "IEF"]:
-            t_factors = [0.1, 0.0, 0.5, 0.0, 0.8, 0.9]
-        else:
-            t_factors = np.random.normal(0, 0.5, len(factors))
-            # Normalize a bit
-            t_factors = np.clip(t_factors, -1, 1.5)
+        from datetime import date
+        start_date = date.fromisoformat(start_date_str)
+        end_date = date.fromisoformat(end_date_str)
+        etf_symbols = ("SPY", "IWN", "IWD", "MTUM", "QUAL", "USMV")
+        
+        with st.spinner("Fetching Factor ETFs for OLS Regression..."):
+            factor_prices = _fetch_close_prices_cached(etf_symbols, start_date, end_date)
             
-        for i, f in enumerate(factors):
-            portfolio_factors[f] += t_factors[i] * w
+        factor_returns = factor_prices.pct_change().dropna()
+        port_ret = pd.Series(result.get("portfolio_returns", {}))
+        
+        if port_ret.empty:
+            raise ValueError("Portfolio returns are empty.")
             
-    # Reset seed to avoid side effects
-    np.random.seed(None)
+        aligned = pd.concat([port_ret, factor_returns], axis=1, join="inner").dropna()
+        if len(aligned) < 30:
+            raise ValueError(f"Not enough aligned data points for OLS (only {len(aligned)} days).")
+
+        import statsmodels.api as sm
+        X = aligned[list(etf_symbols)]
+        X = sm.add_constant(X)
+        y = aligned.iloc[:, 0]
+        model = sm.OLS(y, X).fit()
+
+        portfolio_factors = {
+            "Market (Beta)": float(model.params.get("SPY", 0.0)),
+            "Size (SMB)": float(model.params.get("IWN", 0.0)),
+            "Value (HML)": float(model.params.get("IWD", 0.0)),
+            "Momentum (MOM)": float(model.params.get("MTUM", 0.0)),
+            "Quality (QAL)": float(model.params.get("QUAL", 0.0)),
+            "Low Vol (VOL)": float(model.params.get("USMV", 0.0)),
+        }
+    except Exception as e:
+        is_synthetic = True
+        st.warning(f"⚠️ **Illustrative / Placeholder — do not cite in report** (Real regression failed: {e})")
+        # Generate deterministic synthetic factor loadings based on ticker names for demonstration
+        for t, w in zip(tickers, weights):
+            seed = sum(ord(c) for c in t)
+            np.random.seed(seed)
+            if t in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
+                t_factors = [1.1, -0.2, -0.6, 0.8, 0.9, 0.1]
+            elif t in ["BTC", "ETH", "COIN", "MSTR"]:
+                t_factors = [1.5, 0.5, -0.8, 0.9, -0.5, -0.9]
+            elif t in ["BIL", "SHY", "TLT", "IEF"]:
+                t_factors = [0.1, 0.0, 0.5, 0.0, 0.8, 0.9]
+            else:
+                t_factors = np.random.normal(0, 0.5, len(factors))
+                t_factors = np.clip(t_factors, -1, 1.5)
+            for i, f in enumerate(factors):
+                portfolio_factors[f] += t_factors[i] * w
+        np.random.seed(None)
     
     _render_ai_advisor_card(
         context_data={"factor_exposures": portfolio_factors},
@@ -3204,6 +3280,347 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     _render_task_manager(profile)
 
 
+# ─── Strategy & Decisions ─────────────────────────────────────────────────────
+
+_FUNDAMENTAL_FIELDS = {
+    # label: (yfinance key, format_str, description)
+    "Price":            ("currentPrice",          "{:.2f}",    "Current market price"),
+    "Market Cap (B)": ("marketCap",              "{:.2f}B",   "Market capitalisation in billions"),
+    "Sector":           ("sector",                 "{}",        "GICS sector"),
+    "Trailing P/E":     ("trailingPE",             "{:.1f}x",   "Price / trailing 12M EPS"),
+    "Forward P/E":      ("forwardPE",              "{:.1f}x",   "Price / next-12M EPS consensus"),
+    "PEG Ratio":        ("pegRatio",               "{:.2f}",    "P/E to EPS Growth (5Y) ratio"),
+    "EV/EBITDA":        ("enterpriseToEbitda",     "{:.1f}x",   "Enterprise Value / EBITDA"),
+    "EV/Revenue":       ("enterpriseToRevenue",    "{:.2f}x",   "Enterprise Value / Revenue"),
+    "Rev Growth (YoY)": ("revenueGrowth",          "{:.1%}",    "Annual revenue growth (YoY)"),
+    "Earnings Growth":  ("earningsGrowth",         "{:.1%}",    "Annual earnings growth (YoY)"),
+    "Gross Margin":     ("grossMargins",           "{:.1%}",    "Gross profit / revenue"),
+    "Op Margin":        ("operatingMargins",       "{:.1%}",    "Operating income / revenue"),
+    "Net Margin":       ("profitMargins",          "{:.1%}",    "Net income / revenue"),
+    "ROE":              ("returnOnEquity",         "{:.1%}",    "Return on equity (trailing)"),
+    "ROIC":             ("returnOnAssets",         "{:.1%}",    "Return on assets (proxy for ROIC)"),
+    "Debt/Equity":      ("debtToEquity",           "{:.2f}",    "Total debt / shareholders equity"),
+    "Free Cash Flow (B)":("freeCashflow",          "{:.2f}B",   "Trailing twelve-month free cash flow"),
+    "52W High":         ("fiftyTwoWeekHigh",       "{:.2f}",    "52-week high price"),
+    "52W Low":          ("fiftyTwoWeekLow",        "{:.2f}",    "52-week low price"),
+    "Beta":             ("beta",                   "{:.2f}",    "Market beta (5Y monthly)"),
+    "Dividend Yield":   ("dividendYield",          "{:.2%}",    "Trailing annual dividend yield"),
+    "Analyst Target":   ("targetMeanPrice",        "{:.2f}",    "Consensus analyst 12M price target"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_ticker_fundamentals(ticker: str) -> dict:
+    """
+    Fetch fundamental metrics for a single ticker via yfinance.
+    Returns a flat dict of human-readable label -> (raw_value, formatted_string).
+    Calculates CAGR (3Y and 5Y) from historical price data.
+    Falls back gracefully if the fetch fails.
+    """
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+
+        metrics: dict[str, Any] = {}
+        for label, (yf_key, fmt, desc) in _FUNDAMENTAL_FIELDS.items():
+            raw = info.get(yf_key)
+            if raw is None:
+                continue
+            try:
+                if "Cap" in label or "Cash" in label:
+                    formatted = fmt.format(float(raw) / 1e9)
+                else:
+                    formatted = fmt.format(raw)
+                metrics[label] = {"value": raw, "formatted": formatted, "desc": desc}
+            except Exception:
+                continue
+
+        # ── CAGR calculations ─────────────────────────────────────────────────
+        try:
+            hist = t.history(period="5y", interval="1mo")
+            if hist is not None and len(hist) >= 12:
+                close = hist["Close"].dropna()
+                def _cagr(series: pd.Series, years: int) -> float | None:
+                    n = years * 12
+                    if len(series) < n + 1:
+                        return None
+                    return float((series.iloc[-1] / series.iloc[-(n + 1)]) ** (1 / years) - 1)
+                for yrs in (3, 5):
+                    c = _cagr(close, yrs)
+                    if c is not None:
+                        metrics[f"Price CAGR ({yrs}Y)"] = {
+                            "value": c,
+                            "formatted": f"{c:.1%}",
+                            "desc": f"Annualised price return over {yrs} years"
+                        }
+        except Exception:
+            pass
+
+        # ── Upside to analyst target ───────────────────────────────────────────
+        price = info.get("currentPrice")
+        target = info.get("targetMeanPrice")
+        if price and target and price > 0:
+            upside = (target - price) / price
+            metrics["Upside to Target"] = {
+                "value": upside,
+                "formatted": f"{upside:.1%}",
+                "desc": "Implied upside from current price to analyst consensus target"
+            }
+
+        return metrics
+    except Exception as e:
+        return {"_error": {"value": str(e), "formatted": str(e), "desc": "Fetch failed"}}
+
+
+def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
+    import json
+    st.markdown("### Investment Decision Log")
+    st.caption("Chronological record of strategy decisions — tracks fundamental metrics at time of decision for longitudinal analysis.")
+
+    # ── Form to log a new decision ────────────────────────────────────────────
+    with st.expander("Log New Decision", expanded=False):
+        with st.form("add_decision_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                ticker = st.text_input("Ticker(s)", placeholder="e.g. MSFT or MSFT, AAPL")
+            with c2:
+                action = st.selectbox("Action", ["Buy", "Sell", "Hold", "Rebalance", "Other"])
+
+            c3, c4 = st.columns(2)
+            with c3:
+                st.caption("**Client Goals — Placeholder** (will be updated with actual 2026 case study goals)")
+                tags = st.multiselect("Client Goals Addressed", ["Growth", "Income", "Risk Tolerance", "Community/Impact"])
+            with c4:
+                fetch_fundamentals = st.checkbox("Fetch live fundamentals from Yahoo Finance", value=True)
+
+            thesis = st.text_area("Investment Thesis / Rationale", height=120,
+                                  placeholder="Why are we making this decision? What is the expected outcome?")
+
+            if st.form_submit_button("Log Decision", type="primary"):
+                if not ticker or not thesis:
+                    st.warning("Ticker and Thesis are required.")
+                else:
+                    snap: dict[str, Any] = {}
+
+                    # Portfolio-level context from Quant Engine
+                    if result and "metrics" in result:
+                        m = result["metrics"]
+                        snap["_portfolio"] = {
+                            "Sharpe Ratio": m.get("sharpe_ratio"),
+                            "Ann. Return": m.get("annualized_return"),
+                            "Volatility": m.get("volatility"),
+                        }
+
+                    # Per-ticker fundamentals
+                    if fetch_fundamentals:
+                        tickers_list = [t.strip().upper() for t in ticker.replace(",", " ").split() if t.strip()]
+                        with st.spinner(f"Fetching fundamentals for {', '.join(tickers_list)}…"):
+                            snap["_fundamentals"] = {}
+                            for t in tickers_list:
+                                snap["_fundamentals"][t] = _fetch_ticker_fundamentals(t)
+
+                    snap_json = json.dumps(snap)
+                    tags_str = ",".join(tags)
+                    with get_connection() as conn:
+                        conn.execute(
+                            "INSERT INTO decision_log (ticker, action, date, thesis, client_goal_tags, team_member, quant_snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (ticker.upper(), action, _now_iso(), thesis, tags_str, str(profile["username"]), snap_json),
+                        )
+                        conn.commit()
+                        if hasattr(conn, 'sync'): conn.sync()
+                    st.success(f"Decision logged with {len(snap.get('_fundamentals', {}))} ticker(s) snapshotted.")
+                    st.rerun()
+
+    # ── Load log ──────────────────────────────────────────────────────────────
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()
+
+    if not rows:
+        st.info("No decisions logged yet. Use the form above to log your first investment decision.")
+        return
+
+    # ── Narrative export ──────────────────────────────────────────────────────
+    st.markdown("#### Strategy Narrative Export")
+
+    _METRIC_GROUPS = {
+        "Valuation":  ["Trailing P/E", "Forward P/E", "PEG Ratio", "EV/EBITDA", "EV/Revenue"],
+        "Growth":     ["Rev Growth (YoY)", "Earnings Growth", "Price CAGR (3Y)", "Price CAGR (5Y)"],
+        "Profitability": ["Gross Margin", "Op Margin", "Net Margin", "ROE", "ROIC", "Free Cash Flow (B)"],
+        "Risk":       ["Beta", "Debt/Equity", "52W High", "52W Low"],
+        "Analyst":    ["Analyst Target", "Upside to Target"],
+    }
+
+    report_lines = ["# Investment Strategy & Decision Narrative\n",
+                    f"> Generated: {_now_iso()}\n"]
+    for r in reversed(rows):
+        report_lines.append(f"## {r['date'][:10]} — {r['action']} {r['ticker']}")
+        report_lines.append(f"**Team Member**: {r['team_member']}  |  **Client Goals**: {r['client_goal_tags'] or '—'}")
+        report_lines.append(f"\n**Investment Thesis**:\n> {r['thesis']}\n")
+        if r['quant_snapshot_json']:
+            try:
+                snap = json.loads(r['quant_snapshot_json'])
+                if '_portfolio' in snap:
+                    p = snap['_portfolio']
+                    report_lines.append('**Portfolio Context at Decision Date:**')
+                    for k, v in p.items():
+                        if v is not None:
+                            try:
+                                report_lines.append(f'- {k}: {float(v):.3f}')
+                            except Exception:
+                                report_lines.append(f'- {k}: {v}')
+                    report_lines.append('')
+                if '_fundamentals' in snap:
+                    for tkr, mets in snap['_fundamentals'].items():
+                        report_lines.append(f'**{tkr} Fundamentals at Decision Date:**')
+                        if '_error' in mets:
+                            report_lines.append(f"- Fetch failed: {mets['_error']['formatted']}")
+                        else:
+                            for group, labels in _METRIC_GROUPS.items():
+                                group_lines = [f"  - {lbl}: {mets[lbl]['formatted']}" for lbl in labels if lbl in mets]
+                                if group_lines:
+                                    report_lines.append(f'  *{group}*')
+                                    report_lines.extend(group_lines)
+                        report_lines.append('')
+            except Exception:
+                pass
+        report_lines.append('---\n')
+
+    report_md = '\n'.join(report_lines)
+    st.download_button('Download Strategy Narrative (Markdown)', data=report_md,
+                       file_name='strategy_narrative.md', mime='text/markdown')
+
+    # -- Decision timeline table
+    st.markdown('#### Decision Timeline')
+    df_data = []
+    for r in rows:
+        snap = {}
+        try:
+            snap = json.loads(r['quant_snapshot_json'] or '{}')
+        except Exception:
+            pass
+        funds = snap.get('_fundamentals', {})
+        first_tkr_metrics = next(iter(funds.values()), {}) if funds else {}
+        row_dict = {
+            'Date': r['date'][:16],
+            'Action': r['action'],
+            'Ticker(s)': r['ticker'],
+            'Goals': r['client_goal_tags'],
+            'Member': r['team_member'],
+        }
+        for label in ('Price', 'Forward P/E', 'PEG Ratio', 'Price CAGR (3Y)', 'EV/EBITDA', 'Upside to Target'):
+            row_dict[label] = first_tkr_metrics.get(label, {}).get('formatted', '—')
+        preview = str(r['thesis'])[:80]
+        row_dict['Thesis (preview)'] = preview + ('…' if len(str(r['thesis'])) > 80 else '')
+        df_data.append(row_dict)
+    st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+
+    # -- Per-decision metric detail cards
+    st.markdown('#### Decision Detail & Metrics')
+    for r in rows:
+        snap = {}
+        try:
+            snap = json.loads(r['quant_snapshot_json'] or '{}')
+        except Exception:
+            pass
+        funds = snap.get('_fundamentals', {})
+        action_color = {'Buy': '#10b981', 'Sell': '#ef4444', 'Hold': '#f59e0b',
+                        'Rebalance': '#6366f1', 'Other': '#64748b'}.get(str(r['action']), '#64748b')
+        exp_label = f"{r['date'][:10]}  |  {r['action']} {r['ticker']}  |  {r['team_member']}"
+        with st.expander(exp_label, expanded=False):
+            st.markdown(
+                f"<span style='background:{action_color};color:#fff;padding:2px 10px;"
+                f"border-radius:4px;font-weight:700'>{r['action']}</span>  "
+                f"<span style='color:#94a3b8'>Goals: {r['client_goal_tags'] or '—'}</span>",
+                unsafe_allow_html=True
+            )
+            st.markdown(f"\n**Thesis:**\n> {r['thesis']}")
+            if funds:
+                for tkr, mets in funds.items():
+                    st.markdown(f'**{tkr} — Fundamentals at Decision Date**')
+                    if '_error' in mets:
+                        st.warning(f"Could not fetch data: {mets['_error']['formatted']}")
+                        continue
+                    for group_name, labels in _METRIC_GROUPS.items():
+                        group_mets = {lbl: mets[lbl] for lbl in labels if lbl in mets}
+                        if not group_mets:
+                            continue
+                        st.caption(group_name)
+                        cols = st.columns(min(len(group_mets), 5))
+                        for col, (lbl, m_data) in zip(cols, group_mets.items()):
+                            col.metric(lbl, m_data['formatted'], help=m_data.get('desc', ''))
+            if '_portfolio' in snap:
+                st.caption('Portfolio Context')
+                p = snap['_portfolio']
+                pcols = st.columns(3)
+                for col, (k, v) in zip(pcols, {kk: vv for kk, vv in p.items() if vv is not None}.items()):
+                    try:
+                        col.metric(k, f'{float(v):.3f}')
+                    except Exception:
+                        col.metric(k, str(v))
+
+    # -- Time-series: Key metrics evolution
+    st.markdown('#### Metric Evolution Over Decisions')
+    st.caption('Tracks how key valuation metrics changed across logged decisions for the same ticker.')
+    try:
+        import plotly.graph_objects as go
+        TRACKED = ['Forward P/E', 'PEG Ratio', 'Price CAGR (3Y)', 'EV/EBITDA', 'Upside to Target']
+        ticker_series: dict[str, dict] = {}
+        for r in reversed(rows):
+            snap = {}
+            try:
+                snap = json.loads(r['quant_snapshot_json'] or '{}')
+            except Exception:
+                pass
+            for tkr, mets in snap.get('_fundamentals', {}).items():
+                if tkr not in ticker_series:
+                    ticker_series[tkr] = {m: ([], []) for m in TRACKED}
+                for m in TRACKED:
+                    if m in mets and '_error' not in mets:
+                        try:
+                            ticker_series[tkr][m][0].append(r['date'][:10])
+                            ticker_series[tkr][m][1].append(float(mets[m]['value']))
+                        except Exception:
+                            pass
+        any_chart = False
+        for tkr, metrics_data in ticker_series.items():
+            for metric, (dates, values) in metrics_data.items():
+                if len(dates) >= 2:
+                    if not any_chart:
+                        st.info('Showing metric history for tickers with ≥2 logged decisions.')
+                    any_chart = True
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=dates, y=values, mode='lines+markers',
+                                             line=dict(width=2, color='#6366f1'),
+                                             marker=dict(size=8)))
+                    fig.update_layout(title=f'{tkr} — {metric} over time', height=280,
+                                      margin=dict(l=20, r=20, t=40, b=20), template='plotly_dark',
+                                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig, use_container_width=True)
+        if not any_chart:
+            st.info('Log the same ticker at least twice to see metric evolution charts.')
+    except ImportError:
+        st.info('Install plotly to see metric evolution charts.')
+
+    # -- Client-Goal Alignment Matrix
+    st.markdown('#### Client-Goal Alignment Matrix')
+    st.caption('Placeholder goals — will be updated with actual 2026 Wharton case study objectives.')
+    matrix_data: dict[str, dict] = {}
+    for r in rows:
+        t = r['ticker']
+        if t not in matrix_data:
+            matrix_data[t] = {'Growth': '', 'Income': '', 'Risk Tolerance': '', 'Community/Impact': ''}
+        for tag in str(r['client_goal_tags']).split(','):
+            tag = tag.strip()
+            if tag in matrix_data[t]:
+                matrix_data[t][tag] = '✓'
+    if matrix_data:
+        matrix_df = pd.DataFrame.from_dict(matrix_data, orient='index').reset_index()
+        matrix_df = matrix_df.rename(columns={'index': 'Ticker'})
+        st.dataframe(matrix_df, use_container_width=True, hide_index=True)
+    else:
+        st.info('Add client goals to decisions to populate the matrix.')
+
 # ─── Header / Shell ───────────────────────────────────────────────────────────
 
 def _render_header(profile: dict[str, str | int]) -> None:
@@ -3237,6 +3654,7 @@ def render_wharton_cockpit() -> None:
     _render_header(profile)
     tabs = st.tabs([
         "Overview & Tasks",
+        "Strategy & Decisions",
         "Quant Engine",
         "Stock Screener",
         "Risk Cockpit",
@@ -3258,30 +3676,32 @@ def render_wharton_cockpit() -> None:
     with tabs[0]:
         _render_overview_action_center(profile)
     with tabs[1]:
-        _render_quant_engine(profile)
+        _render_decision_log(profile, result)
     with tabs[2]:
-        _render_stock_screener()
+        _render_quant_engine(profile)
     with tabs[3]:
-        _render_risk_cockpit(result)
+        _render_stock_screener()
     with tabs[4]:
-        _render_factor_exposure(result)
+        _render_risk_cockpit(result)
     with tabs[5]:
-        _render_regime_detection(result)
+        _render_factor_exposure(result)
     with tabs[6]:
-        _render_scenario_playground(result)
+        _render_regime_detection(result)
     with tabs[7]:
-        _render_efficient_frontier(result)
+        _render_scenario_playground(result)
     with tabs[8]:
-        _render_monte_carlo(result)
+        _render_efficient_frontier(result)
     with tabs[9]:
-        _render_advanced_analytics(result)
+        _render_monte_carlo(result)
     with tabs[10]:
-        _render_mindmap()
+        _render_advanced_analytics(result)
     with tabs[11]:
-        _render_subprojects(profile)
+        _render_mindmap()
     with tabs[12]:
-        _render_chat(profile)
+        _render_subprojects(profile)
     with tabs[13]:
+        _render_chat(profile)
+    with tabs[14]:
         _render_file_center(profile)
 
 

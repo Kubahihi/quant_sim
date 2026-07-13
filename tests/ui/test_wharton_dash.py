@@ -36,14 +36,14 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
 
     with sqlite3.connect(db_path) as connection:
         old_hash = bcrypt.hashpw("old-team-pass".encode(), bcrypt.gensalt()).decode()
-        connection.execute("UPDATE users SET password_hash = ?", (old_hash,))
+        connection.execute("UPDATE wharton_users SET password_hash = ?", (old_hash,))
 
     wharton_dash.init_db()
 
     with sqlite3.connect(db_path) as connection:
         password_hashes = {
             row[0]
-            for row in connection.execute("SELECT password_hash FROM users ORDER BY id").fetchall()
+            for row in connection.execute("SELECT password_hash FROM wharton_users ORDER BY id").fetchall()
         }
 
     # Verify that the password was updated/synced to the currently configured one
