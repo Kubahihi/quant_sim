@@ -1514,12 +1514,9 @@ def _compute_quant_run(
         "cost_aware": cost_aware,
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
-<<<<<<< HEAD
         "model_validation": model_validation,
-=======
         "adv_price_paths": adv_price_paths,
         "adv_simulation_stats": adv_simulation_stats,
->>>>>>> f9c931bfc0f87598d8825fa7a42efb4c211368b5
         "quant_stack": quant_stack_result,
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
@@ -4524,6 +4521,139 @@ def _render_statement_block(label: str, frame: pd.DataFrame) -> None:
         st.dataframe(display, use_container_width=True)
 
 
+def _render_geographic_revenue(snapshot: dict[str, Any], ticker: str, company_name: str) -> None:
+    from src.analytics.company_analysis import analyze_geographic_revenue
+
+    st.markdown("#### Revenue by Region")
+    st.caption(
+        "Automatic data come from the most recent SEC annual filing available through the configured sources "
+        "and are used only when a non-overlapping Inline XBRL geographic table can be verified."
+    )
+    geographic = snapshot.get("geographic_revenue", {})
+    analysis = geographic.get("analysis", {}) if isinstance(geographic, dict) else {}
+
+    if not geographic.get("available"):
+        st.warning(geographic.get("error", "A reliable geographic revenue breakdown was not found."))
+        st.info(
+            "Yahoo Finance does not normally publish revenue by region. You can enter values from the company's "
+            "annual report below; QuantSim will analyze them without inventing missing regions."
+        )
+        manual_key = f"company_region_manual_{ticker}"
+        starter = pd.DataFrame(
+            [
+                {"Region": "", "Revenue": None},
+                {"Region": "", "Revenue": None},
+            ]
+        )
+        manual = st.data_editor(
+            starter,
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key=manual_key,
+            column_config={
+                "Region": st.column_config.TextColumn("Region", help="Use the exact label from the annual report."),
+                "Revenue": st.column_config.NumberColumn("Revenue", min_value=0.0, format="%.2f"),
+            },
+        )
+        manual_rows = [
+            {"region": row.get("Region"), "revenue": row.get("Revenue")}
+            for row in manual.to_dict("records")
+        ]
+        manual_analysis = analyze_geographic_revenue(manual_rows)
+        if manual_analysis.get("available"):
+            analysis = manual_analysis
+            geographic = {
+                "available": True,
+                "rows": [{"region": row["region"], "revenue": row["revenue"]} for row in analysis["rows"]],
+                "currency": "entered units",
+                "source_name": "Manual annual-report input",
+                "source_url": "",
+                "report_date": "",
+                "analysis": analysis,
+            }
+        else:
+            st.caption("Enter at least two regions with positive revenue to generate the chart and rating.")
+            return
+
+    if not analysis.get("available"):
+        analysis = analyze_geographic_revenue(geographic.get("rows", []))
+    if not analysis.get("available"):
+        st.warning(analysis.get("error", "Regional analysis is unavailable."))
+        return
+
+    score_cols = st.columns(5)
+    score_cols[0].metric("Diversification rating", f"{analysis['score']}/{analysis['max_score']}")
+    score_cols[1].metric("Assessment", analysis["label"])
+    score_cols[2].metric("Largest region", str(analysis["top_region"]))
+    score_cols[3].metric("Largest share", f"{analysis['top_region_share']:.1%}")
+    score_cols[4].metric("Effective regions", f"{analysis['effective_regions']:.1f}")
+    st.caption(analysis["warning"])
+
+    rows = analysis["rows"]
+    chart_col, detail_col = st.columns([0.56, 0.44], gap="large")
+    with chart_col:
+        import plotly.graph_objects as go
+
+        figure = go.Figure(
+            go.Pie(
+                labels=[row["region"] for row in rows],
+                values=[row["revenue"] for row in rows],
+                hole=0.38,
+                sort=False,
+                textinfo="label+percent",
+                hovertemplate="%{label}<br>Revenue: %{value:,.2f}<br>Share: %{percent}<extra></extra>",
+            )
+        )
+        figure.update_layout(
+            title=f"{company_name}: Revenue by Region",
+            height=460,
+            margin=dict(l=10, r=10, t=60, b=10),
+            legend=dict(orientation="h", yanchor="top", y=-0.08),
+        )
+        st.plotly_chart(figure, use_container_width=True)
+    with detail_col:
+        st.markdown("##### Regional interpretation")
+        st.write(analysis["interpretation"])
+        for strength in analysis.get("strengths", []):
+            st.success(strength)
+        for risk in analysis.get("risks", []):
+            st.warning(risk)
+
+    currency = str(geographic.get("currency") or "reporting currency")
+    table = pd.DataFrame([
+        {
+            "Region": row["region"],
+            f"Revenue ({currency})": row["revenue"],
+            "Revenue share": row["share"],
+            "Strategic importance": row["strategic_importance"],
+        }
+        for row in rows
+    ])
+    st.dataframe(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Revenue share": st.column_config.ProgressColumn(
+                "Revenue share", min_value=0.0, max_value=1.0, format="percent"
+            ),
+        },
+    )
+    source_url = str(geographic.get("source_url") or "")
+    source_name = str(geographic.get("source_name") or "Annual filing")
+    report_date = str(geographic.get("report_date") or geographic.get("fiscal_end") or "")
+    if source_url:
+        st.markdown(f"Source: [{source_name}]({source_url}) · reporting period ended {report_date or 'not specified'}")
+    else:
+        st.caption(f"Source: {source_name}. Verify manually entered values against the cited annual report.")
+    if geographic.get("coverage_ratio") is not None:
+        st.caption(
+            f"Named-region disclosure coverage before any residual bucket: {float(geographic['coverage_ratio']):.1%}. "
+            f"XBRL concept: {geographic.get('concept', '—')}."
+        )
+
+
 def _render_company_analysis(profile: dict[str, str | int]) -> None:
     from src.analytics.company_analysis import (
         analyze_moat,
@@ -4585,6 +4715,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
         info = snapshot.get("info", {})
         moat = analyze_moat(info)
         base_dcf = build_dcf_scenarios(info).get("Base", {})
+        geographic_analysis = snapshot.get("geographic_revenue", {}).get("analysis", {})
         comparison_rows.append({
             "Ticker": ticker,
             "Company": info.get("shortName") or info.get("longName") or ticker,
@@ -4595,6 +4726,11 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
             "Operating margin": _format_company_metric("operatingMargins", info.get("operatingMargins")),
             "FCF": _format_company_metric("freeCashflow", info.get("freeCashflow")),
             "Moat signal": f"{moat['score']}/{moat['max_score']} · {moat['label']}",
+            "Regional diversification": (
+                f"{geographic_analysis.get('score')}/5 · {geographic_analysis.get('label')}"
+                if geographic_analysis.get("available")
+                else "Not disclosed"
+            ),
             "Base DCF / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
         })
     st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
@@ -4606,8 +4742,8 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     st.markdown(f"## {company_name} ({selected_ticker})")
     st.caption(f"Data fetched: {snapshot.get('fetched_at', '—')} · Market-data source: Yahoo Finance")
 
-    overview_tab, financials_tab, management_tab, moat_tab, dcf_tab, metrics_tab = st.tabs([
-        "Overview", "Financial Statements", "Management", "Moat, Track Record & Risks", "DCF", "All Metrics",
+    overview_tab, regions_tab, financials_tab, management_tab, moat_tab, dcf_tab, metrics_tab = st.tabs([
+        "Overview", "Revenue by Region", "Financial Statements", "Management", "Moat, Track Record & Risks", "DCF", "All Metrics",
     ])
 
     with overview_tab:
@@ -4634,6 +4770,9 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
         if isinstance(history, pd.DataFrame) and not history.empty and "Close" in history:
             st.markdown("#### Five-Year Price History")
             st.line_chart(history[["Close"]].rename(columns={"Close": selected_ticker}), use_container_width=True)
+
+    with regions_tab:
+        _render_geographic_revenue(snapshot, selected_ticker, str(company_name))
 
     with financials_tab:
         annual, quarterly = st.tabs(["Annual", "Quarterly"])

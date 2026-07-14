@@ -4,6 +4,8 @@ import pandas as pd
 import pytest
 
 from src.analytics.company_analysis import (
+    _extract_geographic_revenue_from_ixbrl,
+    analyze_geographic_revenue,
     analyze_moat,
     analyze_track_record,
     build_dcf_scenarios,
@@ -12,6 +14,38 @@ from src.analytics.company_analysis import (
     fetch_management_biography,
     format_statement,
 )
+
+
+SAMPLE_IXBRL = b'''<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+      xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:xbrldi="http://xbrl.org/2006/xbrldi">
+  <body>
+    <ix:resources>
+      <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+      <xbrli:context id="FY">
+        <xbrli:entity><xbrli:identifier scheme="test">1</xbrli:identifier></xbrli:entity>
+        <xbrli:period><xbrli:startDate>2024-01-01</xbrli:startDate><xbrli:endDate>2024-12-31</xbrli:endDate></xbrli:period>
+      </xbrli:context>
+      <xbrli:context id="US">
+        <xbrli:entity><xbrli:identifier scheme="test">1</xbrli:identifier><xbrli:segment>
+          <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">example:UnitedStatesMember</xbrldi:explicitMember>
+        </xbrli:segment></xbrli:entity>
+        <xbrli:period><xbrli:startDate>2024-01-01</xbrli:startDate><xbrli:endDate>2024-12-31</xbrli:endDate></xbrli:period>
+      </xbrli:context>
+      <xbrli:context id="EU">
+        <xbrli:entity><xbrli:identifier scheme="test">1</xbrli:identifier><xbrli:segment>
+          <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">example:EuropeMember</xbrldi:explicitMember>
+        </xbrli:segment></xbrli:entity>
+        <xbrli:period><xbrli:startDate>2024-01-01</xbrli:startDate><xbrli:endDate>2024-12-31</xbrli:endDate></xbrli:period>
+      </xbrli:context>
+    </ix:resources>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="FY" unitRef="USD" scale="6">1,000</ix:nonFraction>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="US" unitRef="USD" scale="6">600</ix:nonFraction>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="EU" unitRef="USD" scale="6">300</ix:nonFraction>
+  </body>
+</html>'''
 
 
 def _sample_info() -> dict:
@@ -142,3 +176,52 @@ def test_management_biography_returns_sourced_education_and_career(monkeypatch):
     assert "engineering" in result["education"].lower()
     assert "joined microsoft" in result["career"].lower()
     assert result["source_url"] == "https://en.wikipedia.org/wiki/Satya_Nadella"
+
+
+def test_ixbrl_geographic_revenue_extraction_adds_honest_residual_bucket():
+    result = _extract_geographic_revenue_from_ixbrl(SAMPLE_IXBRL, report_date="2024-12-31")
+
+    assert result["available"] is True
+    assert result["currency"] == "USD"
+    assert result["coverage_ratio"] == pytest.approx(0.9)
+    assert result["rows"] == [
+        {"region": "United States", "revenue": 600_000_000.0},
+        {"region": "Europe", "revenue": 300_000_000.0},
+        {"region": "Not separately disclosed", "revenue": 100_000_000.0},
+    ]
+
+
+def test_geographic_analysis_rates_concentration_and_region_importance():
+    result = analyze_geographic_revenue(
+        [
+            {"region": "North America", "revenue": 60},
+            {"region": "Europe", "revenue": 25},
+            {"region": "Asia", "revenue": 15},
+        ]
+    )
+
+    assert result["available"] is True
+    assert result["score"] == 3
+    assert result["top_region"] == "North America"
+    assert result["top_region_share"] == pytest.approx(0.60)
+    assert result["rows"][0]["strategic_importance"] == "Core"
+    assert any("North America" in risk for risk in result["risks"])
+
+
+def test_geographic_analysis_requires_two_positive_regions():
+    result = analyze_geographic_revenue([{"region": "Europe", "revenue": 100}])
+
+    assert result["available"] is False
+
+
+def test_geographic_analysis_marks_broad_international_bucket_as_limited_detail():
+    result = analyze_geographic_revenue(
+        [
+            {"region": "United States", "revenue": 51},
+            {"region": "Non-US / International", "revenue": 49},
+        ]
+    )
+
+    assert result["score"] == 3
+    assert result["limited_granularity"] is True
+    assert "limited detail" in result["label"].lower()
