@@ -13,6 +13,11 @@ from .benchmark import (
     calculate_return_contribution,
     calculate_risk_contribution,
 )
+from .model_validation import (
+    build_model_validation_report,
+    distribution_diagnostics,
+    moving_block_bootstrap_intervals,
+)
 from .scoring import (
     build_deterministic_fallback_review,
     compute_weighted_factor_score,
@@ -54,6 +59,9 @@ __all__ = [
     "calculate_active_risk_metrics",
     "calculate_return_contribution",
     "calculate_risk_contribution",
+    "build_model_validation_report",
+    "distribution_diagnostics",
+    "moving_block_bootstrap_intervals",
     "evaluate_portfolio_score",
     "build_deterministic_fallback_review",
     "compute_weighted_factor_score",

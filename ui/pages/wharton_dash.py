@@ -81,6 +81,7 @@ TASK_PRIORITY_COLORS = {
 }
 GRAPH_NODE_TYPES = ["Policy", "Company", "Model", "Market", "Risk", "Research", "Other"]
 QUANT_MODULES = [
+    "Methodology & Validation",
     "Benchmark Analytics",
     "Cost-Aware Rebalance",
     "Performance Attribution",
@@ -1428,7 +1429,9 @@ def _compute_quant_run(
     portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
     price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
         current_value=current_value,
-        expected_return=float(core_metrics.get("annualized_return", 0.0)),
+        # GBM expects arithmetic drift; CAGR remains the headline realized
+        # return metric but is not the correct drift estimator here.
+        expected_return=float(portfolio_returns.mean() * 252.0),
         volatility=float(core_metrics.get("volatility", 0.0)),
         time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
     )
@@ -1444,6 +1447,7 @@ def _compute_quant_run(
             "end_date": end_date,
             "risk_free_rate": risk_free_rate,
             "portfolio_metrics": {**core_metrics, **concentration, "avg_correlation": avg_corr},
+            "transaction_cost_bps": transaction_cost_bps,
             "news_max_items": 80,
             "news_api_key": "",
         }
@@ -1461,6 +1465,19 @@ def _compute_quant_run(
         )
     except Exception as stack_err:
         quant_stack_result = {"_error": str(stack_err)}
+
+    backtest_for_validation = (
+        quant_stack_result.get("backtest", {})
+        if isinstance(quant_stack_result, dict) and "_error" not in quant_stack_result
+        else {}
+    )
+    model_validation = analytics.build_model_validation_report(
+        portfolio_returns=portfolio_returns,
+        simulation_stats=simulation_stats,
+        backtest=backtest_for_validation,
+        risk_free_rate=risk_free_rate,
+        random_seed=random_seed,
+    )
 
     metrics = {
         **core_metrics, **concentration,
@@ -1487,6 +1504,7 @@ def _compute_quant_run(
         "cost_aware": cost_aware,
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
+        "model_validation": model_validation,
         "quant_stack": quant_stack_result,
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
@@ -1699,6 +1717,77 @@ def _render_simulation(result: dict, advanced: bool) -> None:
     })
     st.markdown("#### Final Value Distribution")
     st.bar_chart(hist_df.set_index("Bucket"), use_container_width=True, height=320)
+
+
+def _render_methodology_validation(result: dict) -> None:
+    """Explain what QuantSim can and cannot support with current evidence."""
+    st.markdown("### Methodology & Validation")
+    report = result.get("model_validation", {})
+    if not report:
+        st.info("Run the Quant Engine to generate the validation report.")
+        return
+
+    score = float(report.get("methodology_score", 0.0))
+    distribution = report.get("distribution", {})
+    backtest = result.get("quant_stack", {}).get("backtest", {}) if isinstance(result.get("quant_stack"), dict) else {}
+    metrics = backtest.get("metrics", {}) if isinstance(backtest, dict) else {}
+    top = st.columns(4)
+    top[0].metric("Methodology score", f"{score:.0f}/100")
+    top[1].metric("Evidence band", str(report.get("band", "unknown")).replace("_", " ").title())
+    top[2].metric("History", f"{float(distribution.get('observations', 0)) / 252.0:.1f} years")
+    top[3].metric("Causal baseline hit rate", _fmt_pct(metrics.get("directional_hit_rate")))
+
+    st.info(
+        "This score measures evidence quality and reproducibility — not future predictive accuracy, "
+        "and it is not an official Wharton rating or endorsement."
+    )
+    st.markdown(f"**Assessment:** {escape(str(report.get('verdict', '')))}")
+
+    st.markdown("#### Validation gates")
+    gate_rows = []
+    status_labels = {"pass": "Pass", "warning": "Partial", "fail": "Gap"}
+    for gate in report.get("gates", []):
+        gate_rows.append({
+            "Gate": gate.get("gate", ""),
+            "Status": status_labels.get(str(gate.get("status", "")), str(gate.get("status", ""))),
+            "Score": f"{float(gate.get('points', 0)):.0f}/{float(gate.get('maximum', 0)):.0f}",
+            "Evidence": gate.get("evidence", ""),
+        })
+    st.dataframe(pd.DataFrame(gate_rows), use_container_width=True, hide_index=True)
+
+    intervals = report.get("metric_intervals", {})
+    if intervals:
+        labels = {
+            "annualized_return": "Annualized return",
+            "volatility": "Volatility",
+            "sharpe_ratio": "Sharpe ratio",
+            "var_95": "Daily VaR 95%",
+            "cvar_95": "Daily CVaR 95%",
+        }
+        interval_rows = []
+        for key, values in intervals.items():
+            is_ratio = key == "sharpe_ratio"
+            formatter = _fmt_float if is_ratio else _fmt_pct
+            interval_rows.append({
+                "Metric": labels.get(key, key),
+                "Estimate": formatter(values.get("estimate")),
+                "95% low": formatter(values.get("ci_low")),
+                "95% high": formatter(values.get("ci_high")),
+                "Method": values.get("method", ""),
+            })
+        st.markdown("#### Estimates with uncertainty")
+        st.dataframe(pd.DataFrame(interval_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Model-risk diagnostics")
+    diag = st.columns(4)
+    diag[0].metric("Skewness", _fmt_float(distribution.get("skewness")))
+    diag[1].metric("Excess kurtosis", _fmt_float(distribution.get("excess_kurtosis")))
+    diag[2].metric("Normality p-value", _fmt_float(distribution.get("normality_p_value")))
+    diag[3].metric("Lag-1 autocorrelation", _fmt_float(distribution.get("lag1_autocorrelation")))
+
+    with st.expander("Limitations that must accompany a Wharton-level presentation", expanded=True):
+        for limitation in report.get("limitations", []):
+            st.markdown(f"- {escape(str(limitation))}")
 
 
 def _render_models_signals(result: dict) -> None:
@@ -3326,7 +3415,9 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             st.error("Stack ")
 
     with content_col:
-        if selected == "Benchmark Analytics":
+        if selected == "Methodology & Validation":
+            _render_methodology_validation(result)
+        elif selected == "Benchmark Analytics":
             _render_benchmark_analytics(result, advanced)
         elif selected == "Cost-Aware Rebalance":
             _render_cost_aware_rebalance(result, advanced)

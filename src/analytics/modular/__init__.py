@@ -1,4 +1,4 @@
-from .backtest import deterministic_signal_backtest
+from .backtest import deterministic_signal_backtest, walk_forward_baseline_backtest
 from .history import compare_runs, list_run_records, load_run_record, save_run_record
 from .models import run_model_bundle
 from .news import (
@@ -32,6 +32,7 @@ __all__ = [
     "clear_news_cache",
     "run_quant_stack",
     "deterministic_signal_backtest",
+    "walk_forward_baseline_backtest",
     "save_run_record",
     "list_run_records",
     "load_run_record",

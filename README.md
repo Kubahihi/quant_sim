@@ -262,3 +262,24 @@ Aktualni testy pokryvaji:
 - persistence round-trip
 - failure isolation
 - deterministic backtest example
+
+## 11) Methodology & Validation (Wharton presentation readiness)
+
+Wharton Cockpit now includes a **Methodology & Validation** module. It reports
+an internal evidence-quality score rather than claiming a percentage of future
+forecast accuracy. The module includes:
+
+- 95% moving-block bootstrap intervals for annualized return, volatility,
+  Sharpe ratio, daily VaR and CVaR;
+- Monte Carlo convergence error, an analytic GBM cross-check and reproducible
+  seeded runs;
+- skewness, excess kurtosis, normality and lag-1 dependence diagnostics;
+- a causal walk-forward baseline with turnover and transaction costs;
+- explicit validation gates and limitations for a competition presentation.
+
+The score is **not an official Wharton rating or endorsement**. QuantSim is
+currently suitable as structured decision support, not as a validated
+forecasting system. Claiming predictive accuracy requires a frozen strategy,
+nested walk-forward testing of the full ensemble, untouched holdout data and
+comparison with investable benchmarks after costs. See
+`docs/MODEL_VALIDATION.md` for the methodology and interpretation rules.
