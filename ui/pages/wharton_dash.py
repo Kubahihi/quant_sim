@@ -206,6 +206,46 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS competition_compliance (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                team_size INTEGER DEFAULT 0,
+                leader_age INTEGER DEFAULT 0,
+                same_school INTEGER DEFAULT 0,
+                eligible_students INTEGER DEFAULT 0,
+                leader_designated INTEGER DEFAULT 0,
+                advisor_is_teacher INTEGER DEFAULT 0,
+                advisor_team_count INTEGER DEFAULT 0,
+                one_wins_account INTEGER DEFAULT 0,
+                members_single_team INTEGER DEFAULT 0,
+                no_client_contact INTEGER DEFAULT 0,
+                no_paid_advisor INTEGER DEFAULT 0,
+                student_owned_work INTEGER DEFAULT 0,
+                ai_cited INTEGER DEFAULT 0,
+                sources_cited INTEGER DEFAULT 0,
+                school_permission INTEGER DEFAULT 0,
+                updated_at TEXT,
+                updated_by TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS competition_positions (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                security_type TEXT NOT NULL DEFAULT 'Stock',
+                quantity REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                entry_date TEXT NOT NULL,
+                opened_by TEXT NOT NULL,
+                opened_at TEXT NOT NULL,
+                last_price REAL,
+                notes TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                exit_price REAL,
+                exit_date TEXT,
+                closed_by TEXT
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
                 timestamp TEXT,
@@ -4113,6 +4153,221 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
 
 # ─── Header / Shell ───────────────────────────────────────────────────────────
 
+def _fetch_competition_settings() -> dict[str, Any]:
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM competition_compliance WHERE id = 1").fetchone()
+    return dict(row) if row else {}
+
+
+def _fetch_competition_positions() -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM competition_positions ORDER BY entry_date, id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def _render_competition_rules(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.wharton_competition import COMPETITION_URL, OFFICIAL_RULES_URL, evaluate_compliance
+
+    st.markdown("### Zadání a pravidla — Wharton 2026–2027")
+    st.caption("Kontrola používá pouze aktuálně zveřejněná oficiální pravidla. U každého nesplnění uvádí přesný důvod.")
+    source_col, overview_col = st.columns(2)
+    source_col.link_button("Oficiální pravidla 2026–2027", OFFICIAL_RULES_URL, use_container_width=True)
+    overview_col.link_button("Oficiální přehled soutěže", COMPETITION_URL, use_container_width=True)
+    st.info(
+        "**Aktuálně zveřejněné zadání:** během 10 týdnů vytvořit pro klienta dlouhodobou investiční "
+        "strategii a spravovat 500 000 USD virtuálního kapitálu ve WInS. Hodnotí se síla a "
+        "vysvětlení strategie, ne pouze nejvyšší výnos."
+    )
+    st.warning(
+        "Wharton zatím u obchodních pravidel 2026–2027 uvádí „More information coming soon“. "
+        "Nové zadání klienta a podrobné deliverables rovněž ještě nejsou zveřejněné. Tyto kontroly "
+        "proto zůstávají žluté, místo aby se použila zastaralá pravidla."
+    )
+
+    current = _fetch_competition_settings()
+    st.markdown("#### Týmové prohlášení")
+    with st.form("competition_compliance_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            team_size = st.number_input("Počet aktivních studentů", 0, 20, int(current.get("team_size") or 0))
+            leader_age = st.number_input("Věk vedoucího týmu na začátku", 0, 25, int(current.get("leader_age") or 0))
+            advisor_team_count = st.number_input("Kolik týmů vede hlavní advisor", 0, 50, int(current.get("advisor_team_count") or 0))
+        with c2:
+            same_school = st.checkbox("Všichni jsou ze stejné školy a pobočky", value=bool(current.get("same_school")))
+            eligible_students = st.checkbox("Všichni splňují věk, status studenta a nemají ukončenou střední školu", value=bool(current.get("eligible_students")))
+            leader_designated = st.checkbox("Je určen právě jeden student leader", value=bool(current.get("leader_designated")))
+            advisor_is_teacher = st.checkbox("Hlavní advisor je učitel této školy", value=bool(current.get("advisor_is_teacher")))
+            one_wins_account = st.checkbox("Tým používá jeden sdílený WInS účet", value=bool(current.get("one_wins_account")))
+            members_single_team = st.checkbox("Žádný student není v jiném soutěžním týmu", value=bool(current.get("members_single_team")))
+        with c3:
+            no_client_contact = st.checkbox("Tým nekontaktoval soutěžního klienta", value=bool(current.get("no_client_contact")))
+            no_paid_advisor = st.checkbox("Bez placeného advisora, konzultanta či zakázaného kurzu", value=bool(current.get("no_paid_advisor")))
+            student_owned_work = st.checkbox("Strategii a rozhodnutí vytvořili studenti", value=bool(current.get("student_owned_work")))
+            ai_cited = st.checkbox("AI obsah je citován a není vydáván za vlastní práci", value=bool(current.get("ai_cited")))
+            sources_cited = st.checkbox("Všechny zdroje, obrázky a média jsou citovány", value=bool(current.get("sources_cited")))
+            school_permission = st.checkbox("Je připraven souhlas školy na oficiálním hlavičkovém papíře", value=bool(current.get("school_permission")))
+        save_rules = st.form_submit_button("Uložit a přepočítat kontrolu", type="primary", use_container_width=True)
+
+    if save_rules:
+        payload = {
+            "team_size": int(team_size), "leader_age": int(leader_age), "advisor_team_count": int(advisor_team_count),
+            "same_school": int(same_school), "eligible_students": int(eligible_students),
+            "leader_designated": int(leader_designated), "advisor_is_teacher": int(advisor_is_teacher),
+            "one_wins_account": int(one_wins_account), "members_single_team": int(members_single_team),
+            "no_client_contact": int(no_client_contact), "no_paid_advisor": int(no_paid_advisor),
+            "student_owned_work": int(student_owned_work), "ai_cited": int(ai_cited),
+            "sources_cited": int(sources_cited), "school_permission": int(school_permission),
+        }
+        fields = list(payload)
+        assignments = ", ".join(f"{field} = excluded.{field}" for field in fields)
+        with get_connection() as conn:
+            conn.execute(
+                f"INSERT INTO competition_compliance (id, {', '.join(fields)}, updated_at, updated_by) "
+                f"VALUES (1, {', '.join(['?'] * len(fields))}, ?, ?) "
+                f"ON CONFLICT(id) DO UPDATE SET {assignments}, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                (*[payload[field] for field in fields], _now_iso(), str(profile["username"])),
+            )
+            conn.commit()
+            if hasattr(conn, "sync"):
+                conn.sync()
+        st.success(f"Kontrolu aktualizoval(a) {profile['username']}.")
+        current = payload
+
+    checks = evaluate_compliance(current, _fetch_competition_positions())
+    passed = sum(item["status"] == "pass" for item in checks)
+    failed = sum(item["status"] == "fail" for item in checks)
+    pending = sum(item["status"] == "pending" for item in checks)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("✅ Splněno", passed)
+    k2.metric("❌ Nesplněno", failed)
+    k3.metric("🟡 Čeká na Wharton", pending)
+    status_map = {"pass": "✅", "fail": "❌", "pending": "🟡"}
+    st.dataframe(pd.DataFrame([
+        {"Stav": status_map[item["status"]], "Pravidlo": item["rule"], "Přesný výsledek kontroly": item["detail"]}
+        for item in checks
+    ]), use_container_width=True, hide_index=True)
+    if failed:
+        st.error(f"Tým nebo portfolio nyní nesplňuje {failed} kontrolovaných pravidel. Přesné důvody jsou uvedené výše.")
+    elif pending:
+        st.warning("Všechna zveřejněná kontrolovatelná pravidla jsou splněna; čeká se na další oficiální materiály.")
+    else:
+        st.success("Všechna kontrolovaná pravidla jsou splněna.")
+
+
+def _competition_live_prices(tickers: list[str]) -> dict[str, float]:
+    if not tickers:
+        return {}
+    try:
+        end_date = date.today() + timedelta(days=1)
+        prices = _fetch_close_prices_cached(tuple(sorted(set(tickers))), end_date - timedelta(days=10), end_date)
+        result: dict[str, float] = {}
+        for ticker in tickers:
+            if ticker in prices.columns:
+                clean = pd.Series(prices[ticker]).dropna()
+                if not clean.empty:
+                    result[ticker] = float(clean.iloc[-1])
+        return result
+    except Exception:
+        return {}
+
+
+def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
+
+    st.markdown("### Portfolio tracker — Wharton 2026–2027")
+    st.caption("Výnos se počítá od 500 000 USD. Každá pozice uchovává autora, datum a cenu vstupu i výsledek.")
+    with st.expander("Přidat novou pozici", expanded=False):
+        with st.form("competition_add_position", clear_on_submit=True):
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                ticker = st.text_input("Ticker", placeholder="např. MSFT")
+                security_type = st.selectbox("Typ", ["Stock", "ETF", "Bond", "Other"])
+            with p2:
+                quantity = st.number_input("Počet kusů", min_value=0.0, value=0.0, step=1.0)
+                entry_price = st.number_input("Vstupní cena za kus (USD)", min_value=0.0, value=0.0, step=0.01)
+            with p3:
+                entry_date = st.date_input("Datum otevření", value=date.today())
+                manual_price = st.number_input("Aktuální cena (volitelné)", min_value=0.0, value=0.0, step=0.01)
+            notes = st.text_area("Poznámka / investiční teze", height=80)
+            add_position = st.form_submit_button("Přidat pozici", type="primary", use_container_width=True)
+        if add_position:
+            clean_ticker = ticker.strip().upper()
+            if not clean_ticker or quantity <= 0 or entry_price <= 0:
+                st.error("Ticker, počet kusů a vstupní cena musí být vyplněné a kladné.")
+            else:
+                with get_connection() as conn:
+                    conn.execute(
+                        "INSERT INTO competition_positions (ticker, security_type, quantity, entry_price, entry_date, opened_by, opened_at, last_price, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+                        (clean_ticker, security_type, float(quantity), float(entry_price), entry_date.isoformat(), str(profile["username"]), _now_iso(), float(manual_price) if manual_price > 0 else None, notes.strip()),
+                    )
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                st.success(f"Pozici {clean_ticker} založil(a) {profile['username']}.")
+                st.rerun()
+
+    positions = _fetch_competition_positions()
+    open_tickers = [str(row["ticker"]).upper() for row in positions if row["status"] == "open"]
+    live_prices = _competition_live_prices(open_tickers)
+    performance = calculate_portfolio_performance(positions, live_prices)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Hodnota portfolia", f"${performance['equity']:,.2f}")
+    m2.metric("Celkové zhodnocení od začátku", f"{performance['total_return_pct']:+.2f}%", f"${performance['total_pnl']:+,.2f}")
+    m3.metric("Nerealizovaný P/L", f"${performance['unrealized_pnl']:+,.2f}")
+    m4.metric("Realizovaný P/L", f"${performance['realized_pnl']:+,.2f}")
+    st.caption(
+        f"Počáteční kapitál: ${INITIAL_CAPITAL_USD:,.0f} · Neinvestovaná hotovost před P/L: "
+        f"${performance['cash_before_pnl']:,.2f} · Živé ceny: {len(live_prices)}/{len(set(open_tickers))} tickerů."
+    )
+    if not performance["positions"]:
+        st.info("Zatím není zadaná žádná pozice.")
+        return
+
+    st.dataframe(pd.DataFrame([{
+        "Stav": "Otevřená" if row["status"] == "open" else "Uzavřená", "Ticker": row["ticker"],
+        "Typ": row["security_type"], "Kusy": row["quantity"], "Vstup": f"${row['entry_price']:,.2f}",
+        "Aktuální / výstup": f"${row['current_price']:,.2f}", "Zhodnocení pozice": f"{row['return_pct']:+.2f}%",
+        "P/L": f"${row['pnl']:+,.2f}", "Pozici založil(a)": row["opened_by"], "Datum": row["entry_date"],
+        "Zdroj ceny": row["price_source"],
+    } for row in performance["positions"]]), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Správa otevřených pozic")
+    for row in performance["positions"]:
+        if row["status"] != "open":
+            continue
+        with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · založil(a) {row['opened_by']}"):
+            st.write(row.get("notes") or "Bez poznámky.")
+            update_col, close_col = st.columns(2)
+            with update_col:
+                with st.form(f"competition_update_price_{row['id']}"):
+                    new_price = st.number_input("Ruční aktuální cena", min_value=0.0, value=float(row["current_price"]), step=0.01, key=f"competition_price_{row['id']}")
+                    if st.form_submit_button("Uložit ruční cenu", use_container_width=True):
+                        with get_connection() as conn:
+                            conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
+                            conn.commit()
+                            if hasattr(conn, "sync"):
+                                conn.sync()
+                        st.rerun()
+            with close_col:
+                with st.form(f"competition_close_{row['id']}"):
+                    exit_price = st.number_input("Výstupní cena", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
+                    exit_date = st.date_input("Datum uzavření", value=date.today(), key=f"competition_exit_date_{row['id']}")
+                    if st.form_submit_button("Uzavřít pozici", type="primary", use_container_width=True):
+                        with get_connection() as conn:
+                            conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
+                            conn.commit()
+                            if hasattr(conn, "sync"):
+                                conn.sync()
+                        st.rerun()
+            if st.button("Smazat chybně zadanou pozici", key=f"competition_delete_{row['id']}"):
+                with get_connection() as conn:
+                    conn.execute("DELETE FROM competition_positions WHERE id = ?", (int(row["id"]),))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                st.rerun()
+
+
 def _render_header(profile: dict[str, str | int]) -> None:
     username = escape(str(profile["username"]))
     role = escape(str(profile["role"]))
@@ -4159,6 +4414,8 @@ def render_wharton_cockpit() -> None:
         "Sub-Projects",
         "War Room",
         "File Vault",
+        "Zadání a pravidla",
+        "Portfolio tracker",
     ])
 
     # Fetch result from state if available
@@ -4196,6 +4453,10 @@ def render_wharton_cockpit() -> None:
         _render_chat(profile)
     with tabs[15]:
         _render_file_center(profile)
+    with tabs[15]:
+        _render_competition_rules(profile)
+    with tabs[16]:
+        _render_competition_portfolio(profile)
 
 
 def main() -> None:
