@@ -90,7 +90,12 @@ from src.reporting import (
     export_portfolio_data_csv,
     generate_pdf_report,
 )
-from src.simulation import run_monte_carlo_simulation
+import importlib
+import src.simulation.monte_carlo
+importlib.reload(src.simulation.monte_carlo)
+import src.simulation
+importlib.reload(src.simulation)
+from src.simulation import run_monte_carlo_simulation, run_advanced_monte_carlo_simulation
 from src.stock_picker.ai_filter import apply_ai_query, parse_ai_query
 import src.stock_picker.screener as stock_screener_module
 from src.stock_picker.screener import (
@@ -502,6 +507,8 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "portfolio_timeseries": result["portfolio_timeseries"],
         "simulation": result["simulation_stats"],
         "simulation_percentiles": result["simulation_percentiles"],
+        "adv_simulation": result.get("adv_simulation_stats", {}),
+        "adv_simulation_percentiles": result.get("adv_simulation_percentiles", pd.DataFrame()),
         "frontier_points": serialized_frontier,
         "ai_review": result["ai_review"],
         "advanced_models": result.get("advanced_models", {}),
@@ -680,6 +687,9 @@ def _compute_analysis(
     risk_profile: str,
     n_simulations: int,
     horizon_days: int,
+    jump_intensity: float,
+    jump_mean: float,
+    jump_volatility: float,
     portfolio_samples: int,
     benchmark_ticker: str,
     rebalance_max_weight: float,
@@ -820,6 +830,18 @@ def _compute_analysis(
         n_simulations=n_simulations,
     )
     simulation_percentiles = _create_simulation_percentiles(price_paths)
+
+    adv_price_paths, adv_simulation_stats = run_advanced_monte_carlo_simulation(
+        current_value=100000.0,
+        expected_return=expected_return,
+        volatility=volatility,
+        time_horizon=horizon_days,
+        n_simulations=n_simulations,
+        jump_intensity=jump_intensity,
+        jump_mean=jump_mean,
+        jump_volatility=jump_volatility,
+    )
+    adv_simulation_percentiles = _create_simulation_percentiles(adv_price_paths)
 
     min_var_result = optimize_minimum_variance(returns)
     max_sharpe_result = optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate)
@@ -985,6 +1007,9 @@ def _compute_analysis(
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
         "simulation_percentiles": simulation_percentiles,
+        "adv_price_paths": adv_price_paths,
+        "adv_simulation_stats": adv_simulation_stats,
+        "adv_simulation_percentiles": adv_simulation_percentiles,
         "asset_metrics_df": asset_metrics_df,
         "benchmark_metrics": benchmark_metrics,
         "return_contribution_df": return_contribution_df,
@@ -3885,7 +3910,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
     cost_aware_rebalance = analysis_result.get("cost_aware_rebalance", {})
 
     st.subheader("Portfolio Lab")
-    lab_tabs = st.tabs(["Performance", "Optimization", "Attribution", "Simulation", "Assets"])
+    lab_tabs = st.tabs(["Performance", "Optimization", "Attribution", "Simulation", "Adv. Simulation", "Assets"])
 
     with lab_tabs[0]:
         portfolio_cumulative_fig = plot_cumulative_returns(
@@ -4096,6 +4121,28 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
             st.warning(f"3D scenario surface unavailable: {exc}")
 
     with lab_tabs[4]:
+        adv_sim = analysis_result.get("adv_simulation_stats")
+        if adv_sim:
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Mean final value", f"${adv_sim['mean']:,.0f}")
+            mc2.metric("Median final value", f"${adv_sim['median']:,.0f}")
+            mc3.metric("5th percentile", f"${adv_sim['percentile_5']:,.0f}")
+            mc4.metric("95th percentile", f"${adv_sim['percentile_95']:,.0f}")
+            
+            adv_monte_carlo_fig = plot_monte_carlo_fan(analysis_result["adv_price_paths"], title="Merton Jump Diffusion Fan")
+            st.pyplot(adv_monte_carlo_fig)
+            
+            with st.expander("Simulation percentile table", expanded=False):
+                st.dataframe(analysis_result["adv_simulation_percentiles"].round(2), use_container_width=True)
+            try:
+                adv_surface_fig = plot_monte_carlo_percentile_surface(analysis_result["adv_price_paths"])
+                st.plotly_chart(adv_surface_fig, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"3D scenario surface unavailable: {exc}")
+        else:
+            st.info("Advanced Simulation data not available.")
+
+    with lab_tabs[5]:
         asset_metrics_view = asset_metrics_df.copy()
         asset_metrics_view["Ann. Return"] = asset_metrics_view["Ann. Return"].map(
             lambda value: f"{value:.2%}"
@@ -4239,10 +4286,14 @@ with st.sidebar:
     n_simulations = st.slider(
         "Monte Carlo simulations",
         min_value=200,
-        max_value=5000,
+        max_value=15000,
         value=1200,
         step=100,
     )
+    st.markdown("#### Jump Diffusion (Advanced MC)")
+    jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
+    jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
+    jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
 
     portfolio_samples = st.slider(
         "3D sampled portfolios",
@@ -4318,6 +4369,9 @@ if run_clicked:
                 risk_profile=risk_profile,
                 n_simulations=n_simulations,
                 horizon_days=horizon_days,
+                jump_intensity=jump_intensity,
+                jump_mean=jump_mean,
+                jump_volatility=jump_volatility,
                 portfolio_samples=portfolio_samples,
                 benchmark_ticker=benchmark_ticker,
                 rebalance_max_weight=float(rebalance_max_weight),
