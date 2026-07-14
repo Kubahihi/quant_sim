@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from typing import Any
 import uuid
+import secrets
 
 import bcrypt
 import numpy as np
@@ -40,9 +41,14 @@ def _is_development_mode() -> bool:
 
 def _get_default_password() -> str:
     try:
-        return str(st.secrets.get("WHARTON_PASSWORD", "CHANGE_ME_IN_SECRETS"))
+        pw = st.secrets.get("WHARTON_PASSWORD")
+        if pw:
+            return str(pw)
     except Exception:
+        pass
+    if _is_development_mode():
         return "CHANGE_ME_IN_SECRETS"
+    return secrets.token_urlsafe(32)
 
 # This is now a fallback for seeding, not a direct password.
 # Actual password will be read from st.secrets["wharton_users"][username]
@@ -2306,19 +2312,40 @@ def _render_factor_exposure(result: dict) -> None:
         
         with st.spinner("Fetching Factor ETFs for OLS Regression..."):
             factor_prices = _fetch_close_prices_cached(etf_symbols, start_date, end_date)
-            
+
+        if factor_prices.empty:
+            raise ValueError("Could not fetch factor ETF price data.")
+
         factor_returns = factor_prices.pct_change().dropna()
-        port_ret = pd.Series(result.get("portfolio_returns", {}))
-        
-        if port_ret.empty:
+
+        # Retrieve portfolio returns — may be a pd.Series with a DatetimeIndex
+        port_ret = result.get("portfolio_returns")
+        if port_ret is None or (hasattr(port_ret, "empty") and port_ret.empty):
             raise ValueError("Portfolio returns are empty.")
-            
+        port_ret = pd.Series(port_ret)
+
+        # Normalize both indexes to timezone-naive dates so pd.concat can align them
+        # regardless of whether yfinance returns UTC-aware or naive timestamps.
+        def _to_date_index(s: pd.Series) -> pd.Series:
+            idx = s.index
+            if hasattr(idx, "tz") and idx.tz is not None:
+                idx = idx.tz_convert("UTC").normalize().tz_localize(None)
+            else:
+                idx = pd.DatetimeIndex(idx).normalize()
+            return s.set_axis(idx)
+
+        port_ret = _to_date_index(port_ret)
+        factor_returns = factor_returns.apply(_to_date_index)
+
         aligned = pd.concat([port_ret, factor_returns], axis=1, join="inner").dropna()
         if len(aligned) < 30:
             raise ValueError(f"Not enough aligned data points for OLS (only {len(aligned)} days).")
 
         import statsmodels.api as sm
-        X = aligned[list(etf_symbols)]
+        available_etfs = [s for s in etf_symbols if s in aligned.columns]
+        if not available_etfs:
+            raise ValueError("None of the factor ETFs are present in the aligned dataset.")
+        X = aligned[available_etfs]
         X = sm.add_constant(X)
         y = aligned.iloc[:, 0]
         model = sm.OLS(y, X).fit()
@@ -3419,10 +3446,26 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
                     # Portfolio-level context from Quant Engine
                     if result and "metrics" in result:
                         m = result["metrics"]
-                        snap["_portfolio"] = {
+                        portfolio_snap: dict[str, Any] = {
                             "Sharpe Ratio": m.get("sharpe_ratio"),
                             "Ann. Return": m.get("annualized_return"),
                             "Volatility": m.get("volatility"),
+                            "Max Drawdown": m.get("max_drawdown"),
+                        }
+                        # Compute CVaR-95 directly from portfolio returns
+                        port_rets = result.get("portfolio_returns")
+                        if port_rets is not None and hasattr(port_rets, "__len__") and len(port_rets) >= 30:
+                            try:
+                                from src.analytics.risk_metrics import calculate_cvar
+                                cvar_95 = calculate_cvar(pd.Series(port_rets).dropna(), confidence_level=0.95)
+                                portfolio_snap["CVaR-95 (daily)"] = float(cvar_95)
+                            except Exception:
+                                pass
+                        # Cast all values to plain Python float to avoid json.dumps
+                        # failing on numpy.float64 / numpy.float32 scalars.
+                        snap["_portfolio"] = {
+                            k: (float(v) if v is not None else None)
+                            for k, v in portfolio_snap.items()
                         }
 
                     # Per-ticker fundamentals
