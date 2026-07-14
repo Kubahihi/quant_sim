@@ -161,6 +161,18 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
     assert "Portfolio Tracker" in tab_labels
     assert "Company Analysis" in tab_labels
 
+    assignment_tab = next(tab for tab in at.tabs if tab.label == "Assignment & Rules")
+    portfolio_tab = next(tab for tab in at.tabs if tab.label == "Portfolio Tracker")
+    company_tab = next(tab for tab in at.tabs if tab.label == "Company Analysis")
+
+    assignment_headings = [item.value for item in assignment_tab.markdown]
+    portfolio_headings = [item.value for item in portfolio_tab.markdown]
+    company_headings = [item.value for item in company_tab.markdown]
+    assert any("Assignment & Rules" in value for value in assignment_headings)
+    assert any("Portfolio Tracker" in value for value in portfolio_headings)
+    assert any("Company Analysis" in value for value in company_headings)
+    assert not any("Company Analysis" in value for value in portfolio_headings)
+
 
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):
     import src.ai

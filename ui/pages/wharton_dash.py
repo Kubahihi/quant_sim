@@ -5071,11 +5071,11 @@ def render_wharton_cockpit() -> None:
         _render_chat(profile)
     with tabs[15]:
         _render_file_center(profile)
-    with tabs[15]:
-        _render_competition_rules(profile)
     with tabs[16]:
-        _render_competition_portfolio(profile)
+        _render_competition_rules(profile)
     with tabs[17]:
+        _render_competition_portfolio(profile)
+    with tabs[18]:
         _render_company_analysis(profile)
 
 
