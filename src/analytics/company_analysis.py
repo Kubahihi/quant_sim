@@ -117,6 +117,8 @@ def fetch_management_biography(name: str, company_name: str) -> dict[str, Any]:
                 {"action": "parse", "page": title, "section": section_index, "prop": "text"}
             )
             html_value = parsed.get("parse", {}).get("text", "")
+            if isinstance(html_value, Mapping):
+                html_value = html_value.get("*", "")
             plain = _html_to_text(html_value)
             if plain:
                 chunks.append(plain)
@@ -126,6 +128,8 @@ def fetch_management_biography(name: str, company_name: str) -> dict[str, Any]:
         {"action": "query", "prop": "extracts", "titles": title, "exintro": 1, "explaintext": 1}
     )
     pages = intro_data.get("query", {}).get("pages", [])
+    if isinstance(pages, Mapping):
+        pages = list(pages.values())
     intro = str(pages[0].get("extract") or "") if pages else ""
     education = load_group(selected["education"])
     career = load_group(selected["career"])
