@@ -30,6 +30,13 @@ def test_init_db_uses_configured_paths_when_cwd_changes(monkeypatch, tmp_path):
     assert db_path.exists()
     assert Path(wharton_dash.UPLOAD_DIR).exists()
     assert not (runner_cwd / "data" / "wharton_production.db").exists()
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert "competition_compliance" in tables
+    assert "competition_positions" in tables
 
 
 def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
