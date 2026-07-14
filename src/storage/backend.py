@@ -19,7 +19,7 @@ import os
 import time
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,6 +36,13 @@ from .exceptions import (
     UserFileCountLimitExceeded,
     DuplicateFileError,
 )
+
+
+def _safe_storage_filename(filename: str) -> str:
+    """Return a display-preserving filename that cannot create subdirectories."""
+    normalized = str(filename).replace("\\", "/")
+    safe_name = normalized.rsplit("/", 1)[-1].strip()
+    return safe_name or "upload.bin"
 
 
 # ============================================
@@ -284,7 +291,11 @@ class LocalStorageBackend(StorageBackend):
     
     def _get_file_path(self, storage_key: str) -> Path:
         """Get the local file path for a storage key."""
-        return self.base_path / storage_key
+        base_path = self.base_path.resolve()
+        file_path = (base_path / storage_key).resolve()
+        if not file_path.is_relative_to(base_path):
+            raise StorageError("Storage key resolves outside the configured storage directory")
+        return file_path
     
     def _compute_sha256(self, data: bytes) -> str:
         """Compute SHA256 hash of data."""
@@ -298,7 +309,7 @@ class LocalStorageBackend(StorageBackend):
         metadata: Optional[Dict] = None
     ) -> StorageMetadata:
         """Upload a file to local storage."""
-        storage_key = f"{uuid.uuid4().hex}_{filename}"
+        storage_key = f"{uuid.uuid4().hex}_{_safe_storage_filename(filename)}"
         file_path = self._get_file_path(storage_key)
         
         # Write file
@@ -306,7 +317,7 @@ class LocalStorageBackend(StorageBackend):
         
         # Create metadata
         sha256 = self._compute_sha256(file_data)
-        created_at = datetime.utcnow().isoformat()
+        created_at = datetime.now(timezone.utc).isoformat()
         
         # Extract known fields from metadata to avoid duplicates
         meta_copy = dict(metadata) if metadata else {}
@@ -331,7 +342,7 @@ class LocalStorageBackend(StorageBackend):
         )
         
         # Save metadata file
-        meta_path = self.base_path / f"{storage_key}.meta.json"
+        meta_path = self._get_file_path(f"{storage_key}.meta.json")
         meta_path.write_text(json.dumps(storage_metadata.to_dict(), indent=2))
         
         return storage_metadata
@@ -350,7 +361,7 @@ class LocalStorageBackend(StorageBackend):
     def delete(self, storage_key: str) -> bool:
         """Delete a file from local storage."""
         file_path = self._get_file_path(storage_key)
-        meta_path = self.base_path / f"{storage_key}.meta.json"
+        meta_path = self._get_file_path(f"{storage_key}.meta.json")
         
         deleted = False
         if file_path.exists():
@@ -462,7 +473,7 @@ class R2StorageBackend(StorageBackend):
         metadata: Optional[Dict] = None
     ) -> StorageMetadata:
         """Upload a file to R2 storage."""
-        storage_key = f"{uuid.uuid4().hex}_{filename}"
+        storage_key = f"{uuid.uuid4().hex}_{_safe_storage_filename(filename)}"
         
         # Upload file data
         self.s3_client.put_object(
@@ -474,7 +485,7 @@ class R2StorageBackend(StorageBackend):
         
         # Create and upload metadata
         sha256 = self._compute_sha256(file_data)
-        created_at = datetime.utcnow().isoformat()
+        created_at = datetime.now(timezone.utc).isoformat()
         
         # Extract known fields from metadata to avoid duplicates
         meta_copy = dict(metadata) if metadata else {}

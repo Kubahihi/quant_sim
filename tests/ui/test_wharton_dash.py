@@ -8,12 +8,14 @@ from ui.pages import wharton_dash
 
 
 def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-team-pass") -> Path:
+    monkeypatch.setenv("QUANT_SIM_ENV", "development")
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     db_path = data_dir / "wharton.db"
     upload_dir = tmp_path / "data" / "wharton_uploads"
     monkeypatch.setattr(wharton_dash, "DB_PATH", db_path)
     monkeypatch.setattr(wharton_dash, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(wharton_dash, "DEFAULT_PASSWORD", password)
     return db_path
 
 
@@ -75,6 +77,13 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
             current_password.encode(), h.encode()
         ), f"Hash {h!r} does not match current password"
 
+    # bcrypt intentionally gives each user a different salted hash. Verify the
+    # configured password against every hash instead of comparing hash strings.
+    assert len(password_hashes) == len(wharton_dash.DEFAULT_USERS)
+    assert all(
+        bcrypt.checkpw("new-team-pass".encode(), password_hash.encode())
+        for password_hash in password_hashes
+    )
     # None must still validate against the old stale password
     for h in hashes:
         assert not bcrypt.checkpw(

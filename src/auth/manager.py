@@ -7,6 +7,7 @@ with bcrypt password hashing and input validation.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -17,8 +18,6 @@ try:
     BCRYPT_AVAILABLE = True
 except ImportError:
     BCRYPT_AVAILABLE = False
-    # Fallback for environments without bcrypt (use hashlib)
-    import hashlib
 
 from .database import (
     init_auth_database,
