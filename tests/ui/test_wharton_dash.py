@@ -33,20 +33,49 @@ def test_init_db_uses_configured_paths_when_cwd_changes(monkeypatch, tmp_path):
 
 
 def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
+    """
+    Verify that calling init_db() a second time updates stored password hashes
+    when they no longer match the currently configured password.
+
+    bcrypt always generates a unique salt per hash, so we cannot assert that all
+    hash strings are equal — we assert instead that:
+      - every stored hash verifies against the current configured password, and
+      - none of the stored hashes still verify against the stale password.
+    """
     db_path = _configure_temp_wharton(monkeypatch, tmp_path)
+
+    # Fix the 'current' password so it is deterministic in the test environment
+    current_password = "test-current-pass"
+    monkeypatch.setattr(wharton_dash, "DEFAULT_PASSWORD", current_password)
+    # Prevent init_db from trying to read st.secrets per-user passwords in production path
+    monkeypatch.setattr(wharton_dash, "_is_development_mode", lambda: True)
+
     wharton_dash.init_db()
 
+    old_password = "old-team-pass"
     with sqlite3.connect(db_path) as connection:
-        old_hash = bcrypt.hashpw("old-team-pass".encode(), bcrypt.gensalt()).decode()
+        connection.row_factory = sqlite3.Row
+        old_hash = bcrypt.hashpw(old_password.encode(), bcrypt.gensalt()).decode()
         connection.execute("UPDATE wharton_users SET password_hash = ?", (old_hash,))
 
+    # Second call must detect hash mismatch and re-hash to the current password
     wharton_dash.init_db()
 
     with sqlite3.connect(db_path) as connection:
-        password_hashes = {
+        hashes = [
             row[0]
-            for row in connection.execute("SELECT password_hash FROM wharton_users ORDER BY id").fetchall()
-        }
+            for row in connection.execute(
+                "SELECT password_hash FROM wharton_users ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert len(hashes) > 0, "No users were seeded"
+
+    # Every hash must validate against the current password
+    for h in hashes:
+        assert bcrypt.checkpw(
+            current_password.encode(), h.encode()
+        ), f"Hash {h!r} does not match current password"
 
     # bcrypt intentionally gives each user a different salted hash. Verify the
     # configured password against every hash instead of comparing hash strings.
@@ -55,3 +84,8 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
         bcrypt.checkpw("new-team-pass".encode(), password_hash.encode())
         for password_hash in password_hashes
     )
+    # None must still validate against the old stale password
+    for h in hashes:
+        assert not bcrypt.checkpw(
+            old_password.encode(), h.encode()
+        ), f"Hash {h!r} still matches old password — password was NOT re-synced"
