@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from typing import Any
 import uuid
+import secrets
 
 import bcrypt
 import numpy as np
@@ -30,15 +31,38 @@ ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif",
     ".pptx", ".ppt", ".json", ".py", ".ipynb", ".zip",
 }
-MAX_FILE_SIZE_MB = 50
+# Keep the UI aligned with the hard limit enforced by the storage backend.
+MAX_FILE_SIZE_MB = 20
+
+
+def _is_development_mode() -> bool:
+    """Check if the app is running in development mode."""
+    return os.environ.get("QUANT_SIM_ENV") == "development"
 
 
 def _get_default_password() -> str:
     try:
-        return str(st.secrets.get("WHARTON_PASSWORD", "team123"))
+        pw = st.secrets.get("WHARTON_PASSWORD")
+        if pw:
+            return str(pw)
     except Exception:
-        return "team123"
+        pass
+    if _is_development_mode():
+        return "CHANGE_ME_IN_SECRETS"
+    return secrets.token_urlsafe(32)
 
+# This is now a fallback for seeding, not a direct password.
+# Actual password will be read from st.secrets["wharton_users"][username]
+# or generated if in development mode.
+DEV_ONLY_INSECURE_DEFAULT_PASSWORD = "DEV_ONLY_INSECURE_DEFAULT"
+
+# This is used for seeding the initial users.
+# The actual password used for authentication will come from secrets.
+SEEDING_DEFAULT_PASSWORD = _get_default_password()
+
+# Login attempt limits
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_ATTEMPT_WINDOW_MINUTES = 10
 
 DEFAULT_PASSWORD = _get_default_password()
 TASK_EDITOR_VERSION_KEY = "wharton_task_editor_version"
@@ -61,6 +85,7 @@ QUANT_MODULES = [
     "Simulation",
     "Models & Signals",
     "News Sentiment",
+    "Robustness Check",
     "Backtest",
     "Run History",
 ]
@@ -102,11 +127,8 @@ NODE_COLORS = {
 
 def get_connection() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
-    connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+    from src.auth.database import get_db_connection
+    return get_db_connection(DB_PATH)
 
 
 def _now_iso() -> str:
@@ -118,7 +140,7 @@ def init_db() -> None:
 
     with get_connection() as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
                 username TEXT UNIQUE,
                 password_hash TEXT,
@@ -137,7 +159,7 @@ def init_db() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY,
-                priority TEXT,
+                priority TEXT DEFAULT 'Medium',
                 task_text TEXT,
                 assignee TEXT,
                 due_date TEXT,
@@ -146,6 +168,83 @@ def init_db() -> None:
             )
         """)
         # Extended files table with project/description support
+        # login_attempts table is managed by src.auth.database.py, so we don't recreate it here.
+        # Adding decision_log for P1a Strategy Narrative
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS decision_log (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT,
+                action TEXT,
+                date TEXT,
+                thesis TEXT,
+                client_goal_tags TEXT,
+                team_member TEXT,
+                quant_snapshot_json TEXT,
+                updated_at TEXT,
+                updated_by TEXT
+            )
+        """)
+        # Existing installations may already have the original decision_log table.
+        # Keep its author and decision snapshot intact while adding collaboration data.
+        decision_log_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(decision_log)").fetchall()
+        }
+        for col, definition in [
+            ("updated_at", "TEXT"),
+            ("updated_by", "TEXT"),
+        ]:
+            if col not in decision_log_cols:
+                conn.execute(f"ALTER TABLE decision_log ADD COLUMN {col} {definition}")
+        # Preserve every collaboration event; decision_log only holds the latest editor.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS decision_edit_log (
+                id INTEGER PRIMARY KEY,
+                decision_id INTEGER NOT NULL,
+                ticker TEXT,
+                edited_at TEXT NOT NULL,
+                edited_by TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS competition_compliance (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                team_size INTEGER DEFAULT 0,
+                leader_age INTEGER DEFAULT 0,
+                same_school INTEGER DEFAULT 0,
+                eligible_students INTEGER DEFAULT 0,
+                leader_designated INTEGER DEFAULT 0,
+                advisor_is_teacher INTEGER DEFAULT 0,
+                advisor_team_count INTEGER DEFAULT 0,
+                one_wins_account INTEGER DEFAULT 0,
+                members_single_team INTEGER DEFAULT 0,
+                no_client_contact INTEGER DEFAULT 0,
+                no_paid_advisor INTEGER DEFAULT 0,
+                student_owned_work INTEGER DEFAULT 0,
+                ai_cited INTEGER DEFAULT 0,
+                sources_cited INTEGER DEFAULT 0,
+                school_permission INTEGER DEFAULT 0,
+                updated_at TEXT,
+                updated_by TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS competition_positions (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                security_type TEXT NOT NULL DEFAULT 'Stock',
+                quantity REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                entry_date TEXT NOT NULL,
+                opened_by TEXT NOT NULL,
+                opened_at TEXT NOT NULL,
+                last_price REAL,
+                notes TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                exit_price REAL,
+                exit_date TEXT,
+                closed_by TEXT
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
@@ -212,18 +311,39 @@ def init_db() -> None:
         # Seed users
         existing_users = {
             str(row["username"]): str(row["password_hash"] or "")
-            for row in conn.execute("SELECT username, password_hash FROM users").fetchall()
+            for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
         }
         for user in DEFAULT_USERS:
+            user_pass = DEFAULT_PASSWORD
+            if not _is_development_mode():
+                try:
+                    user_pass = str(st.secrets["wharton_users"][user["username"]])
+                except Exception as e:
+                    # Ignore missing secret quietly
+                    pass
+
             if existing_users.get(user["username"]):
-                continue
-            password_hash = bcrypt.hashpw(
-                DEFAULT_PASSWORD.encode("utf-8"), bcrypt.gensalt()
-            ).decode("utf-8")
-            conn.execute(
-                "INSERT OR IGNORE INTO users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
-                (user["username"], password_hash, user["role"], user["primary_module"]),
-            )
+                stored_hash = existing_users[user["username"]]
+                if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
+                    continue
+                # Password changed, update it
+                password_hash = bcrypt.hashpw(
+                    user_pass.encode("utf-8"), bcrypt.gensalt()
+                ).decode("utf-8")
+                conn.execute(
+                    "UPDATE wharton_users SET password_hash = ? WHERE username = ?",
+                    (password_hash, user["username"])
+                )
+            else:
+                password_hash = bcrypt.hashpw(
+                    user_pass.encode("utf-8"), bcrypt.gensalt()
+                ).decode("utf-8")
+
+                conn.execute(
+                    "INSERT INTO wharton_users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
+                    (user["username"], password_hash, user["role"], user["primary_module"]),
+                )
+
 
         # Seed mindmap
         if conn.execute("SELECT COUNT(*) FROM mindmap_nodes").fetchone()[0] == 0:
@@ -236,6 +356,10 @@ def init_db() -> None:
                 "INSERT INTO mindmap_edges (id, source, target) VALUES (?, ?, ?)",
                 DEFAULT_MINDMAP_EDGES,
             )
+        # Commit schema migrations before pushing the local libSQL replica to Turso.
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -243,14 +367,14 @@ def init_db() -> None:
 def _fetch_users() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
-            "SELECT id, username, role, primary_module FROM users ORDER BY username COLLATE NOCASE"
+            "SELECT id, username, role, primary_module FROM wharton_users ORDER BY username COLLATE NOCASE"
         ).fetchall()
 
 
 def authenticate_user(username: str, password: str) -> dict[str, str | int] | None:
     with get_connection() as conn:
         user = conn.execute(
-            "SELECT id, username, password_hash, role, primary_module FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, role, primary_module FROM wharton_users WHERE username = ?",
             (username,),
         ).fetchone()
     if user is None:
@@ -300,15 +424,36 @@ def _render_login() -> None:
         st.stop()
 
     with st.form("wharton_login_form", clear_on_submit=False):
-        username = st.selectbox("Username", options=usernames)
+        # duplicate username selectbox removed
+        username = st.selectbox("Username", options=usernames, key="wharton_login_username")
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Enter Cockpit", type="primary", use_container_width=True)
 
+    # Check if we are in development mode and using the insecure default password
+    if _is_development_mode() and submitted and password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD:
+        st.warning(
+            "You are using the insecure default password in development mode. "
+            "Please set `st.secrets['wharton_users']['<username>']` for production."
+        )
+    elif submitted and password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD and not _is_development_mode():
+        st.error("Insecure default password is not allowed in production mode.")
+        return
+
     if submitted:
+        from src.auth.database import log_login_attempt, get_recent_failed_attempts
+        
+        failed_attempts = get_recent_failed_attempts(username, minutes=LOGIN_ATTEMPT_WINDOW_MINUTES)
+        if failed_attempts >= MAX_LOGIN_ATTEMPTS:
+            st.error(f"Too many failed attempts. Try again in {LOGIN_ATTEMPT_WINDOW_MINUTES} minutes.")
+            return
+
         profile = authenticate_user(username, password)
         if profile is None:
+            log_login_attempt(username, success=False)
             st.error("Wrong credentials.")
             return
+            
+        log_login_attempt(username, success=True)
         st.session_state[USER_PROFILE_KEY] = profile
         st.rerun()
 
@@ -469,6 +614,8 @@ def _apply_task_editor_changes(state: dict, original: pd.DataFrame, default_assi
                 "INSERT INTO tasks (priority, task_text, assignee, is_done) VALUES (?, ?, ?, ?)",
                 (payload["priority"], payload["task_text"], payload["assignee"], payload["is_done"]),
             )
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _render_task_stats(tasks: pd.DataFrame) -> None:
@@ -483,8 +630,8 @@ def _render_task_stats(tasks: pd.DataFrame) -> None:
     cols[0].metric("Total Tasks", total)
     cols[1].metric("Open", open_count)
     cols[2].metric("Done ✓", done)
-    cols[3].metric("🔴 Critical", critical)
-    cols[4].metric("🟠 High", high)
+    cols[3].metric("Critical", critical)
+    cols[4].metric("High", high)
 
     if total > 0:
         pct = done / total
@@ -498,7 +645,7 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
     _render_task_stats(original_tasks)
 
     # Quick-add form (always visible, above the editor)
-    with st.expander("➕ Quick Add Task", expanded=False):
+    with st.expander("Quick Add Task", expanded=False):
         with st.form("wharton_quick_task_form", clear_on_submit=True):
             qc1, qc2, qc3 = st.columns([3, 1, 1])
             with qc1:
@@ -506,7 +653,7 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
             with qc2:
                 quick_priority = st.selectbox("Priority", TASK_PRIORITIES, index=2)
             with qc3:
-                quick_assignee = st.text_input("Assignee", value=str(profile["username"]))
+                quick_assignee = st.text_input("Assign to (optional)", value=str(profile["username"]))
             if st.form_submit_button("Add Task", type="primary", use_container_width=True):
                 if quick_text.strip():
                     with get_connection() as conn:
@@ -514,8 +661,11 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
                             "INSERT INTO tasks (priority, task_text, assignee, is_done) VALUES (?, ?, ?, 0)",
                             (quick_priority, quick_text.strip(), quick_assignee.strip() or str(profile["username"])),
                         )
+                        conn.commit()
+                        if hasattr(conn, 'sync'): conn.sync()
                     st.toast("Task added.")
                     st.rerun()
+
 
     editor_version = int(st.session_state.get(TASK_EDITOR_VERSION_KEY, 0))
     editor_key = f"wharton_tasks_editor_{editor_version}"
@@ -588,17 +738,23 @@ def _insert_node(label: str, node_type: str) -> None:
     with get_connection() as conn:
         conn.execute("INSERT INTO mindmap_nodes (id, label, type) VALUES (?, ?, ?)",
                      (node_id, label.strip(), node_type))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _delete_node(node_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM mindmap_edges WHERE source = ? OR target = ?", (node_id, node_id))
         conn.execute("DELETE FROM mindmap_nodes WHERE id = ?", (node_id,))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _delete_edge(edge_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM mindmap_edges WHERE id = ?", (edge_id,))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _insert_edge(source: str, target: str) -> bool:
@@ -607,6 +763,8 @@ def _insert_edge(source: str, target: str) -> bool:
         if conn.execute("SELECT 1 FROM mindmap_edges WHERE id = ?", (eid,)).fetchone():
             return False
         conn.execute("INSERT INTO mindmap_edges (id, source, target) VALUES (?, ?, ?)", (eid, source, target))
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
     return True
 
 
@@ -721,7 +879,7 @@ def _render_mindmap() -> None:
             del_node = st.selectbox("Select node to delete", node_options,
                                     format_func=lambda nid: _node_display_name(row_by_id[nid]),
                                     key="del_node_select")
-            st.warning("⚠️ This also removes all edges connected to this node.")
+            st.warning(" This also removes all edges connected to this node.")
             if st.button("Delete Node", type="primary", key="del_node_btn"):
                 _delete_node(del_node)
                 st.success(f"Deleted: {_node_display_name(row_by_id[del_node])}")
@@ -779,6 +937,8 @@ def _save_chat_message(username: str, message: str) -> None:
             "INSERT INTO chat (timestamp, username, message) VALUES (?, ?, ?)",
             (_now_iso(), username, message),
         )
+        conn.commit()
+        if hasattr(conn, 'sync'): conn.sync()
 
 
 def _render_chat(profile: dict[str, str | int]) -> None:
@@ -885,36 +1045,44 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
     st.markdown("### Persistent File Vault")
     st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
-    with st.expander("📤 Upload Files", expanded=True):
-        with st.form("wharton_file_upload_form", clear_on_submit=True):
-            uploads = st.file_uploader(
-                "Research, decks, model notes, datasets, screenshots",
-                accept_multiple_files=True,
-            )
-            uc1, uc2 = st.columns(2)
-            with uc1:
-                upload_project = st.text_input("Project / Category (optional)", placeholder="e.g. EU Regulation Analysis")
-            with uc2:
-                upload_tags = st.text_input("Tags (optional)", placeholder="e.g. risk, asml, q2")
-            upload_desc = st.text_area("Description (optional)", placeholder="Briefly describe what this file contains and covers.", height=80)
-            submitted = st.form_submit_button("Save Files", type="primary", use_container_width=True)
+    from src.storage.wharton_adapter import get_storage_backend
+    is_local_backend = get_storage_backend().backend_name == "local"
+    if is_local_backend:
+        st.error("⚠️ **VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
 
-        if submitted:
-            if not uploads:
-                st.warning("Select at least one file.")
-            else:
-                errors = []
-                saved = 0
-                for f in uploads:
-                    err = _validate_upload(f)
-                    if err:
-                        errors.append(err)
-                    else:
-                        _save_uploaded_file(f, str(profile["username"]), upload_project, upload_desc, upload_tags)
-                        saved += 1
-                if saved: st.success(f"Saved {saved} file(s).")
-                for e in errors: st.error(e)
-                if saved: st.rerun()
+    if is_local_backend and not _is_development_mode():
+        st.error("Uploads are disabled in production when running on local storage to prevent data loss.")
+    else:
+        with st.expander(" Upload Files", expanded=True):
+            with st.form("wharton_file_upload_form", clear_on_submit=True):
+                uploads = st.file_uploader(
+                    "Research, decks, model notes, datasets, screenshots",
+                    accept_multiple_files=True,
+                )
+                uc1, uc2 = st.columns(2)
+                with uc1:
+                    upload_project = st.text_input("Project / Category (optional)", placeholder="e.g. EU Regulation Analysis")
+                with uc2:
+                    upload_tags = st.text_input("Tags (optional)", placeholder="e.g. risk, asml, q2")
+                upload_desc = st.text_area("Description (optional)", placeholder="Briefly describe what this file contains and covers.", height=80)
+                submitted = st.form_submit_button("Save Files", type="primary", use_container_width=True)
+
+            if submitted:
+                if not uploads:
+                    st.warning("Select at least one file.")
+                else:
+                    errors = []
+                    saved = 0
+                    for f in uploads:
+                        err = _validate_upload(f)
+                        if err:
+                            errors.append(err)
+                        else:
+                            _save_uploaded_file(f, str(profile["username"]), upload_project, upload_desc, upload_tags)
+                            saved += 1
+                    if saved: st.success(f"Saved {saved} file(s).")
+                    for e in errors: st.error(e)
+                    if saved: st.rerun()
 
     file_rows = _fetch_file_rows()
     if not file_rows:
@@ -922,7 +1090,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
         return
 
     # Filter/search
-    search_query = st.text_input("🔍 Search files", placeholder="filename, project, uploader, tags...")
+    search_query = st.text_input(" Search files", placeholder="filename, project, uploader, tags...")
 
     df_data = []
     for r in file_rows:
@@ -974,7 +1142,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
         col1, col2 = st.columns([4, 1])
         with col1:
             # Show status indicator
-            status_icon = "✅" if status == "available" else "❌"
+            status_icon = "" if status == "available" else ""
             st.markdown(f"{status_icon} **{escape(fname)}**" + (f" · {escape(proj)}" if proj else ""))
             if desc:
                 st.caption(escape(desc))
@@ -1024,7 +1192,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
     st.markdown("### Sub-Projects")
     st.caption("Structured research threads — attach files, write analysis summaries, track status.")
 
-    with st.expander("➕ Create New Sub-Project", expanded=False):
+    with st.expander(" Create New Sub-Project", expanded=False):
         with st.form("wharton_create_subproject_form", clear_on_submit=True):
             sp_name = st.text_input("Project Name", placeholder="e.g. EU AI Act Impact on ASML")
             sp_desc = st.text_area("Analysis / Description",
@@ -1043,6 +1211,8 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                             (_now_iso(), str(profile["username"]), sp_name.strip(),
                              sp_desc.strip(), sp_status, sp_tags.strip()),
                         )
+                        conn.commit()
+                        if hasattr(conn, 'sync'): conn.sync()
                     st.success(f"Sub-project '{sp_name.strip()}' created.")
                     st.rerun()
                 else:
@@ -1067,11 +1237,12 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
         sp_files = _fetch_subproject_files(sp_id)
 
         with st.expander(
-            f"📁 {sp['name']}  ·  "
-            f"<span style='color:{status_color};font-weight:700;'>{sp['status'].upper()}</span>  ·  "
+            f" {sp['name']}  ·  "
+            f"{sp['status'].upper()}  ·  "
             f"{len(sp_files)} file(s)",
             expanded=False,
         ):
+            st.markdown(f"<span style='color:{status_color};font-weight:700;padding: 0.2rem 0.5rem; border: 1px solid {status_color}; border-radius: 4px; display: inline-block; margin-bottom: 0.5rem;'>{sp['status'].upper()}</span>", unsafe_allow_html=True)
             st.markdown(f"""
                 <div class="subproject-card">
                   <div class="wharton-section-kicker">Created by {escape(str(sp['created_by']))} · {escape(str(sp['created_at']))}</div>
@@ -1086,7 +1257,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                     fpath = Path(str(f["file_path"]))
                     sc1, sc2 = st.columns([5, 1])
                     with sc1:
-                        st.markdown(f"📄 **{escape(str(f['filename']))}**")
+                        st.markdown(f" **{escape(str(f['filename']))}**")
                         if f["description"]:
                             st.caption(escape(str(f["description"])))
                     with sc2:
@@ -1207,6 +1378,7 @@ def _compute_quant_run(
     tickers, weights, benchmark_ticker, start_date, end_date,
     risk_free_rate, current_value, max_weight, turnover_limit,
     transaction_cost_bps, risk_aversion, simulation_days, n_simulations, random_seed,
+    jump_intensity, jump_mean, jump_volatility,
 ) -> dict[str, Any]:
     modules = _load_quant_modules()
     analytics, optimization, simulation = modules["analytics"], modules["optimization"], modules["simulation"]
@@ -1260,6 +1432,14 @@ def _compute_quant_run(
         volatility=float(core_metrics.get("volatility", 0.0)),
         time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
     )
+    
+    adv_price_paths, adv_simulation_stats = simulation.run_advanced_monte_carlo_simulation(
+        current_value=current_value,
+        expected_return=float(core_metrics.get("annualized_return", 0.0)),
+        volatility=float(core_metrics.get("volatility", 0.0)),
+        time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
+        jump_intensity=jump_intensity, jump_mean=jump_mean, jump_volatility=jump_volatility,
+    )
 
     # Run full modular quant stack (models, signals, news, backtest, history)
     quant_stack_result = None
@@ -1277,6 +1457,7 @@ def _compute_quant_run(
         }
         try:
             news_api_key = str(st.secrets.get("NEWS_API_KEY", ""))
+            news_api_key = str(st.secrets.get("NEWSAPI_KEY", "")) # Standardize on NEWSAPI_KEY
             if news_api_key: config["news_api_key"] = news_api_key
         except Exception:
             pass
@@ -1284,6 +1465,7 @@ def _compute_quant_run(
             portfolio_returns=portfolio_returns,
             returns_df=returns,
             config=config,
+            user_id=st.session_state.get("user_id"),
         )
     except Exception as stack_err:
         quant_stack_result = {"_error": str(stack_err)}
@@ -1313,6 +1495,8 @@ def _compute_quant_run(
         "cost_aware": cost_aware,
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
+        "adv_price_paths": adv_price_paths,
+        "adv_simulation_stats": adv_simulation_stats,
         "quant_stack": quant_stack_result,
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
@@ -1329,7 +1513,7 @@ def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
     default_start = default_end - timedelta(days=365 * 2)
 
-    with st.expander("⚙️ Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
+    with st.expander(" Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
         with st.form("wharton_quant_config_form"):
             col_in, col_risk = st.columns([1, 1], gap="large")
             with col_in:
@@ -1346,9 +1530,13 @@ def _render_quant_configuration() -> None:
                 transaction_cost_bps = st.slider("Transaction Cost (bps)", 0.0, 100.0, 10.0, 1.0)
                 risk_aversion = st.slider("Risk Aversion", 0.5, 10.0, 3.0, 0.5)
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
-                n_simulations = st.slider("Simulation Count", 200, 5000, 1200, 100)
+                n_simulations = st.slider("Simulation Count", 200, 15000, 1200, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
-            run_clicked = st.form_submit_button("▶ Run Full Quant Engine", type="primary")
+                st.markdown("#### Jump Diffusion (Advanced MC)")
+                jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
+                jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
+                jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
+            run_clicked = st.form_submit_button(" Run Full Quant Engine", type="primary")
 
     if run_clicked:
         st.session_state.pop(QUANT_ERROR_KEY, None)
@@ -1365,6 +1553,7 @@ def _render_quant_configuration() -> None:
                     transaction_cost_bps=float(transaction_cost_bps), risk_aversion=float(risk_aversion),
                     simulation_days=int(simulation_days), n_simulations=int(n_simulations),
                     random_seed=int(random_seed),
+                    jump_intensity=float(jump_intensity), jump_mean=float(jump_mean), jump_volatility=float(jump_volatility),
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -1386,6 +1575,26 @@ def _render_weight_table(frame: pd.DataFrame) -> None:
     for col in ["Current Weight", "Optimized Weight", "Delta"]:
         view[col] = view[col].map(_fmt_pct)
     st.dataframe(view, use_container_width=True, hide_index=True)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_ai_insight_cached(context_data: dict, prompt_type: str) -> dict:
+    try:
+        from src.ai.ai_advisor import generate_advisor_insight
+        from src.ai.ai_review import resolve_groq_api_key
+        api_key = resolve_groq_api_key(st.secrets)
+        return generate_advisor_insight(context_data, prompt_type, api_key)
+    except ImportError:
+        return {"available": False, "error": "AI Advisor module not found."}
+
+
+def _render_ai_advisor_card(context_data: dict, prompt_type: str) -> None:
+    with st.spinner(" AI Advisor is analyzing..."):
+        res = _fetch_ai_insight_cached(context_data, prompt_type)
+    if res.get("available") and res.get("insight"):
+        st.info(f"** AI Advisor Insight:**\n\n{res['insight']}")
+    elif not res.get("available"):
+        st.caption(f"AI Insight unavailable: {res.get('error', 'Unknown error')}")
 
 
 def _render_benchmark_analytics(result: dict, advanced: bool) -> None:
@@ -1427,6 +1636,12 @@ def _render_cost_aware_rebalance(result: dict, advanced: bool) -> None:
     symbols = list(result["tickers"])
     w = np.asarray(result["weights"], dtype=float)
     st.markdown("### Cost-Aware Rebalance")
+    
+    _render_ai_advisor_card(
+        context_data={"cost_aware": ca, "min_variance": mv, "max_sharpe": ms, "current_metrics": result.get("metrics")},
+        prompt_type="optimizer_explain"
+    )
+
     if not ca.get("success"):
         st.warning(f"Optimization warning: {ca.get('message', 'unknown')}")
     r = st.columns(4)
@@ -1516,13 +1731,13 @@ def _render_models_signals(result: dict) -> None:
     signals = qs.get("signals", {})
 
     if models:
-        st.markdown("#### 📊 Models")
+        st.markdown("####  Models")
         model_data = []
         for name, model in models.items():
             m_dict = model.to_dict() if hasattr(model, "to_dict") else {}
             model_data.append({
                 "Model": name,
-                "Available": "✅" if m_dict.get("available") else "❌",
+                "Available": "" if m_dict.get("available") else "",
                 "Confidence": _fmt_float(m_dict.get("confidence")),
                 "Score": _fmt_float(m_dict.get("score")),
                 "Signal": str(m_dict.get("signal", "—")),
@@ -1531,13 +1746,13 @@ def _render_models_signals(result: dict) -> None:
         st.dataframe(pd.DataFrame(model_data), use_container_width=True, hide_index=True)
 
     if signals:
-        st.markdown("#### 📡 Signals")
+        st.markdown("####  Signals")
         signal_data = []
         for name, signal in signals.items():
             s_dict = signal.to_dict() if hasattr(signal, "to_dict") else {}
             signal_data.append({
                 "Signal": name,
-                "Available": "✅" if s_dict.get("available") else "❌",
+                "Available": "" if s_dict.get("available") else "",
                 "Score": _fmt_float(s_dict.get("score")),
                 "Direction": str(s_dict.get("direction", "—")),
                 "Confidence": _fmt_float(s_dict.get("confidence")),
@@ -1547,13 +1762,75 @@ def _render_models_signals(result: dict) -> None:
     summary = qs.get("summary")
     if summary:
         s_dict = summary.to_dict() if hasattr(summary, "to_dict") else {}
-        st.markdown("#### 🎯 Summary")
+        st.markdown("####  Summary")
         sc = st.columns(3)
         sc[0].metric("Composite Score", _fmt_float(s_dict.get("composite_score")))
         sc[1].metric("Confidence", _fmt_float(s_dict.get("confidence")))
         sc[2].metric("Regime", str(s_dict.get("regime_label", "—")))
         if s_dict.get("narrative"):
             st.markdown(f"> {escape(str(s_dict['narrative']))}")
+
+
+def _render_robustness_check(result: dict) -> None:
+    """Render Robustness Validation."""
+    st.markdown("### Robustness Check (Walk-Forward Validation)")
+    qs = result.get("quant_stack", {})
+    if not qs:
+        st.info("Run the Quant Engine to populate data.")
+        return
+        
+    portfolio_timeseries = result.get("portfolio_timeseries", pd.DataFrame())
+    if portfolio_timeseries.empty or "cumulative_return" not in portfolio_timeseries.columns:
+        st.warning("Portfolio returns not available for robustness validation.")
+        return
+        
+    returns = portfolio_timeseries["cumulative_return"].diff().fillna(0.0)
+    
+    st.markdown("Configure Walk-Forward Out-of-Sample Validation and run it to compute Probabilistic Sharpe Ratio (PSR) and Deflated Sharpe Ratio (DSR).")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    train_days = col1.number_input("Train Window (Days)", min_value=30, max_value=3650, value=252, step=30)
+    test_days = col2.number_input("Test Window (Days)", min_value=10, max_value=1095, value=60, step=10)
+    step_days = col3.number_input("Step (Days)", min_value=10, max_value=1095, value=30, step=10)
+    num_trials = col4.number_input("Number of Trials", min_value=1, max_value=10000, value=100, step=10, help="Number of strategy variations tested. Used for DSR.")
+    
+    if st.button("Run Validation", key="btn_run_robustness"):
+        with st.spinner("Running Walk-Forward validation..."):
+            from src.analytics.modular.robustness_validation import run_walk_forward_validation
+            
+            try:
+                res = run_walk_forward_validation(
+                    portfolio_returns=returns,
+                    train_days=train_days,
+                    test_days=test_days,
+                    step_days=step_days,
+                    num_trials=num_trials
+                )
+                
+                metrics = res["metrics"]
+                
+                r1, r2, r3 = st.columns(3)
+                r1.metric("PSR", f"{metrics['psr']:.2%}")
+                r2.metric("DSR", f"{metrics['dsr']:.2%}")
+                r3.metric("OOS Sharpe", f"{metrics['oos_sharpe']:.3f}")
+                
+                st.info(f"**PSR Interpretation:** {metrics['psr_interpretation']}")
+                st.info(f"**DSR Interpretation:** {metrics['dsr_interpretation']}")
+                
+                if res["windows"]:
+                    st.markdown("#### Walk-Forward Windows")
+                    df_windows = pd.DataFrame(res["windows"])
+                    st.dataframe(df_windows, use_container_width=True)
+                    
+                    st.markdown("#### Rolling Out-of-Sample Performance")
+                    agg_oos = res["aggregate_oos_returns"]
+                    if not agg_oos.empty:
+                        cum_oos = (1 + agg_oos).cumprod()
+                        import plotly.express as px
+                        fig = px.line(cum_oos, title="Cumulative Out-of-Sample Returns", labels={"value": "Cumulative Growth", "index": "Date"})
+                        st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error running validation: {e}")
 
 
 def _render_news_sentiment(result: dict) -> None:
@@ -1563,6 +1840,12 @@ def _render_news_sentiment(result: dict) -> None:
     if not qs:
         st.info("Run the Quant Engine to populate news sentiment.")
         return
+        
+    if "news" in qs and hasattr(qs["news"], "to_dict"):
+        _render_ai_advisor_card(
+            context_data={"news_items": qs["news"].to_dict().get("items", [])[:15]},
+            prompt_type="news_synthesis"
+        )
     if "_error" in qs:
         st.warning(f"Modular stack error: {qs['_error']}")
         return
@@ -1627,7 +1910,7 @@ def _render_backtest(result: dict) -> None:
 
     mc2 = st.columns(3)
     mc2[0].metric("Win Rate", _fmt_pct(metrics.get("win_rate")))
-    mc2[1].metric("Lookahead Safe", "✅" if backtest.get("lookahead_safe") else "⚠️")
+    mc2[1].metric("Lookahead Safe", "" if backtest.get("lookahead_safe") else "")
     mc2[2].metric("Calmar Ratio", _fmt_float(metrics.get("calmar_ratio")))
 
     equity_curve = backtest.get("equity_curve")
@@ -1654,7 +1937,7 @@ def _render_run_history(result: dict) -> None:
 
     try:
         history_mod = _load_modular_history()
-        records = history_mod.list_run_records(base_dir="data/run_history", limit=40)
+        records = history_mod.list_run_records(base_dir="data/run_history", limit=40, user_id=st.session_state.get("user_id"))
     except Exception as e:
         st.warning(f"Could not load run history: {e}")
         return
@@ -1680,6 +1963,1564 @@ def _render_run_history(result: dict) -> None:
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+
+# ─── Monte Carlo Simulation ────────────────────────────────────────────────────
+
+def _render_monte_carlo(result: dict) -> None:
+    """Interactive Monte Carlo simulation tab with fan charts and VaR analysis."""
+    st.markdown("###  Monte Carlo Simulation")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to see Monte Carlo results.")
+        return
+
+    stats = result.get("simulation_stats", {})
+    paths = result.get("price_paths")
+    inputs = result.get("inputs", {})
+    current_value = inputs.get("current_value", 100_000)
+
+    if paths is None:
+        st.warning("No simulation paths available.")
+        return
+
+    # KPI cards
+    st.markdown("#### Key Outcomes")
+    k = st.columns(5)
+    k[0].metric(" Mean Final", f"${stats.get('mean', 0):,.0f}",
+                delta=f"{((stats.get('mean', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[1].metric(" Median", f"${stats.get('median', 0):,.0f}")
+    k[2].metric(" 5th Pctl (VaR)", f"${stats.get('percentile_5', 0):,.0f}",
+                delta=f"{((stats.get('percentile_5', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[3].metric(" 95th Pctl", f"${stats.get('percentile_95', 0):,.0f}")
+    k[4].metric(" Std Dev", f"${stats.get('std', 0):,.0f}")
+
+    # Probability of loss
+    final_values = paths[-1] if paths is not None else np.array([])
+    if len(final_values) > 0:
+        prob_loss = float(np.mean(final_values < current_value)) * 100
+        prob_20_loss = float(np.mean(final_values < current_value * 0.80)) * 100
+        prob_gain_20 = float(np.mean(final_values > current_value * 1.20)) * 100
+
+        pc = st.columns(3)
+        pc[0].metric(" P(Loss)", f"{prob_loss:.1f}%")
+        pc[1].metric(" P(Loss > 20%)", f"{prob_20_loss:.1f}%")
+        pc[2].metric(" P(Gain > 20%)", f"{prob_gain_20:.1f}%")
+
+    if HAS_PLOTLY:
+        # Fan chart with percentile bands
+        st.markdown("#### Percentile Fan Chart")
+        percentiles = [5, 10, 25, 50, 75, 90, 95]
+        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        days = list(range(len(pctl_data["p50"])))
+
+        fig_fan = go.Figure()
+        # 5-95 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p95"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p95"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p5"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.10)",
+            name="5th–95th %ile"))
+        # 10-90 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p90"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p90"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p10"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.18)",
+            name="10th–90th %ile"))
+        # 25-75 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p75"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p75"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p25"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.28)",
+            name="25th–75th %ile"))
+        # Median line
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p50"].tolist(), mode="lines",
+            line=dict(color="#6366f1", width=2.5), name="Median"))
+        # Starting value
+        fig_fan.add_hline(y=current_value, line_dash="dash", line_color="#ef4444",
+            annotation_text=f"Initial ${current_value:,.0f}", annotation_position="top left")
+
+        fig_fan.update_layout(
+            template="plotly_dark", height=480,
+            title="Portfolio Value: Monte Carlo Fan Chart",
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_fan, use_container_width=True)
+
+        # Distribution histogram
+        if len(final_values) > 0:
+            st.markdown("#### Terminal Value Distribution")
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Histogram(
+                x=final_values, nbinsx=60, name="Final Values",
+                marker_color="rgba(99,102,241,0.7)",
+                marker_line=dict(color="rgba(99,102,241,1)", width=1),
+            ))
+            fig_dist.add_vline(x=current_value, line_dash="dash", line_color="#ef4444",
+                annotation_text=f"Initial ${current_value:,.0f}")
+            fig_dist.add_vline(x=float(stats.get("percentile_5", 0)), line_dash="dot",
+                line_color="#f59e0b", annotation_text="VaR 95%")
+            fig_dist.update_layout(
+                template="plotly_dark", height=380,
+                xaxis_title="Final Portfolio Value ($)", yaxis_title="Frequency",
+                xaxis=dict(tickformat="$,.0f"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            # VaR / CVaR metrics
+            st.markdown("#### Value-at-Risk Analysis")
+            var_cols = st.columns(4)
+            var_95 = float(np.percentile(final_values, 5))
+            var_99 = float(np.percentile(final_values, 1))
+            cvar_95 = float(np.mean(final_values[final_values <= var_95]))
+            cvar_99 = float(np.mean(final_values[final_values <= var_99]))
+
+            var_cols[0].metric("VaR 95%", f"${current_value - var_95:,.0f}",
+                delta=f"{((var_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[1].metric("VaR 99%", f"${current_value - var_99:,.0f}",
+                delta=f"{((var_99 / current_value) - 1) * 100:.1f}%")
+            var_cols[2].metric("CVaR 95%", f"${current_value - cvar_95:,.0f}",
+                delta=f"{((cvar_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[3].metric("CVaR 99%", f"${current_value - cvar_99:,.0f}",
+                delta=f"{((cvar_99 / current_value) - 1) * 100:.1f}%")
+
+        # Sample paths
+        st.markdown("#### Sample Simulated Paths")
+        n_show = min(50, paths.shape[1])
+        fig_paths = go.Figure()
+        rng = np.random.default_rng(42)
+        sample_indices = rng.choice(paths.shape[1], n_show, replace=False)
+        for idx in sample_indices:
+            fig_paths.add_trace(go.Scatter(
+                x=list(range(paths.shape[0])), y=paths[:, idx].tolist(),
+                mode="lines", line=dict(width=0.5, color="rgba(99,102,241,0.15)"),
+                showlegend=False,
+            ))
+        fig_paths.add_trace(go.Scatter(
+            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
+        ))
+        fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
+        fig_paths.update_layout(
+            template="plotly_dark", height=400,
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+        )
+        st.plotly_chart(fig_paths, use_container_width=True)
+    else:
+        # Fallback without Plotly
+        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
+
+    st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
+               f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
+               f"Seed: {inputs.get('random_seed', 'N/A')}")
+
+
+def _render_advanced_monte_carlo(result: dict) -> None:
+    """Interactive Monte Carlo simulation tab with fan charts and VaR analysis."""
+    st.markdown("### Advanced Monte Carlo (Merton Jump Diffusion)")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to see Monte Carlo results.")
+        return
+
+    stats = result.get("adv_simulation_stats", {})
+    paths = result.get("adv_price_paths")
+    inputs = result.get("inputs", {})
+    current_value = inputs.get("current_value", 100_000)
+
+    if paths is None:
+        st.warning("No simulation paths available.")
+        return
+
+    # KPI cards
+    st.markdown("#### Key Outcomes")
+    k = st.columns(5)
+    k[0].metric(" Mean Final", f"${stats.get('mean', 0):,.0f}",
+                delta=f"{((stats.get('mean', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[1].metric(" Median", f"${stats.get('median', 0):,.0f}")
+    k[2].metric(" 5th Pctl (VaR)", f"${stats.get('percentile_5', 0):,.0f}",
+                delta=f"{((stats.get('percentile_5', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[3].metric(" 95th Pctl", f"${stats.get('percentile_95', 0):,.0f}")
+    k[4].metric(" Std Dev", f"${stats.get('std', 0):,.0f}")
+
+    # Probability of loss
+    final_values = paths[-1] if paths is not None else np.array([])
+    if len(final_values) > 0:
+        prob_loss = float(np.mean(final_values < current_value)) * 100
+        prob_20_loss = float(np.mean(final_values < current_value * 0.80)) * 100
+        prob_gain_20 = float(np.mean(final_values > current_value * 1.20)) * 100
+
+        pc = st.columns(3)
+        pc[0].metric(" P(Loss)", f"{prob_loss:.1f}%")
+        pc[1].metric(" P(Loss > 20%)", f"{prob_20_loss:.1f}%")
+        pc[2].metric(" P(Gain > 20%)", f"{prob_gain_20:.1f}%")
+
+    if HAS_PLOTLY:
+        # Fan chart with percentile bands
+        st.markdown("#### Percentile Fan Chart")
+        percentiles = [5, 10, 25, 50, 75, 90, 95]
+        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        days = list(range(len(pctl_data["p50"])))
+
+        fig_fan = go.Figure()
+        # 5-95 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p95"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p95"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p5"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.10)",
+            name="5th–95th %ile"))
+        # 10-90 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p90"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p90"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p10"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.18)",
+            name="10th–90th %ile"))
+        # 25-75 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p75"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p75"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p25"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.28)",
+            name="25th–75th %ile"))
+        # Median line
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p50"].tolist(), mode="lines",
+            line=dict(color="#6366f1", width=2.5), name="Median"))
+        # Starting value
+        fig_fan.add_hline(y=current_value, line_dash="dash", line_color="#ef4444",
+            annotation_text=f"Initial ${current_value:,.0f}", annotation_position="top left")
+
+        fig_fan.update_layout(
+            template="plotly_dark", height=480,
+            title="Portfolio Value: Advanced Monte Carlo Fan Chart",
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_fan, use_container_width=True)
+
+        # Distribution histogram
+        if len(final_values) > 0:
+            st.markdown("#### Terminal Value Distribution")
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Histogram(
+                x=final_values, nbinsx=60, name="Final Values",
+                marker_color="rgba(99,102,241,0.7)",
+                marker_line=dict(color="rgba(99,102,241,1)", width=1),
+            ))
+            fig_dist.add_vline(x=current_value, line_dash="dash", line_color="#ef4444",
+                annotation_text=f"Initial ${current_value:,.0f}")
+            fig_dist.add_vline(x=float(stats.get("percentile_5", 0)), line_dash="dot",
+                line_color="#f59e0b", annotation_text="VaR 95%")
+            fig_dist.update_layout(
+                template="plotly_dark", height=380,
+                xaxis_title="Final Portfolio Value ($)", yaxis_title="Frequency",
+                xaxis=dict(tickformat="$,.0f"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            # VaR / CVaR metrics
+            st.markdown("#### Value-at-Risk Analysis")
+            var_cols = st.columns(4)
+            var_95 = float(np.percentile(final_values, 5))
+            var_99 = float(np.percentile(final_values, 1))
+            cvar_95 = float(np.mean(final_values[final_values <= var_95]))
+            cvar_99 = float(np.mean(final_values[final_values <= var_99]))
+
+            var_cols[0].metric("VaR 95%", f"${current_value - var_95:,.0f}",
+                delta=f"{((var_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[1].metric("VaR 99%", f"${current_value - var_99:,.0f}",
+                delta=f"{((var_99 / current_value) - 1) * 100:.1f}%")
+            var_cols[2].metric("CVaR 95%", f"${current_value - cvar_95:,.0f}",
+                delta=f"{((cvar_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[3].metric("CVaR 99%", f"${current_value - cvar_99:,.0f}",
+                delta=f"{((cvar_99 / current_value) - 1) * 100:.1f}%")
+
+        # Sample paths
+        st.markdown("#### Sample Simulated Paths")
+        n_show = min(50, paths.shape[1])
+        fig_paths = go.Figure()
+        rng = np.random.default_rng(42)
+        sample_indices = rng.choice(paths.shape[1], n_show, replace=False)
+        for idx in sample_indices:
+            fig_paths.add_trace(go.Scatter(
+                x=list(range(paths.shape[0])), y=paths[:, idx].tolist(),
+                mode="lines", line=dict(width=0.5, color="rgba(99,102,241,0.15)"),
+                showlegend=False,
+            ))
+        fig_paths.add_trace(go.Scatter(
+            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
+        ))
+        fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
+        fig_paths.update_layout(
+            template="plotly_dark", height=400,
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+        )
+        st.plotly_chart(fig_paths, use_container_width=True)
+    else:
+        # Fallback without Plotly
+        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
+
+    st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
+               f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
+               f"Seed: {inputs.get('random_seed', 'N/A')}")
+
+
+
+
+# ─── Efficient Frontier ───────────────────────────────────────────────────────
+
+def _render_efficient_frontier(result: dict) -> None:
+    """Efficient frontier with 2D/3D visualization and optimal portfolios."""
+    st.markdown("###  Efficient Frontier & Portfolio Optimization")
+
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to see frontier analysis.")
+        return
+
+    returns_df = result.get("returns")
+    if returns_df is None or returns_df.empty:
+        st.warning("No return data available for frontier computation.")
+        return
+
+    tickers = list(result.get("tickers", []))
+    weights = np.asarray(result.get("weights", []), dtype=float)
+    ms = result.get("max_sharpe", {})
+    mv = result.get("min_variance", {})
+    ca = result.get("cost_aware", {})
+    metrics = result.get("metrics", {})
+    inputs = result.get("inputs", {})
+    risk_free_rate = float(inputs.get("risk_free_rate", 0.03))
+
+    # Optimal portfolio KPIs
+    st.markdown("#### Optimal Portfolio Comparison")
+    comp_data = []
+    for label, d, color in [
+        (" Current", {"expected_return": metrics.get("annualized_return", 0),
+                        "volatility": metrics.get("volatility", 0),
+                        "sharpe_ratio": metrics.get("sharpe_ratio", 0)}, "#64748b"),
+        (" Max Sharpe", ms, "#22c55e"),
+        (" Min Variance", mv, "#3b82f6"),
+        (" Cost-Aware", ca, "#f59e0b"),
+    ]:
+        comp_data.append({
+            "Portfolio": label,
+            "Expected Return": _fmt_pct(d.get("expected_return")),
+            "Volatility": _fmt_pct(d.get("volatility")),
+            "Sharpe Ratio": _fmt_float(d.get("sharpe_ratio")),
+        })
+    st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
+
+    # Compute frontier
+    try:
+        ef_module = importlib.import_module("src.optimization.efficient_frontier")
+        frontier_points = ef_module.calculate_efficient_frontier(returns_df, n_points=50)
+    except Exception as e:
+        st.warning(f"Could not compute efficient frontier: {e}")
+        frontier_points = []
+
+    if HAS_PLOTLY and frontier_points:
+        frontier_returns = [pt["return"] for pt in frontier_points]
+        frontier_vols = [pt["volatility"] for pt in frontier_points]
+        frontier_sharpe = [pt["sharpe_ratio"] for pt in frontier_points]
+
+        # 2D Efficient Frontier
+        st.markdown("#### 2D Efficient Frontier")
+        fig_2d = go.Figure()
+
+        # Frontier line
+        fig_2d.add_trace(go.Scatter(
+            x=frontier_vols, y=frontier_returns, mode="lines+markers",
+            line=dict(color="#6366f1", width=3),
+            marker=dict(size=4, color=frontier_sharpe, colorscale="Viridis",
+                        colorbar=dict(title="Sharpe", thickness=15)),
+            name="Efficient Frontier",
+            hovertemplate="Vol: %{x:.2%}<br>Return: %{y:.2%}<br>Sharpe: %{marker.color:.3f}<extra></extra>",
+        ))
+
+        # Current portfolio point
+        fig_2d.add_trace(go.Scatter(
+            x=[float(metrics.get("volatility", 0))], y=[float(metrics.get("annualized_return", 0))],
+            mode="markers+text", marker=dict(size=14, color="#ef4444", symbol="diamond"),
+            text=["Current"], textposition="top right", name="Current Portfolio",
+        ))
+
+        # Max Sharpe
+        if ms.get("success", False):
+            fig_2d.add_trace(go.Scatter(
+                x=[float(ms.get("volatility", 0))], y=[float(ms.get("expected_return", 0))],
+                mode="markers+text", marker=dict(size=14, color="#22c55e", symbol="star"),
+                text=["Max Sharpe"], textposition="top left", name="Max Sharpe",
+            ))
+
+        # Min Variance
+        if mv.get("success", False):
+            fig_2d.add_trace(go.Scatter(
+                x=[float(mv.get("volatility", 0))], y=[float(mv.get("expected_return", 0))],
+                mode="markers+text", marker=dict(size=14, color="#3b82f6", symbol="star"),
+                text=["Min Vol"], textposition="bottom right", name="Min Variance",
+            ))
+
+        # Capital Market Line
+        if ms.get("success", False) and float(ms.get("volatility", 0)) > 0:
+            cml_x = [0, float(ms.get("volatility", 0)) * 1.5]
+            cml_slope = (float(ms.get("expected_return", 0)) - risk_free_rate) / float(ms.get("volatility", 0))
+            cml_y = [risk_free_rate, risk_free_rate + cml_slope * cml_x[1]]
+            fig_2d.add_trace(go.Scatter(
+                x=cml_x, y=cml_y, mode="lines", line=dict(dash="dash", color="#f59e0b", width=1.5),
+                name="Capital Market Line",
+            ))
+
+        fig_2d.update_layout(
+            template="plotly_dark", height=520,
+            xaxis_title="Annualized Volatility", yaxis_title="Annualized Return",
+            xaxis=dict(tickformat=".1%"), yaxis=dict(tickformat=".1%"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_2d, use_container_width=True)
+
+        # 3D surface
+        try:
+            cloud_df = ef_module.sample_portfolio_cloud(returns_df, n_samples=2000, risk_free_rate=risk_free_rate)
+            if not cloud_df.empty:
+                st.markdown("#### 3D Risk-Return-Sharpe Surface")
+                fig_3d = go.Figure(data=[go.Scatter3d(
+                    x=cloud_df["volatility"], y=cloud_df["expected_return"],
+                    z=cloud_df["sharpe_ratio"], mode="markers",
+                    marker=dict(size=2, color=cloud_df["sharpe_ratio"],
+                                colorscale="Viridis", opacity=0.6,
+                                colorbar=dict(title="Sharpe")),
+                    hovertemplate="Vol: %{x:.2%}<br>Ret: %{y:.2%}<br>Sharpe: %{z:.3f}<extra></extra>",
+                )])
+                fig_3d.update_layout(
+                    template="plotly_dark", height=550,
+                    scene=dict(
+                        xaxis_title="Volatility", yaxis_title="Return", zaxis_title="Sharpe Ratio",
+                    ),
+                )
+                st.plotly_chart(fig_3d, use_container_width=True)
+        except Exception:
+            pass  # Cloud is optional
+
+    # Optimal weight breakdown
+    st.markdown("#### Optimal Weight Allocation")
+    weight_data = []
+    for i, ticker in enumerate(tickers):
+        row = {"Ticker": ticker, "Current": float(weights[i]) if i < len(weights) else 0}
+        if ms.get("weights") is not None and len(ms["weights"]) > i:
+            row["Max Sharpe"] = float(ms["weights"][i])
+        if mv.get("weights") is not None and len(mv["weights"]) > i:
+            row["Min Variance"] = float(mv["weights"][i])
+        if ca.get("weights") is not None and len(ca["weights"]) > i:
+            row["Cost-Aware"] = float(ca["weights"][i])
+        weight_data.append(row)
+    wdf = pd.DataFrame(weight_data)
+
+    if HAS_PLOTLY:
+        fig_w = go.Figure()
+        cols_to_plot = [c for c in ["Current", "Max Sharpe", "Min Variance", "Cost-Aware"] if c in wdf.columns]
+        colors = {"Current": "#64748b", "Max Sharpe": "#22c55e", "Min Variance": "#3b82f6", "Cost-Aware": "#f59e0b"}
+        for col in cols_to_plot:
+            fig_w.add_trace(go.Bar(
+                x=wdf["Ticker"], y=wdf[col], name=col,
+                marker_color=colors.get(col, "#6366f1"),
+            ))
+        fig_w.update_layout(
+            template="plotly_dark", height=380, barmode="group",
+            yaxis=dict(tickformat=".0%"), yaxis_title="Weight",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_w, use_container_width=True)
+    else:
+        view = wdf.copy()
+        for c in view.columns:
+            if c != "Ticker":
+                view[c] = view[c].map(_fmt_pct)
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+
+# ─── Advanced Analytics (ARIMA / GARCH / Regression) ──────────────────────────
+
+def _render_risk_cockpit(result: dict) -> None:
+    """Tier 1: Portfolio Risk Dashboard with VaR/CVaR, Drawdowns, and Rolling Metrics"""
+    st.markdown("###  Portfolio Risk Cockpit")
+    
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to populate the Risk Cockpit.")
+        return
+
+    portfolio_returns = result.get("portfolio_returns")
+    if portfolio_returns is None or len(portfolio_returns) < 30:
+        st.warning("Need at least 30 days of portfolio returns for risk analytics.")
+        return
+
+    clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
+    
+    # Import risk metrics dynamically and reload to avoid stale cache in Streamlit
+    try:
+        risk_mod = importlib.import_module("src.analytics.risk_metrics")
+        importlib.reload(risk_mod)
+    except ImportError as e:
+        st.error(f"Failed to load risk module: {e}")
+        return
+
+    # Calculate metrics
+    var_95_hist = risk_mod.calculate_var(clean_returns, 0.95)
+    cvar_95_hist = risk_mod.calculate_cvar(clean_returns, 0.95)
+    var_99_hist = risk_mod.calculate_var(clean_returns, 0.99)
+    
+    var_95_param = risk_mod.calculate_parametric_var(clean_returns, 0.95)
+    cvar_95_param = risk_mod.calculate_parametric_cvar(clean_returns, 0.95)
+    var_99_param = risk_mod.calculate_parametric_var(clean_returns, 0.99)
+    
+    drawdown_series = risk_mod.calculate_drawdown_series(clean_returns)
+    max_dd = drawdown_series.min()
+    
+    _render_ai_advisor_card(
+        context_data={"var_95_hist": var_95_hist, "cvar_95_hist": cvar_95_hist, "var_99_param": var_99_param, "max_drawdown": max_dd},
+        prompt_type="risk_cockpit"
+    )
+
+    # Layout: Top KPIs
+    st.markdown("#### Extreme Risk Metrics (Daily)")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Historical VaR (95%)", f"{-var_95_hist:.2%}", delta="Worst 5% days", delta_color="inverse")
+    c2.metric("Historical CVaR (95%)", f"{-cvar_95_hist:.2%}", delta="Expected Shortfall", delta_color="inverse")
+    c3.metric("Parametric VaR (99%)", f"{-var_99_param:.2%}", delta="Worst 1% days", delta_color="inverse")
+    c4.metric("Maximum Drawdown", f"{max_dd:.2%}", delta="Historical max", delta_color="inverse")
+
+    st.markdown("---")
+    
+    # Visualization
+    if HAS_PLOTLY:
+        st.markdown("#### Drawdown Timeline")
+        fig_dd = go.Figure()
+        fig_dd.add_trace(go.Scatter(
+            x=drawdown_series.index, y=drawdown_series.values,
+            fill='tozeroy', fillcolor='rgba(220, 38, 38, 0.2)',
+            line=dict(color='rgba(220, 38, 38, 0.8)', width=2),
+            name="Drawdown"
+        ))
+        fig_dd.update_layout(
+            height=300, margin=dict(l=20, r=20, t=30, b=20),
+            yaxis_tickformat='.1%', template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            title="Underwater Chart (Portfolio Drawdowns)"
+        )
+        st.plotly_chart(fig_dd, use_container_width=True)
+        
+        st.markdown("#### Rolling Risk Metrics")
+        window = st.slider("Rolling Window (days)", min_value=20, max_value=120, value=60, step=10, key="risk_roll_window")
+        
+        roll_vol = risk_mod.calculate_rolling_volatility(clean_returns, window=window)
+        roll_sharpe = risk_mod.calculate_rolling_sharpe(clean_returns, window=window)
+        
+        fig_roll = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_roll.add_trace(
+            go.Scatter(x=roll_vol.index, y=roll_vol.values, name=f"{window}d Rolling Volatility", line=dict(color='#3b82f6')),
+            secondary_y=False
+        )
+        fig_roll.add_trace(
+            go.Scatter(x=roll_sharpe.index, y=roll_sharpe.values, name=f"{window}d Rolling Sharpe", line=dict(color='#10b981')),
+            secondary_y=True
+        )
+        fig_roll.update_layout(
+            height=350, margin=dict(l=20, r=20, t=30, b=20),
+            template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+        )
+        fig_roll.update_yaxes(title_text="Volatility", tickformat='.1%', secondary_y=False)
+        fig_roll.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
+        st.plotly_chart(fig_roll, use_container_width=True)
+    else:
+        st.warning("Plotly is required for advanced risk visualizations.")
+        st.line_chart(drawdown_series, use_container_width=True)
+
+
+def _render_factor_exposure(result: dict) -> None:
+    """Tier 1: Factor Exposure Analysis (Fama-French proxies)"""
+    st.markdown("###  Factor Exposure Analysis")
+    
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to populate Factor Analysis.")
+        return
+
+    tickers = result.get("tickers", [])
+    weights = result.get("weights", [])
+    if not tickers:
+        st.warning("No portfolio data found.")
+        return
+
+    st.markdown("This analysis maps your portfolio against classical Fama-French and Smart Beta factors.")
+
+    factors = ["Market (Beta)", "Size (SMB)", "Value (HML)", "Momentum (MOM)", "Quality (QAL)", "Low Vol (VOL)"]
+    portfolio_factors = {f: 0.0 for f in factors}
+    is_synthetic = False
+
+    try:
+        start_date_str = result.get("inputs", {}).get("start_date")
+        end_date_str = result.get("inputs", {}).get("end_date")
+        if not start_date_str or not end_date_str:
+            raise ValueError("Missing start/end dates for factor regression.")
+        
+        from datetime import date
+        start_date = date.fromisoformat(start_date_str)
+        end_date = date.fromisoformat(end_date_str)
+        etf_symbols = ("SPY", "IWN", "IWD", "MTUM", "QUAL", "USMV")
+        
+        with st.spinner("Fetching Factor ETFs for OLS Regression..."):
+            factor_prices = _fetch_close_prices_cached(etf_symbols, start_date, end_date)
+
+        if factor_prices.empty:
+            raise ValueError("Could not fetch factor ETF price data.")
+
+        factor_returns = factor_prices.pct_change().dropna()
+
+        # Retrieve portfolio returns — may be a pd.Series with a DatetimeIndex
+        port_ret = result.get("portfolio_returns")
+        if port_ret is None or (hasattr(port_ret, "empty") and port_ret.empty):
+            raise ValueError("Portfolio returns are empty.")
+        port_ret = pd.Series(port_ret)
+
+        # Normalize both indexes to timezone-naive dates so pd.concat can align them
+        # regardless of whether yfinance returns UTC-aware or naive timestamps.
+        def _to_date_index(s: pd.Series) -> pd.Series:
+            idx = s.index
+            if hasattr(idx, "tz") and idx.tz is not None:
+                idx = idx.tz_convert("UTC").normalize().tz_localize(None)
+            else:
+                idx = pd.DatetimeIndex(idx).normalize()
+            return s.set_axis(idx)
+
+        port_ret = _to_date_index(port_ret)
+        factor_returns = factor_returns.apply(_to_date_index)
+
+        aligned = pd.concat([port_ret, factor_returns], axis=1, join="inner").dropna()
+        if len(aligned) < 30:
+            raise ValueError(f"Not enough aligned data points for OLS (only {len(aligned)} days).")
+
+        import statsmodels.api as sm
+        available_etfs = [s for s in etf_symbols if s in aligned.columns]
+        if not available_etfs:
+            raise ValueError("None of the factor ETFs are present in the aligned dataset.")
+        X = aligned[available_etfs]
+        X = sm.add_constant(X)
+        y = aligned.iloc[:, 0]
+        model = sm.OLS(y, X).fit()
+
+        portfolio_factors = {
+            "Market (Beta)": float(model.params.get("SPY", 0.0)),
+            "Size (SMB)": float(model.params.get("IWN", 0.0)),
+            "Value (HML)": float(model.params.get("IWD", 0.0)),
+            "Momentum (MOM)": float(model.params.get("MTUM", 0.0)),
+            "Quality (QAL)": float(model.params.get("QUAL", 0.0)),
+            "Low Vol (VOL)": float(model.params.get("USMV", 0.0)),
+        }
+    except Exception as e:
+        is_synthetic = True
+        st.warning(f"⚠️ **Illustrative / Placeholder — do not cite in report** (Real regression failed: {e})")
+        # Generate deterministic synthetic factor loadings based on ticker names for demonstration
+        for t, w in zip(tickers, weights):
+            seed = sum(ord(c) for c in t)
+            np.random.seed(seed)
+            if t in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
+                t_factors = [1.1, -0.2, -0.6, 0.8, 0.9, 0.1]
+            elif t in ["BTC", "ETH", "COIN", "MSTR"]:
+                t_factors = [1.5, 0.5, -0.8, 0.9, -0.5, -0.9]
+            elif t in ["BIL", "SHY", "TLT", "IEF"]:
+                t_factors = [0.1, 0.0, 0.5, 0.0, 0.8, 0.9]
+            else:
+                t_factors = np.random.normal(0, 0.5, len(factors))
+                t_factors = np.clip(t_factors, -1, 1.5)
+            for i, f in enumerate(factors):
+                portfolio_factors[f] += t_factors[i] * w
+        np.random.seed(None)
+    
+    _render_ai_advisor_card(
+        context_data={"factor_exposures": portfolio_factors},
+        prompt_type="factor_exposure"
+    )
+
+    if HAS_PLOTLY:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=list(portfolio_factors.values()),
+                theta=factors,
+                fill='toself',
+                fillcolor='rgba(20, 184, 166, 0.3)',
+                line=dict(color='rgba(20, 184, 166, 0.9)', width=2),
+                name='Portfolio Factor Tilt'
+            ))
+            fig.update_layout(
+                polar=dict(
+                    radialaxis=dict(visible=True, range=[-1.0, 1.5], gridcolor='rgba(255,255,255,0.1)'),
+                    angularaxis=dict(gridcolor='rgba(255,255,255,0.1)')
+                ),
+                showlegend=False,
+                height=450,
+                margin=dict(l=40, r=40, t=40, b=40),
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with c2:
+            st.markdown("#### Factor Loadings")
+            for f, val in portfolio_factors.items():
+                st.metric(f, f"{val:.2f}")
+                
+            st.markdown("---")
+            # Auto-commentary
+            dom_factor = max(portfolio_factors.items(), key=lambda x: x[1])
+            weak_factor = min(portfolio_factors.items(), key=lambda x: x[1])
+            
+            st.info(f"**Dominant Tilt:** The portfolio exhibits a strong tilt towards **{dom_factor[0]}** ({dom_factor[1]:.2f}).")
+            st.warning(f"**Underweight:** The portfolio has negative exposure to **{weak_factor[0]}** ({weak_factor[1]:.2f}).")
+    else:
+        st.warning("Plotly is required for Radar charts.")
+        st.dataframe(pd.DataFrame({"Factor": factors, "Exposure": list(portfolio_factors.values())}).set_index("Factor"))
+
+
+
+def _render_regime_detection(result: dict) -> None:
+    """Tier 1: Regime Detection using Hidden Markov Model"""
+    st.markdown("###  Market Regime Detection (HMM)")
+    
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to populate Regime Detection.")
+        return
+
+    portfolio_returns = result.get("portfolio_returns")
+    if portfolio_returns is None or len(portfolio_returns) < 60:
+        st.warning("Need at least 60 days of portfolio returns to fit a Markov model.")
+        return
+
+    st.markdown("Uses a 2-state Markov Switching Model (via `statsmodels`) to dynamically detect high-volatility (Bear/Stress) and low-volatility (Bull/Calm) market regimes.")
+
+    clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
+    
+    # Fit Markov Regression
+    try:
+        from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # 2 regimes, switching variance
+            mod = MarkovRegression(clean_returns, k_regimes=2, trend='c', switching_variance=True)
+            res = mod.fit(iter=20, disp=False)
+            
+        # Extract smoothed probabilities
+        probs = res.smoothed_marginal_probabilities
+        # Determine which regime has higher variance
+        var_0 = res.params.get('sigma2[0]', 0)
+        var_1 = res.params.get('sigma2[1]', 0)
+        
+        if var_1 > var_0:
+            high_vol_regime = 1
+            low_vol_regime = 0
+        else:
+            high_vol_regime = 0
+            low_vol_regime = 1
+            
+        stress_prob = probs[high_vol_regime]
+        calm_prob = probs[low_vol_regime]
+        
+        current_stress = stress_prob.iloc[-1]
+        current_regime = "High Volatility (Stress)" if current_stress > 0.5 else "Low Volatility (Calm)"
+        
+        _render_ai_advisor_card(
+            context_data={"current_regime": current_regime, "probability_of_stress": current_stress, "expected_duration_days": 1/(1-res.params.get(f'p[{high_vol_regime}->{high_vol_regime}]', 0.5))},
+            prompt_type="regime_detection"
+        )
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Current Regime", current_regime)
+        c2.metric("Probability of Stress", f"{current_stress:.1%}")
+        c3.metric("Expected Duration (Stress)", f"{1/(1-res.params.get(f'p[{high_vol_regime}->{high_vol_regime}]', 0.5)):.1f} days")
+        
+        if HAS_PLOTLY:
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+            
+            # Cumulative returns
+            cum_ret = (1 + clean_returns).cumprod()
+            fig.add_trace(go.Scatter(x=cum_ret.index, y=cum_ret.values, name="Portfolio Value", line=dict(color='#e2e8f0')), row=1, col=1)
+            
+            # Regime probabilities
+            fig.add_trace(go.Scatter(
+                x=stress_prob.index, y=stress_prob.values,
+                fill='tozeroy', fillcolor='rgba(220, 38, 38, 0.3)',
+                line=dict(color='rgba(220, 38, 38, 0.8)', width=1),
+                name="Stress Probability"
+            ), row=2, col=1)
+            
+            # Highlight high stress periods on the price chart
+            stress_periods = stress_prob[stress_prob > 0.5]
+            if not stress_periods.empty:
+                fig.add_trace(go.Scatter(
+                    x=stress_periods.index, 
+                    y=cum_ret.loc[stress_periods.index], 
+                    mode='markers', 
+                    marker=dict(color='red', size=4),
+                    name="Stress Regimes"
+                ), row=1, col=1)
+
+            fig.update_layout(
+                height=500, margin=dict(l=20, r=20, t=30, b=20),
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                title="Regime-Conditional Performance"
+            )
+            fig.update_yaxes(title_text="Value", row=1, col=1)
+            fig.update_yaxes(title_text="Prob(Stress)", range=[0, 1], row=2, col=1)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("#### Adaptive Strategy Suggestion")
+            if current_stress > 0.5:
+                st.warning("**Recommendation:** We are currently in a high-volatility regime. Consider increasing cash buffers, reducing equity beta, and tilting towards defensive factors (Quality, Low Vol).")
+            else:
+                st.success("**Recommendation:** Market is in a stable, low-volatility regime. Carry trades and equity risk premia are favorable. Consider maintaining or slightly increasing market beta.")
+        else:
+            st.line_chart(stress_prob, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"Regime detection failed to converge or encountered an error: {e}")
+
+
+
+def _render_advanced_analytics(result: dict) -> None:
+    """Advanced quantitative models: ARIMA, GARCH, Linear Regression."""
+    st.markdown("###  Advanced Analytics — Forecasting & Vol Models")
+
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first.")
+        return
+
+    portfolio_returns = result.get("portfolio_returns")
+    returns_df = result.get("returns")
+    if portfolio_returns is None or len(portfolio_returns) < 30:
+        st.warning("Need at least 30 days of portfolio returns for advanced models.")
+        return
+
+    # Horizon Slider
+    forecast_horizon = st.slider(
+        "Forecast Horizon (days)",
+        min_value=5, max_value=60, value=20, step=5,
+        key="wharton_advanced_horizon"
+    )
+
+    # Run models
+    model_results = {}
+    clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
+
+    # ARIMA
+    try:
+        advanced_mod = importlib.import_module("src.analytics.advanced")
+        arima = advanced_mod.ARIMAModel(order=(1, 0, 1))
+        arima.fit(clean_returns)
+        arima_pred = arima.predict(periods=forecast_horizon)
+        arima_metrics = arima.get_metrics()
+        model_results["ARIMA(1,0,1)"] = {
+            "prediction": arima_pred,
+            "metrics": arima_metrics,
+            "available": True,
+        }
+    except Exception as e:
+        model_results["ARIMA(1,0,1)"] = {"available": False, "error": str(e)}
+
+    # Exponential Smoothing
+    try:
+        if hasattr(advanced_mod, "ExponentialSmoothingModel"):
+            expsmooth = advanced_mod.ExponentialSmoothingModel()
+            expsmooth.fit(clean_returns)
+            expsmooth_pred = expsmooth.predict(periods=forecast_horizon)
+            expsmooth_metrics = expsmooth.get_metrics()
+            model_results["Exp. Smoothing"] = {
+                "prediction": expsmooth_pred,
+                "metrics": expsmooth_metrics,
+                "available": True,
+            }
+    except Exception as e:
+        model_results["Exp. Smoothing"] = {"available": False, "error": str(e)}
+
+    # GARCH
+    try:
+        garch = advanced_mod.GARCHModel(p=1, q=1)
+        garch.fit(clean_returns)
+        garch_pred = garch.predict(periods=forecast_horizon)
+        garch_metrics = garch.get_metrics()
+        model_results["GARCH(1,1)"] = {
+            "prediction": garch_pred,
+            "metrics": garch_metrics,
+            "available": True,
+        }
+    except Exception as e:
+        model_results["GARCH(1,1)"] = {"available": False, "error": str(e)}
+
+    # Linear Regression
+    try:
+        linreg = advanced_mod.LinearRegressionModel()
+        linreg.fit(clean_returns)
+        linreg_pred = linreg.predict(periods=forecast_horizon)
+        linreg_metrics = linreg.get_metrics()
+        model_results["Linear Regression"] = {
+            "prediction": linreg_pred,
+            "metrics": linreg_metrics,
+            "available": True,
+        }
+    except Exception as e:
+        model_results["Linear Regression"] = {"available": False, "error": str(e)}
+
+    # Model summary table
+    st.markdown("#### Model Summary")
+    summary_rows = []
+    for name, res in model_results.items():
+        if res.get("available"):
+            m = res.get("metrics", {})
+            p = res.get("prediction", {})
+            summary_rows.append({
+                "Model": name,
+                "Status": " Fitted",
+                "Next Period Forecast": _fmt_pct(p.get("next_return", p.get("next_volatility"))),
+                "Confidence": _fmt_float(m.get("confidence", m.get("forecast_confidence"))),
+                "Annualized": _fmt_pct(m.get("expected_annual_return",
+                    m.get("volatility_annualized", ""))),
+            })
+        else:
+            summary_rows.append({
+                "Model": name,
+                "Status": " " + str(res.get("error", "unavailable"))[:60],
+                "Next Period Forecast": "—",
+                "Confidence": "—",
+                "Annualized": "—",
+            })
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    if HAS_PLOTLY:
+        # Return forecast chart (ARIMA + Exp Smoothing)
+        arima_res = model_results.get("ARIMA(1,0,1)", {})
+        exp_res = model_results.get("Exp. Smoothing", {})
+        if arima_res.get("available") or exp_res.get("available"):
+            st.markdown("#### Return Forecast Comparison")
+            fig_forecast = go.Figure()
+            hist_vals = clean_returns.tail(252).values.tolist()
+            hist_x = list(range(-len(hist_vals), 0))
+            
+            # Plot historical returns
+            fig_forecast.add_trace(go.Scatter(
+                x=hist_x, y=hist_vals, mode="lines",
+                line=dict(color="#6366f1", width=1.5), name="Historical Returns",
+            ))
+            
+            # Plot ARIMA
+            if arima_res.get("available"):
+                pred = arima_res["prediction"]
+                forecast_path = pred.get("forecast_path", [])
+                conf_int = pred.get("confidence_interval", [])
+                fore_x = list(range(0, len(forecast_path)))
+                fig_forecast.add_trace(go.Scatter(
+                    x=fore_x, y=forecast_path, mode="lines+markers",
+                    line=dict(color="#22c55e", width=2.5, dash="dot"),
+                    marker=dict(size=4), name="ARIMA Forecast",
+                ))
+                if conf_int:
+                    upper = [ci[1] if len(ci) > 1 else ci[0] for ci in conf_int]
+                    lower = [ci[0] for ci in conf_int]
+                    fig_forecast.add_trace(go.Scatter(
+                        x=fore_x, y=upper, mode="lines", line=dict(width=0),
+                        showlegend=False, name="Upper CI",
+                    ))
+                    fig_forecast.add_trace(go.Scatter(
+                        x=fore_x, y=lower, mode="lines", line=dict(width=0),
+                        fill="tonexty", fillcolor="rgba(34,197,94,0.15)",
+                        name="ARIMA 95% CI",
+                    ))
+
+            # Plot Exponential Smoothing
+            if exp_res.get("available"):
+                exp_pred = exp_res["prediction"]
+                exp_path = exp_pred.get("forecast_path", [])
+                exp_x = list(range(0, len(exp_path)))
+                fig_forecast.add_trace(go.Scatter(
+                    x=exp_x, y=exp_path, mode="lines+markers",
+                    line=dict(color="#f59e0b", width=2.5, dash="dash"),
+                    marker=dict(size=4), name="Exp Smoothing",
+                ))
+
+            fig_forecast.add_vline(x=0, line_dash="dash", line_color="#ef4444",
+                annotation_text="Forecast Start")
+            fig_forecast.update_layout(
+                template="plotly_dark", height=420,
+                xaxis_title="Days (relative)", yaxis_title="Daily Return",
+                yaxis=dict(tickformat=".3%"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_forecast, use_container_width=True)
+
+            # Cumulative Return / Portfolio Value Forecast
+            st.markdown("#### Projected Portfolio Value")
+            initial_val = float(result.get("inputs", {}).get("current_value", 100_000))
+            fig_cum = go.Figure()
+            
+            # Historical cumulative
+            hist_cum = (1.0 + clean_returns.tail(252)).cumprod() * initial_val
+            # Rebase so the last historical point is exactly initial_val
+            factor = initial_val / hist_cum.iloc[-1]
+            hist_cum = hist_cum * factor
+            fig_cum.add_trace(go.Scatter(
+                x=list(range(-len(hist_cum), 0)), y=hist_cum.values.tolist(), mode="lines",
+                line=dict(color="#6366f1", width=2), name="Historical Path",
+            ))
+
+            # ARIMA cumulative
+            if arima_res.get("available"):
+                arima_path = arima_res["prediction"].get("forecast_path", [])
+                arima_cum = initial_val * (1.0 + np.array(arima_path)).cumprod()
+                fig_cum.add_trace(go.Scatter(
+                    x=fore_x, y=arima_cum.tolist(), mode="lines+markers",
+                    line=dict(color="#22c55e", width=2.5, dash="dot"),
+                    marker=dict(size=4), name="ARIMA Projected",
+                ))
+
+            # Exp Smoothing cumulative
+            if exp_res.get("available"):
+                exp_path = exp_res["prediction"].get("forecast_path", [])
+                exp_cum = initial_val * (1.0 + np.array(exp_path)).cumprod()
+                fig_cum.add_trace(go.Scatter(
+                    x=list(range(0, len(exp_path))), y=exp_cum.tolist(), mode="lines+markers",
+                    line=dict(color="#f59e0b", width=2.5, dash="dash"),
+                    marker=dict(size=4), name="Exp Smooth Projected",
+                ))
+
+            fig_cum.add_vline(x=0, line_dash="dash", line_color="#ef4444", annotation_text="Today")
+            fig_cum.update_layout(
+                template="plotly_dark", height=420,
+                xaxis_title="Days (relative)", yaxis_title="Portfolio Value ($)",
+                yaxis=dict(tickformat="$,.0f"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_cum, use_container_width=True)
+
+        # GARCH volatility chart
+        garch_res = model_results.get("GARCH(1,1)", {})
+        if garch_res.get("available"):
+            st.markdown("#### GARCH Conditional Volatility Forecast")
+            gm = garch_res["metrics"]
+            gp = garch_res["prediction"]
+            vol_path = gp.get("volatility_path", [])
+
+            fig_garch = go.Figure()
+            # Historical rolling vol (cap at 252 days for visibility)
+            hist_vol = clean_returns.rolling(21).std() * np.sqrt(252)
+            hist_vol = hist_vol.dropna().tail(252)
+            fig_garch.add_trace(go.Scatter(
+                x=list(range(-len(hist_vol), 0)), y=hist_vol.values.tolist(),
+                mode="lines", line=dict(color="#6366f1", width=1.5),
+                name="21d Rolling Vol (Ann.)",
+            ))
+            if vol_path:
+                ann_vol_path = [v * np.sqrt(252) for v in vol_path]
+                fig_garch.add_trace(go.Scatter(
+                    x=list(range(0, len(ann_vol_path))), y=ann_vol_path,
+                    mode="lines+markers", line=dict(color="#ef4444", width=2.5, dash="dot"),
+                    marker=dict(size=5), name="GARCH Forecast (Ann.)",
+                ))
+            fig_garch.add_vline(x=0, line_dash="dash", line_color="#f59e0b",
+                annotation_text="Forecast Start")
+            fig_garch.update_layout(
+                template="plotly_dark", height=380,
+                xaxis_title="Days (relative)", yaxis_title="Annualized Volatility",
+                yaxis=dict(tickformat=".1%"),
+            )
+            st.plotly_chart(fig_garch, use_container_width=True)
+
+            # VaR Projection Chart
+            if vol_path:
+                st.markdown("#### Projected Daily Value-at-Risk (95%)")
+                # 1.645 is the z-score for 95% confidence (1-tailed loss)
+                var_path = [initial_val * 1.645 * v for v in vol_path]
+                
+                # Historical VaR proxy (using 21d rolling vol)
+                hist_var = (hist_vol / np.sqrt(252)) * 1.645 * initial_val
+                
+                fig_var = go.Figure()
+                fig_var.add_trace(go.Bar(
+                    x=list(range(-len(hist_var), 0)), y=hist_var.values.tolist(),
+                    marker_color="rgba(99,102,241,0.5)", name="Historical VaR Estimate",
+                ))
+                fig_var.add_trace(go.Bar(
+                    x=list(range(0, len(var_path))), y=var_path,
+                    marker_color="rgba(239,68,68,0.7)", name="Projected VaR (GARCH)",
+                ))
+                fig_var.add_vline(x=0, line_dash="dash", line_color="#f59e0b",
+                    annotation_text="Today")
+                fig_var.update_layout(
+                    template="plotly_dark", height=350,
+                    xaxis_title="Days (relative)", yaxis_title="Daily Risk Exposure ($)",
+                    yaxis=dict(tickformat="$,.0f"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_var, use_container_width=True)
+
+            vol_cards = st.columns(3)
+            vol_cards[0].metric("Conditional Vol (daily)", _fmt_pct(gm.get("conditional_volatility")))
+            vol_cards[1].metric("Annualized Vol", _fmt_pct(gm.get("volatility_annualized")))
+            vol_cards[2].metric("Confidence", _fmt_float(gm.get("confidence")))
+
+        # Linear Regression
+        linreg_res = model_results.get("Linear Regression", {})
+        if linreg_res.get("available"):
+            st.markdown("#### Linear Trend Analysis")
+            lm = linreg_res["metrics"]
+            lp = linreg_res["prediction"]
+
+            fig_lr = go.Figure()
+            cum_returns = (1.0 + clean_returns).cumprod()
+            y_vals = cum_returns.values.tolist()
+            x_vals = list(range(len(y_vals)))
+            fig_lr.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, mode="markers",
+                marker=dict(size=3, color="rgba(99,102,241,0.7)"), name="Cumulative Growth",
+            ))
+            slope = float(lm.get("trend_slope_daily", 0))
+            # forecast_path[0] is the prediction at x = len(y_vals)
+            first_pred = float(lp.get("forecast_path", [0])[0])
+            intercept = first_pred - slope * len(y_vals)
+            trend_y = [intercept + slope * x for x in x_vals]
+            fig_lr.add_trace(go.Scatter(
+                x=x_vals, y=trend_y, mode="lines",
+                line=dict(color="#ef4444", width=2), name="Linear Trend",
+            ))
+            fig_lr.update_layout(
+                template="plotly_dark", height=340,
+                xaxis_title="Trading Day", yaxis_title="Cumulative Return Multiplier",
+                yaxis=dict(tickformat=".2f"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_lr, use_container_width=True)
+
+            lr_cols = st.columns(3)
+            lr_cols[0].metric("Daily Slope", f"{slope:.6f}")
+            lr_cols[1].metric("Expected Annual Return", _fmt_pct(lm.get("expected_annual_return")))
+            lr_cols[2].metric("R²", _fmt_float(lm.get("confidence")))
+
+
+# ─── Scenario Playground ──────────────────────────────────────────────────────
+
+def _render_scenario_playground(result: dict) -> None:
+    """Advanced scenario / stress testing with preset scenarios and custom shocks."""
+    st.markdown("###  Scenario Playground — Stress Testing")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first.")
+        return
+
+    returns_df = result.get("returns")
+    tickers = list(result.get("tickers", []))
+    weights = np.asarray(result.get("weights", []), dtype=float)
+    inputs = result.get("inputs", {})
+    initial_value = float(inputs.get("current_value", 100_000))
+
+    if returns_df is None or returns_df.empty:
+        st.warning("No return data available.")
+        return
+
+    try:
+        scenario_mod = importlib.import_module("src.analytics.scenario_playground")
+    except ImportError:
+        st.error("Scenario playground module not available.")
+        return
+
+    # Scenario configuration
+    st.markdown("#### Configuration")
+    cfg_col1, cfg_col2, cfg_col3 = st.columns(3)
+    with cfg_col1:
+        severity = st.slider("Severity Multiplier", 0.2, 3.0, 1.0, 0.1,
+                             key="wharton_scenario_severity",
+                             help="1.0 = base case. Higher = more severe scenario.")
+    with cfg_col2:
+        horizon = st.slider("Horizon (days)", 10, 120, 30, 5,
+                            key="wharton_scenario_horizon")
+    with cfg_col3:
+        run_suite = st.button(" Run Full Stress Suite", key="wharton_run_suite", type="primary")
+
+    # Role exposure table
+    role_df = scenario_mod.build_role_exposure_table(tickers, weights)
+    with st.expander(" Role Exposure Breakdown"):
+        st.dataframe(role_df, use_container_width=True, hide_index=True)
+
+    # Run full suite
+    if run_suite or st.session_state.get("wharton_scenario_suite_result") is not None:
+        if run_suite:
+            with st.spinner("Running scenario suite..."):
+                try:
+                    suite = scenario_mod.build_scenario_suite(
+                        returns_df=returns_df, tickers=tickers, weights=weights,
+                        severity=severity, initial_value=initial_value,
+                        horizon_override=horizon,
+                    )
+                    st.session_state["wharton_scenario_suite_result"] = suite
+                except Exception as e:
+                    st.error(f"Scenario suite error: {e}")
+                    return
+
+        suite = st.session_state.get("wharton_scenario_suite_result")
+        if suite is None:
+            return
+
+        summary_df = suite.get("rows", pd.DataFrame())
+        scenarios_dict = suite.get("scenarios", {})
+
+        if not summary_df.empty:
+            st.markdown("#### Scenario Comparison Dashboard")
+
+            # Summary table
+            view_df = summary_df.copy()
+            for col in ["Total Return", "Max Drawdown", "Worst Day", "Stress Gap"]:
+                if col in view_df.columns:
+                    view_df[col] = view_df[col].map(_fmt_pct)
+            if "Final Value" in view_df.columns:
+                view_df["Final Value"] = view_df["Final Value"].map(lambda v: f"${v:,.0f}" if isinstance(v, (int, float)) else str(v))
+            st.dataframe(view_df, use_container_width=True, hide_index=True)
+
+            if HAS_PLOTLY:
+                # Stress impact bar chart
+                st.markdown("#### Stress Impact Ranking")
+                fig_stress = go.Figure()
+                sorted_df = summary_df.sort_values("Total Return")
+                colors = ["#ef4444" if v < 0 else "#22c55e"
+                          for v in sorted_df["Total Return"]]
+                fig_stress.add_trace(go.Bar(
+                    x=sorted_df["Total Return"] * 100, y=sorted_df["Scenario"],
+                    orientation="h", marker_color=colors,
+                    text=[f"{v:.1f}%" for v in sorted_df["Total Return"] * 100],
+                    textposition="outside",
+                ))
+                fig_stress.update_layout(
+                    template="plotly_dark", height=max(300, len(sorted_df) * 50),
+                    xaxis_title="Total Return (%)", yaxis_title="",
+                    xaxis=dict(ticksuffix="%"),
+                )
+                st.plotly_chart(fig_stress, use_container_width=True)
+
+                # Detailed scenario view
+                st.markdown("#### Detailed Scenario Analysis")
+                selected_scenario = st.selectbox(
+                    "Select scenario", list(scenarios_dict.keys()),
+                    key="wharton_scenario_detail_select"
+                )
+                if selected_scenario and selected_scenario in scenarios_dict:
+                    sc = scenarios_dict[selected_scenario]
+
+                    # Description and playbook
+                    st.markdown(f"**{sc.get('category', '')}** — {sc.get('era', '')}")
+                    st.markdown(f"> {sc.get('description', '')}")
+                    if sc.get("playbook"):
+                        st.info(f" **Playbook**: {sc['playbook']}")
+                    st.markdown(f"**Action Cue**: {sc.get('action_cue', '—')}")
+
+                    # Path comparison
+                    baseline_path = sc.get("baseline_path", pd.Series(dtype=float))
+                    stressed_path = sc.get("stressed_path", pd.Series(dtype=float))
+
+                    if not baseline_path.empty and not stressed_path.empty:
+                        fig_paths = go.Figure()
+                        fig_paths.add_trace(go.Scatter(
+                            x=list(range(len(baseline_path))),
+                            y=baseline_path.values.tolist(),
+                            mode="lines", name="Baseline",
+                            line=dict(color="#6366f1", width=2),
+                        ))
+                        fig_paths.add_trace(go.Scatter(
+                            x=list(range(len(stressed_path))),
+                            y=stressed_path.values.tolist(),
+                            mode="lines", name="Stressed",
+                            line=dict(color="#ef4444", width=2),
+                        ))
+                        fig_paths.update_layout(
+                            template="plotly_dark", height=380,
+                            xaxis_title="Day", yaxis_title="Portfolio Value ($)",
+                            yaxis=dict(tickformat="$,.0f"),
+                            title=f"{selected_scenario}: Baseline vs Stressed Path",
+                        )
+                        st.plotly_chart(fig_paths, use_container_width=True)
+
+                    # Drawdown comparison
+                    baseline_dd = sc.get("baseline_drawdown", pd.Series(dtype=float))
+                    stressed_dd = sc.get("stressed_drawdown", pd.Series(dtype=float))
+                    if not stressed_dd.empty:
+                        fig_dd = go.Figure()
+                        if not baseline_dd.empty:
+                            fig_dd.add_trace(go.Scatter(
+                                x=list(range(len(baseline_dd))),
+                                y=(baseline_dd.values * 100).tolist(),
+                                mode="lines", name="Baseline DD",
+                                line=dict(color="#6366f1", width=1.5),
+                                fill="tozeroy", fillcolor="rgba(99,102,241,0.1)",
+                            ))
+                        fig_dd.add_trace(go.Scatter(
+                            x=list(range(len(stressed_dd))),
+                            y=(stressed_dd.values * 100).tolist(),
+                            mode="lines", name="Stressed DD",
+                            line=dict(color="#ef4444", width=2),
+                            fill="tozeroy", fillcolor="rgba(239,68,68,0.1)",
+                        ))
+                        fig_dd.update_layout(
+                            template="plotly_dark", height=300,
+                            xaxis_title="Day", yaxis_title="Drawdown (%)",
+                            yaxis=dict(ticksuffix="%"),
+                            title="Drawdown Comparison",
+                        )
+                        st.plotly_chart(fig_dd, use_container_width=True)
+
+                    # Per-asset impact
+                    impact = sc.get("asset_impact_proxy", pd.Series(dtype=float))
+                    if not impact.empty:
+                        st.markdown("##### Per-Asset Stress Impact ($)")
+                        fig_impact = go.Figure()
+                        colors_impact = ["#ef4444" if v < 0 else "#22c55e" for v in impact.values]
+                        fig_impact.add_trace(go.Bar(
+                            x=impact.index.tolist(), y=impact.values.tolist(),
+                            marker_color=colors_impact,
+                            text=[f"${v:+,.0f}" for v in impact.values],
+                            textposition="outside",
+                        ))
+                        fig_impact.update_layout(
+                            template="plotly_dark", height=320,
+                            yaxis=dict(tickformat="$,.0f"), yaxis_title="Impact ($)",
+                        )
+                        st.plotly_chart(fig_impact, use_container_width=True)
+
+                    # Phase breakdown
+                    phase_table = sc.get("phase_table", pd.DataFrame())
+                    if not phase_table.empty:
+                        st.markdown("##### Phase Breakdown")
+                        st.dataframe(phase_table, use_container_width=True, hide_index=True)
+
+                    shock_map = sc.get("shock_map", pd.DataFrame())
+                    if not shock_map.empty:
+                        st.markdown("##### Shock Map by Role")
+                        shock_view = shock_map.copy()
+                        for c in shock_view.columns:
+                            shock_view[c] = shock_view[c].map(_fmt_pct)
+                        st.dataframe(shock_view, use_container_width=True)
+
+    else:
+        st.caption("Click **Run Full Stress Suite** to stress-test your portfolio across all scenarios.")
+
+
+# ─── Stock Screener ───────────────────────────────────────────────────────────
+
+def _render_stock_screener() -> None:
+    """Multi-criteria stock screener with filtering."""
+    st.markdown("###  Stock Screener")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    st.caption("Screen stocks using fundamental and technical criteria powered by yfinance.")
+
+    # Screener inputs
+    with st.expander(" Screener Configuration", expanded=True):
+        in1, in2 = st.columns(2)
+        with in1:
+            universe_text = st.text_area(
+                "Tickers (one per line or comma-separated)",
+                value="AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nJPM\nJNJ\nV\n"
+                      "UNH\nLLY\nASML\nAVGO\nPG\nHD\nMA\nCOST\nABBV\nCRM",
+                height=200, key="wharton_screener_tickers",
+            )
+        with in2:
+            min_market_cap = st.number_input("Min Market Cap ($B)", value=10.0, min_value=0.0, step=5.0,
+                                             key="wharton_screener_mincap") * 1e9
+            max_pe = st.number_input("Max P/E Ratio", value=50.0, min_value=0.0, step=5.0,
+                                     key="wharton_screener_maxpe")
+            min_div_yield = st.slider("Min Dividend Yield (%)", 0.0, 10.0, 0.0, 0.1,
+                                      key="wharton_screener_mindiv")
+            sort_by = st.selectbox("Sort By", ["MarketCap", "PE", "ForwardPE", "DividendYield",
+                                                "52WeekChange", "Beta"], key="wharton_screener_sort")
+
+        run_screen = st.button(" Run Screener", key="wharton_run_screener", type="primary")
+
+    if run_screen or st.session_state.get("wharton_screener_data") is not None:
+        if run_screen:
+            tickers = [t.strip().upper() for t in universe_text.replace(",", "\n").splitlines() if t.strip()]
+            if not tickers:
+                st.warning("Enter at least one ticker.")
+                return
+
+            with st.spinner(f"Fetching data for {len(tickers)} stocks..."):
+                try:
+                    import yfinance as yf
+                    rows = []
+                    for batch_start in range(0, len(tickers), 10):
+                        batch = tickers[batch_start:batch_start + 10]
+                        for ticker in batch:
+                            try:
+                                info = yf.Ticker(ticker).info
+                                rows.append({
+                                    "Ticker": ticker,
+                                    "Name": str(info.get("shortName", ""))[:30],
+                                    "Sector": str(info.get("sector", "—")),
+                                    "MarketCap": float(info.get("marketCap", 0)),
+                                    "PE": info.get("trailingPE"),
+                                    "ForwardPE": info.get("forwardPE"),
+                                    "PEG": info.get("pegRatio"),
+                                    "Price": info.get("currentPrice") or info.get("regularMarketPrice"),
+                                    "DividendYield": (info.get("dividendYield") or 0) * 100,
+                                    "Beta": info.get("beta"),
+                                    "52WeekChange": (info.get("52WeekChange") or 0) * 100,
+                                    "Revenue Growth": (info.get("revenueGrowth") or 0) * 100,
+                                    "Profit Margin": (info.get("profitMargins") or 0) * 100,
+                                    "ROE": (info.get("returnOnEquity") or 0) * 100,
+                                })
+                            except Exception:
+                                pass
+                    df = pd.DataFrame(rows)
+                    st.session_state["wharton_screener_data"] = df
+                except Exception as e:
+                    st.error(f"Screener error: {e}")
+                    return
+
+        df = st.session_state.get("wharton_screener_data", pd.DataFrame())
+        if df.empty:
+            st.warning("No data returned. Check tickers.")
+            return
+
+        # Apply filters
+        filtered = df.copy()
+        if min_market_cap > 0:
+            filtered = filtered[filtered["MarketCap"] >= min_market_cap]
+        if max_pe > 0:
+            filtered = filtered[pd.to_numeric(filtered["PE"], errors="coerce") <= max_pe]
+        if min_div_yield > 0:
+            filtered = filtered[filtered["DividendYield"] >= min_div_yield]
+
+        # Sort
+        if sort_by in filtered.columns:
+            filtered = filtered.sort_values(sort_by, ascending=False, na_position="last")
+
+        st.markdown(f"#### Results ({len(filtered)} of {len(df)} stocks)")
+
+        # Format display
+        view = filtered.copy()
+        if "MarketCap" in view.columns:
+            view["MarketCap"] = view["MarketCap"].map(lambda v: f"${v / 1e9:.1f}B" if v > 0 else "—")
+        for col in ["PE", "ForwardPE", "PEG", "Beta"]:
+            if col in view.columns:
+                view[col] = view[col].map(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
+        for col in ["DividendYield", "52WeekChange", "Revenue Growth", "Profit Margin", "ROE"]:
+            if col in view.columns:
+                view[col] = view[col].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "—")
+        if "Price" in view.columns:
+            view["Price"] = view["Price"].map(lambda v: f"${v:,.2f}" if pd.notna(v) else "—")
+
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+        if HAS_PLOTLY and len(filtered) >= 2:
+            # Scatter: PE vs Market Cap
+            st.markdown("#### Valuation Map")
+            scatter_df = filtered.dropna(subset=["PE", "MarketCap"])
+            if len(scatter_df) >= 2:
+                fig_scatter = go.Figure()
+                fig_scatter.add_trace(go.Scatter(
+                    x=scatter_df["PE"],
+                    y=scatter_df["MarketCap"] / 1e9,
+                    mode="markers+text",
+                    text=scatter_df["Ticker"],
+                    textposition="top center",
+                    marker=dict(
+                        size=scatter_df["MarketCap"].clip(lower=1e9) / scatter_df["MarketCap"].max() * 40 + 8,
+                        color=scatter_df["52WeekChange"],
+                        colorscale="RdYlGn", colorbar=dict(title="52W Chg %"),
+                        line=dict(width=1, color="white"),
+                    ),
+                    hovertemplate="%{text}<br>P/E: %{x:.1f}<br>MCap: $%{y:.0f}B<extra></extra>",
+                ))
+                fig_scatter.update_layout(
+                    template="plotly_dark", height=480,
+                    xaxis_title="P/E Ratio", yaxis_title="Market Cap ($B)",
+                    title="Valuation Map: P/E vs Market Cap",
+                )
+                st.plotly_chart(fig_scatter, use_container_width=True)
+
+            # Sector distribution
+            if "Sector" in filtered.columns:
+                sector_counts = filtered["Sector"].value_counts()
+                if len(sector_counts) > 1:
+                    st.markdown("#### Sector Distribution")
+                    fig_sector = go.Figure(data=[go.Pie(
+                        labels=sector_counts.index.tolist(),
+                        values=sector_counts.values.tolist(),
+                        hole=0.4,
+                        marker=dict(colors=["#6366f1", "#22c55e", "#f59e0b", "#ef4444",
+                                           "#3b82f6", "#8b5cf6", "#ec4899", "#14b8a6",
+                                           "#f97316", "#64748b", "#84cc16"]),
+                    )])
+                    fig_sector.update_layout(template="plotly_dark", height=380)
+                    st.plotly_chart(fig_sector, use_container_width=True)
+
+
+# ─── Quant Engine ─────────────────────────────────────────────────────────────
 
 def _render_quant_engine(profile: dict[str, str | int]) -> None:
     username = str(profile["username"])
@@ -1718,9 +3559,9 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
         # Stack status indicator
         qs = result.get("quant_stack", {})
         if qs and "_error" not in qs:
-            st.success("Stack ✅")
+            st.success("Stack ")
         elif qs and "_error" in qs:
-            st.error("Stack ⚠️")
+            st.error("Stack ")
 
     with content_col:
         if selected == "Benchmark Analytics":
@@ -1735,6 +3576,8 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             _render_models_signals(result)
         elif selected == "News Sentiment":
             _render_news_sentiment(result)
+        elif selected == "Robustness Check":
+            _render_robustness_check(result)
         elif selected == "Backtest":
             _render_backtest(result)
         elif selected == "Run History":
@@ -1758,7 +3601,7 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     r = st.columns(7)
     r[0].metric("Open Tasks", open_tasks)
     r[1].metric("Done ✓", done_tasks)
-    r[2].metric("🔴 Critical", critical_tasks)
+    r[2].metric(" Critical", critical_tasks)
     r[3].metric("Chat Msgs", chat_count)
     r[4].metric("Vault Files", files_count)
     r[5].metric("Map Nodes", node_count)
@@ -1774,7 +3617,756 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     _render_task_manager(profile)
 
 
+# ─── Strategy & Decisions ─────────────────────────────────────────────────────
+
+_FUNDAMENTAL_FIELDS = {
+    # label: (yfinance key, format_str, description)
+    "Price":            ("currentPrice",          "{:.2f}",    "Current market price"),
+    "Market Cap (B)": ("marketCap",              "{:.2f}B",   "Market capitalisation in billions"),
+    "Sector":           ("sector",                 "{}",        "GICS sector"),
+    "Trailing P/E":     ("trailingPE",             "{:.1f}x",   "Price / trailing 12M EPS"),
+    "Forward P/E":      ("forwardPE",              "{:.1f}x",   "Price / next-12M EPS consensus"),
+    "PEG Ratio":        ("pegRatio",               "{:.2f}",    "P/E to EPS Growth (5Y) ratio"),
+    "EV/EBITDA":        ("enterpriseToEbitda",     "{:.1f}x",   "Enterprise Value / EBITDA"),
+    "EV/Revenue":       ("enterpriseToRevenue",    "{:.2f}x",   "Enterprise Value / Revenue"),
+    "Rev Growth (YoY)": ("revenueGrowth",          "{:.1%}",    "Annual revenue growth (YoY)"),
+    "Earnings Growth":  ("earningsGrowth",         "{:.1%}",    "Annual earnings growth (YoY)"),
+    "Gross Margin":     ("grossMargins",           "{:.1%}",    "Gross profit / revenue"),
+    "Op Margin":        ("operatingMargins",       "{:.1%}",    "Operating income / revenue"),
+    "Net Margin":       ("profitMargins",          "{:.1%}",    "Net income / revenue"),
+    "ROE":              ("returnOnEquity",         "{:.1%}",    "Return on equity (trailing)"),
+    "ROIC":             ("returnOnAssets",         "{:.1%}",    "Return on assets (proxy for ROIC)"),
+    "Debt/Equity":      ("debtToEquity",           "{:.2f}",    "Total debt / shareholders equity"),
+    "Free Cash Flow (B)":("freeCashflow",          "{:.2f}B",   "Trailing twelve-month free cash flow"),
+    "52W High":         ("fiftyTwoWeekHigh",       "{:.2f}",    "52-week high price"),
+    "52W Low":          ("fiftyTwoWeekLow",        "{:.2f}",    "52-week low price"),
+    "Beta":             ("beta",                   "{:.2f}",    "Market beta (5Y monthly)"),
+    "Dividend Yield":   ("dividendYield",          "{:.2%}",    "Trailing annual dividend yield"),
+    "Analyst Target":   ("targetMeanPrice",        "{:.2f}",    "Consensus analyst 12M price target"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_ticker_fundamentals(ticker: str) -> dict:
+    """
+    Fetch fundamental metrics for a single ticker via yfinance.
+    Returns a flat dict of human-readable label -> (raw_value, formatted_string).
+    Calculates CAGR (3Y and 5Y) from historical price data.
+    Falls back gracefully if the fetch fails.
+    """
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+
+        metrics: dict[str, Any] = {}
+        for label, (yf_key, fmt, desc) in _FUNDAMENTAL_FIELDS.items():
+            raw = info.get(yf_key)
+            if raw is None:
+                continue
+            try:
+                if "Cap" in label or "Cash" in label:
+                    formatted = fmt.format(float(raw) / 1e9)
+                else:
+                    formatted = fmt.format(raw)
+                metrics[label] = {"value": raw, "formatted": formatted, "desc": desc}
+            except Exception:
+                continue
+
+        # ── CAGR calculations ─────────────────────────────────────────────────
+        try:
+            hist = t.history(period="5y", interval="1mo")
+            if hist is not None and len(hist) >= 12:
+                close = hist["Close"].dropna()
+                def _cagr(series: pd.Series, years: int) -> float | None:
+                    n = years * 12
+                    if len(series) < n + 1:
+                        return None
+                    return float((series.iloc[-1] / series.iloc[-(n + 1)]) ** (1 / years) - 1)
+                for yrs in (3, 5):
+                    c = _cagr(close, yrs)
+                    if c is not None:
+                        metrics[f"Price CAGR ({yrs}Y)"] = {
+                            "value": c,
+                            "formatted": f"{c:.1%}",
+                            "desc": f"Annualised price return over {yrs} years"
+                        }
+        except Exception:
+            pass
+
+        # ── Upside to analyst target ───────────────────────────────────────────
+        price = info.get("currentPrice")
+        target = info.get("targetMeanPrice")
+        if price and target and price > 0:
+            upside = (target - price) / price
+            metrics["Upside to Target"] = {
+                "value": upside,
+                "formatted": f"{upside:.1%}",
+                "desc": "Implied upside from current price to analyst consensus target"
+            }
+
+        return metrics
+    except Exception as e:
+        return {"_error": {"value": str(e), "formatted": str(e), "desc": "Fetch failed"}}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_six_month_price_history(ticker: str) -> list[tuple[str, float]]:
+    """Return daily closing prices for the latest six months, if available."""
+    try:
+        import yfinance as yf
+        history = yf.Ticker(ticker).history(period="6mo", interval="1d")
+        if history is None or history.empty or "Close" not in history:
+            return []
+        return [
+            (date.strftime("%Y-%m-%d"), float(close))
+            for date, close in history["Close"].dropna().items()
+        ]
+    except Exception:
+        return []
+
+
+def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
+    import json
+    st.markdown("### Investment Decision Log")
+    st.caption("Chronological record of strategy decisions, including the price captured at each decision. Every team edit is marked in the price chart with that member's colour.")
+
+    # ── Form to log a new decision ────────────────────────────────────────────
+    with st.expander("Log New Decision", expanded=False):
+        with st.form("add_decision_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                ticker = st.text_input("Ticker(s)", placeholder="e.g. MSFT or MSFT, AAPL")
+            with c2:
+                action = st.selectbox("Action", ["Buy", "Sell", "Hold", "Rebalance", "Other"])
+
+            c3, c4 = st.columns(2)
+            with c3:
+                st.caption("**Client Goals — Placeholder** (will be updated with actual 2026 case study goals)")
+                tags = st.multiselect("Client Goals Addressed", ["Growth", "Income", "Risk Tolerance", "Community/Impact"])
+            with c4:
+                fetch_fundamentals = st.checkbox("Fetch live fundamentals from Yahoo Finance", value=True)
+
+            thesis = st.text_area("Investment Thesis / Rationale", height=120,
+                                  placeholder="Why are we making this decision? What is the expected outcome?")
+
+            if st.form_submit_button("Log Decision", type="primary"):
+                if not ticker or not thesis:
+                    st.warning("Ticker and Thesis are required.")
+                else:
+                    snap: dict[str, Any] = {}
+
+                    # Portfolio-level context from Quant Engine
+                    if result and "metrics" in result:
+                        m = result["metrics"]
+                        portfolio_snap: dict[str, Any] = {
+                            "Sharpe Ratio": m.get("sharpe_ratio"),
+                            "Ann. Return": m.get("annualized_return"),
+                            "Volatility": m.get("volatility"),
+                            "Max Drawdown": m.get("max_drawdown"),
+                        }
+                        # Compute CVaR-95 directly from portfolio returns
+                        port_rets = result.get("portfolio_returns")
+                        if port_rets is not None and hasattr(port_rets, "__len__") and len(port_rets) >= 30:
+                            try:
+                                from src.analytics.risk_metrics import calculate_cvar
+                                cvar_95 = calculate_cvar(pd.Series(port_rets).dropna(), confidence_level=0.95)
+                                portfolio_snap["CVaR-95 (daily)"] = float(cvar_95)
+                            except Exception:
+                                pass
+                        # Cast all values to plain Python float to avoid json.dumps
+                        # failing on numpy.float64 / numpy.float32 scalars.
+                        snap["_portfolio"] = {
+                            k: (float(v) if v is not None else None)
+                            for k, v in portfolio_snap.items()
+                        }
+
+                    # Per-ticker fundamentals
+                    if fetch_fundamentals:
+                        tickers_list = [t.strip().upper() for t in ticker.replace(",", " ").split() if t.strip()]
+                        with st.spinner(f"Fetching fundamentals for {', '.join(tickers_list)}…"):
+                            snap["_fundamentals"] = {}
+                            for t in tickers_list:
+                                snap["_fundamentals"][t] = _fetch_ticker_fundamentals(t)
+
+                    snap_json = json.dumps(snap)
+                    tags_str = ",".join(tags)
+                    with get_connection() as conn:
+                        conn.execute(
+                            "INSERT INTO decision_log (ticker, action, date, thesis, client_goal_tags, team_member, quant_snapshot_json, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (ticker.upper(), action, _now_iso(), thesis, tags_str, str(profile["username"]), snap_json, None, None),
+                        )
+                        conn.commit()
+                        if hasattr(conn, 'sync'): conn.sync()
+                    st.success(f"Decision logged with {len(snap.get('_fundamentals', {}))} ticker(s) snapshotted.")
+                    st.rerun()
+
+    # ── Load log ──────────────────────────────────────────────────────────────
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()
+        edit_rows = conn.execute("SELECT * FROM decision_edit_log ORDER BY id ASC").fetchall()
+
+    if not rows:
+        st.info("No decisions logged yet. Use the form above to log your first investment decision.")
+        return
+
+    # ── Narrative export ──────────────────────────────────────────────────────
+    st.markdown("#### Strategy Narrative Export")
+
+    _METRIC_GROUPS = {
+        "Valuation":  ["Trailing P/E", "Forward P/E", "PEG Ratio", "EV/EBITDA", "EV/Revenue"],
+        "Growth":     ["Rev Growth (YoY)", "Earnings Growth", "Price CAGR (3Y)", "Price CAGR (5Y)"],
+        "Profitability": ["Gross Margin", "Op Margin", "Net Margin", "ROE", "ROIC", "Free Cash Flow (B)"],
+        "Risk":       ["Beta", "Debt/Equity", "52W High", "52W Low"],
+        "Analyst":    ["Analyst Target", "Upside to Target"],
+    }
+
+    report_lines = ["# Investment Strategy & Decision Narrative\n",
+                    f"> Generated: {_now_iso()}\n"]
+    for r in reversed(rows):
+        report_lines.append(f"## {r['date'][:10]} — {r['action']} {r['ticker']}")
+        report_lines.append(f"**Team Member**: {r['team_member']}  |  **Client Goals**: {r['client_goal_tags'] or '—'}")
+        report_lines.append(f"\n**Investment Thesis**:\n> {r['thesis']}\n")
+        if r['quant_snapshot_json']:
+            try:
+                snap = json.loads(r['quant_snapshot_json'])
+                if '_portfolio' in snap:
+                    p = snap['_portfolio']
+                    report_lines.append('**Portfolio Context at Decision Date:**')
+                    for k, v in p.items():
+                        if v is not None:
+                            try:
+                                report_lines.append(f'- {k}: {float(v):.3f}')
+                            except Exception:
+                                report_lines.append(f'- {k}: {v}')
+                    report_lines.append('')
+                if '_fundamentals' in snap:
+                    for tkr, mets in snap['_fundamentals'].items():
+                        report_lines.append(f'**{tkr} Fundamentals at Decision Date:**')
+                        if '_error' in mets:
+                            report_lines.append(f"- Fetch failed: {mets['_error']['formatted']}")
+                        else:
+                            for group, labels in _METRIC_GROUPS.items():
+                                group_lines = [f"  - {lbl}: {mets[lbl]['formatted']}" for lbl in labels if lbl in mets]
+                                if group_lines:
+                                    report_lines.append(f'  *{group}*')
+                                    report_lines.extend(group_lines)
+                        report_lines.append('')
+            except Exception:
+                pass
+        report_lines.append('---\n')
+
+    report_md = '\n'.join(report_lines)
+    st.download_button('Download Strategy Narrative (Markdown)', data=report_md,
+                       file_name='strategy_narrative.md', mime='text/markdown')
+
+    # -- Decision timeline table
+    st.markdown('#### Decision Timeline')
+    df_data = []
+    for r in rows:
+        snap = {}
+        try:
+            snap = json.loads(r['quant_snapshot_json'] or '{}')
+        except Exception:
+            pass
+        funds = snap.get('_fundamentals', {})
+        first_tkr_metrics = next(iter(funds.values()), {}) if funds else {}
+        edited_by = r['updated_by'] if r['updated_by'] else ''
+        row_dict = {
+            'Date': r['date'][:16],
+            'Action': r['action'],
+            'Ticker(s)': r['ticker'],
+            'Goals': r['client_goal_tags'],
+            'Author': r['team_member'],
+            'Last edit': edited_by or '—',
+        }
+        for label in ('Price', 'Forward P/E', 'PEG Ratio', 'Price CAGR (3Y)', 'EV/EBITDA', 'Upside to Target'):
+            row_dict[label] = first_tkr_metrics.get(label, {}).get('formatted', '—')
+        preview = str(r['thesis'])[:80]
+        row_dict['Thesis (preview)'] = preview + ('…' if len(str(r['thesis'])) > 80 else '')
+        df_data.append(row_dict)
+    st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+
+    # -- Price at each decision, with a persistent colour for each team editor
+    st.markdown('#### Price at Decision & Team Edit History')
+    st.caption('The curve shows the latest six months of daily prices. Circles mark the price captured at each decision; diamonds show subsequent edits in the editor’s colour.')
+    try:
+        import plotly.graph_objects as go
+
+        price_points: dict[str, list[dict[str, Any]]] = {}
+        for r in reversed(rows):
+            try:
+                snapshot = json.loads(r['quant_snapshot_json'] or '{}')
+            except Exception:
+                snapshot = {}
+            for tkr, metrics in snapshot.get('_fundamentals', {}).items():
+                price_data = metrics.get('Price', {})
+                try:
+                    price = float(price_data['value'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                price_points.setdefault(tkr, []).append({
+                    'id': int(r['id']), 'date': str(r['date']), 'price': price,
+                    'action': str(r['action']), 'author': str(r['team_member']),
+                })
+
+        # Older records only retained their latest editor. Show that edit too,
+        # without duplicating an event already stored in the audit table.
+        recorded_decision_ids = {int(event['decision_id']) for event in edit_rows}
+        chart_edits = [dict(event) for event in edit_rows]
+        for r in rows:
+            if r['updated_by'] and int(r['id']) not in recorded_decision_ids:
+                chart_edits.append({
+                    'decision_id': int(r['id']), 'ticker': str(r['ticker']),
+                    'edited_at': str(r['updated_at'] or r['date']),
+                    'edited_by': str(r['updated_by']),
+                })
+
+        editor_names = sorted({str(event['edited_by']) for event in chart_edits if event['edited_by']})
+        editor_palette = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#4f46e5']
+        editor_colours = {
+            name: editor_palette[index % len(editor_palette)]
+            for index, name in enumerate(editor_names)
+        }
+
+        chart_count = 0
+        for tkr, points in price_points.items():
+            fig = go.Figure()
+            history = _fetch_six_month_price_history(tkr)
+            if history:
+                period_start = history[0][0]
+                points = [point for point in points if point['date'][:10] >= period_start]
+                fig.add_trace(go.Scatter(
+                    x=[date for date, _ in history],
+                    y=[close for _, close in history],
+                    mode='lines',
+                    name='6-month price curve',
+                    line=dict(width=2, color='#64748b'),
+                    hovertemplate='%{x}<br>Close: $%{y:,.2f}<extra></extra>',
+                ))
+            fig.add_trace(go.Scatter(
+                x=[point['date'] for point in points],
+                y=[point['price'] for point in points],
+                mode='markers',
+                name='Decision price',
+                marker=dict(size=10, color='#f8fafc', line=dict(width=2, color='#475569')),
+                customdata=[[point['action'], point['author']] for point in points],
+                hovertemplate='%{x}<br>Price: $%{y:,.2f}<br>%{customdata[0]} by %{customdata[1]}<extra></extra>',
+            ))
+            points_by_id = {point['id']: point for point in points}
+            for editor in editor_names:
+                edited_points = [
+                    (event, points_by_id.get(int(event['decision_id'])))
+                    for event in chart_edits if str(event['edited_by']) == editor
+                ]
+                edited_points = [(event, point) for event, point in edited_points if point]
+                if not edited_points:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=[point['date'] for _, point in edited_points],
+                    y=[point['price'] for _, point in edited_points],
+                    mode='markers',
+                    name=f'Edited by {editor}',
+                    marker=dict(size=13, symbol='diamond', color=editor_colours[editor],
+                                line=dict(width=1, color='#ffffff')),
+                    customdata=[[str(event['edited_at']), point['action']] for event, point in edited_points],
+                    hovertemplate=(
+                        f'Edited by {editor}<br>%{{customdata[0]}}<br>'
+                        'Decision: %{customdata[1]}<br>Price: $%{y:,.2f}<extra></extra>'
+                    ),
+                ))
+            fig.update_layout(
+                title=f'{tkr} — six-month price curve and decisions',
+                height=310, margin=dict(l=20, r=20, t=45, b=25),
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)', yaxis_title='Price (USD)',
+                legend_title_text='Team edit markers',
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            chart_count += 1
+        if not chart_count:
+            st.info('Price charts appear once a decision is logged with live fundamentals enabled.')
+    except ImportError:
+        st.info('Install plotly to see the price and edit history charts.')
+
+    # -- Per-decision metric detail cards
+    st.markdown('#### Decision Detail & Metrics')
+    for r in rows:
+        snap = {}
+        try:
+            snap = json.loads(r['quant_snapshot_json'] or '{}')
+        except Exception:
+            pass
+        funds = snap.get('_fundamentals', {})
+        action_color = {'Buy': '#10b981', 'Sell': '#ef4444', 'Hold': '#f59e0b',
+                        'Rebalance': '#6366f1', 'Other': '#64748b'}.get(str(r['action']), '#64748b')
+        exp_label = f"{r['date'][:10]}  |  {r['action']} {r['ticker']}  |  {r['team_member']}"
+        with st.expander(exp_label, expanded=False):
+            updated_by = str(r['updated_by'] or '')
+            was_edited_by_teammate = bool(updated_by and updated_by != str(r['team_member']))
+            if was_edited_by_teammate:
+                st.markdown(
+                    f"<div style='background:#f3e8ff;color:#6b21a8;border-left:4px solid #9333ea;"
+                    f"padding:0.55rem 0.75rem;border-radius:4px;margin-bottom:0.75rem;font-weight:600'>"
+                    f"Edited by {escape(updated_by)} on {escape(str(r['updated_at'] or 'an unknown date'))}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            elif updated_by:
+                st.caption(f"Last updated by {updated_by} on {r['updated_at']}")
+            st.markdown(
+                f"<span style='background:{action_color};color:#fff;padding:2px 10px;"
+                f"border-radius:4px;font-weight:700'>{r['action']}</span>  "
+                f"<span style='color:#94a3b8'>Goals: {r['client_goal_tags'] or '—'}</span>",
+                unsafe_allow_html=True
+            )
+            thesis_style = "color:#6b21a8;background:#faf5ff;padding:0.75rem;border-radius:4px;" if was_edited_by_teammate else ""
+            st.markdown(
+                f"<p><strong>Thesis:</strong></p><div style='{thesis_style}'>{escape(str(r['thesis']))}</div>",
+                unsafe_allow_html=True,
+            )
+            # This is intentionally a container rather than a nested expander:
+            # Streamlit does not support expanders inside expanders.
+            with st.container():
+                st.markdown("**Edit this decision**")
+                allowed_actions = ["Buy", "Sell", "Hold", "Rebalance", "Other"]
+                current_action = str(r['action'])
+                action_index = allowed_actions.index(current_action) if current_action in allowed_actions else len(allowed_actions) - 1
+                current_tags = [tag for tag in str(r['client_goal_tags'] or '').split(',') if tag]
+                with st.form(f"edit_decision_{r['id']}"):
+                    edit_ticker = st.text_input("Ticker(s)", value=str(r['ticker']), key=f"decision_ticker_{r['id']}")
+                    edit_action = st.selectbox("Action", allowed_actions, index=action_index, key=f"decision_action_{r['id']}")
+                    edit_tags = st.multiselect(
+                        "Client Goals Addressed",
+                        ["Growth", "Income", "Risk Tolerance", "Community/Impact"],
+                        default=[tag for tag in current_tags if tag in {"Growth", "Income", "Risk Tolerance", "Community/Impact"}],
+                        key=f"decision_tags_{r['id']}",
+                    )
+                    edit_thesis = st.text_area("Investment Thesis / Rationale", value=str(r['thesis']), height=150, key=f"decision_thesis_{r['id']}")
+                    if st.form_submit_button("Save team edit", type="primary"):
+                        if not edit_ticker.strip() or not edit_thesis.strip():
+                            st.warning("Ticker and Thesis are required.")
+                        else:
+                            edited_at = _now_iso()
+                            with get_connection() as conn:
+                                conn.execute(
+                                    "UPDATE decision_log SET ticker = ?, action = ?, thesis = ?, client_goal_tags = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                                    (
+                                        edit_ticker.strip().upper(), edit_action, edit_thesis.strip(), ",".join(edit_tags),
+                                        edited_at, str(profile["username"]), r['id'],
+                                    ),
+                                )
+                                conn.execute(
+                                    "INSERT INTO decision_edit_log (decision_id, ticker, edited_at, edited_by) VALUES (?, ?, ?, ?)",
+                                    (r['id'], edit_ticker.strip().upper(), edited_at, str(profile["username"])),
+                                )
+                                conn.commit()
+                                if hasattr(conn, 'sync'):
+                                    conn.sync()
+                            st.success("Decision updated. Its edit marker now appears in the price chart using this team member's colour.")
+                            st.rerun()
+            if funds:
+                for tkr, mets in funds.items():
+                    st.markdown(f'**{tkr} — Fundamentals at Decision Date**')
+                    if '_error' in mets:
+                        st.warning(f"Could not fetch data: {mets['_error']['formatted']}")
+                        continue
+                    for group_name, labels in _METRIC_GROUPS.items():
+                        group_mets = {lbl: mets[lbl] for lbl in labels if lbl in mets}
+                        if not group_mets:
+                            continue
+                        st.caption(group_name)
+                        cols = st.columns(min(len(group_mets), 5))
+                        for col, (lbl, m_data) in zip(cols, group_mets.items()):
+                            col.metric(lbl, m_data['formatted'], help=m_data.get('desc', ''))
+            if '_portfolio' in snap:
+                st.caption('Portfolio Context')
+                p = snap['_portfolio']
+                pcols = st.columns(3)
+                for col, (k, v) in zip(pcols, {kk: vv for kk, vv in p.items() if vv is not None}.items()):
+                    try:
+                        col.metric(k, f'{float(v):.3f}')
+                    except Exception:
+                        col.metric(k, str(v))
+
+    # -- Time-series: Key metrics evolution
+    st.markdown('#### Metric Evolution Over Decisions')
+    st.caption('Tracks how key valuation metrics changed across logged decisions for the same ticker.')
+    try:
+        import plotly.graph_objects as go
+        TRACKED = ['Forward P/E', 'PEG Ratio', 'Price CAGR (3Y)', 'EV/EBITDA', 'Upside to Target']
+        ticker_series: dict[str, dict] = {}
+        for r in reversed(rows):
+            snap = {}
+            try:
+                snap = json.loads(r['quant_snapshot_json'] or '{}')
+            except Exception:
+                pass
+            for tkr, mets in snap.get('_fundamentals', {}).items():
+                if tkr not in ticker_series:
+                    ticker_series[tkr] = {m: ([], []) for m in TRACKED}
+                for m in TRACKED:
+                    if m in mets and '_error' not in mets:
+                        try:
+                            ticker_series[tkr][m][0].append(r['date'][:10])
+                            ticker_series[tkr][m][1].append(float(mets[m]['value']))
+                        except Exception:
+                            pass
+        any_chart = False
+        for tkr, metrics_data in ticker_series.items():
+            for metric, (dates, values) in metrics_data.items():
+                if len(dates) >= 2:
+                    if not any_chart:
+                        st.info('Showing metric history for tickers with ≥2 logged decisions.')
+                    any_chart = True
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=dates, y=values, mode='lines+markers',
+                                             line=dict(width=2, color='#6366f1'),
+                                             marker=dict(size=8)))
+                    fig.update_layout(title=f'{tkr} — {metric} over time', height=280,
+                                      margin=dict(l=20, r=20, t=40, b=20), template='plotly_dark',
+                                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig, use_container_width=True)
+        if not any_chart:
+            st.info('Log the same ticker at least twice to see metric evolution charts.')
+    except ImportError:
+        st.info('Install plotly to see metric evolution charts.')
+
+    # -- Client-Goal Alignment Matrix
+    st.markdown('#### Client-Goal Alignment Matrix')
+    st.caption('Placeholder goals — will be updated with actual 2026 Wharton case study objectives.')
+    matrix_data: dict[str, dict] = {}
+    for r in rows:
+        t = r['ticker']
+        if t not in matrix_data:
+            matrix_data[t] = {'Growth': '', 'Income': '', 'Risk Tolerance': '', 'Community/Impact': ''}
+        for tag in str(r['client_goal_tags']).split(','):
+            tag = tag.strip()
+            if tag in matrix_data[t]:
+                matrix_data[t][tag] = '✓'
+    if matrix_data:
+        matrix_df = pd.DataFrame.from_dict(matrix_data, orient='index').reset_index()
+        matrix_df = matrix_df.rename(columns={'index': 'Ticker'})
+        st.dataframe(matrix_df, use_container_width=True, hide_index=True)
+    else:
+        st.info('Add client goals to decisions to populate the matrix.')
+
 # ─── Header / Shell ───────────────────────────────────────────────────────────
+
+def _fetch_competition_settings() -> dict[str, Any]:
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM competition_compliance WHERE id = 1").fetchone()
+    return dict(row) if row else {}
+
+
+def _fetch_competition_positions() -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM competition_positions ORDER BY entry_date, id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def _render_competition_rules(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.wharton_competition import COMPETITION_URL, OFFICIAL_RULES_URL, evaluate_compliance
+
+    st.markdown("### Zadání a pravidla — Wharton 2026–2027")
+    st.caption("Kontrola používá pouze aktuálně zveřejněná oficiální pravidla. U každého nesplnění uvádí přesný důvod.")
+    source_col, overview_col = st.columns(2)
+    source_col.link_button("Oficiální pravidla 2026–2027", OFFICIAL_RULES_URL, use_container_width=True)
+    overview_col.link_button("Oficiální přehled soutěže", COMPETITION_URL, use_container_width=True)
+    st.info(
+        "**Aktuálně zveřejněné zadání:** během 10 týdnů vytvořit pro klienta dlouhodobou investiční "
+        "strategii a spravovat 500 000 USD virtuálního kapitálu ve WInS. Hodnotí se síla a "
+        "vysvětlení strategie, ne pouze nejvyšší výnos."
+    )
+    st.warning(
+        "Wharton zatím u obchodních pravidel 2026–2027 uvádí „More information coming soon“. "
+        "Nové zadání klienta a podrobné deliverables rovněž ještě nejsou zveřejněné. Tyto kontroly "
+        "proto zůstávají žluté, místo aby se použila zastaralá pravidla."
+    )
+
+    current = _fetch_competition_settings()
+    st.markdown("#### Týmové prohlášení")
+    with st.form("competition_compliance_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            team_size = st.number_input("Počet aktivních studentů", 0, 20, int(current.get("team_size") or 0))
+            leader_age = st.number_input("Věk vedoucího týmu na začátku", 0, 25, int(current.get("leader_age") or 0))
+            advisor_team_count = st.number_input("Kolik týmů vede hlavní advisor", 0, 50, int(current.get("advisor_team_count") or 0))
+        with c2:
+            same_school = st.checkbox("Všichni jsou ze stejné školy a pobočky", value=bool(current.get("same_school")))
+            eligible_students = st.checkbox("Všichni splňují věk, status studenta a nemají ukončenou střední školu", value=bool(current.get("eligible_students")))
+            leader_designated = st.checkbox("Je určen právě jeden student leader", value=bool(current.get("leader_designated")))
+            advisor_is_teacher = st.checkbox("Hlavní advisor je učitel této školy", value=bool(current.get("advisor_is_teacher")))
+            one_wins_account = st.checkbox("Tým používá jeden sdílený WInS účet", value=bool(current.get("one_wins_account")))
+            members_single_team = st.checkbox("Žádný student není v jiném soutěžním týmu", value=bool(current.get("members_single_team")))
+        with c3:
+            no_client_contact = st.checkbox("Tým nekontaktoval soutěžního klienta", value=bool(current.get("no_client_contact")))
+            no_paid_advisor = st.checkbox("Bez placeného advisora, konzultanta či zakázaného kurzu", value=bool(current.get("no_paid_advisor")))
+            student_owned_work = st.checkbox("Strategii a rozhodnutí vytvořili studenti", value=bool(current.get("student_owned_work")))
+            ai_cited = st.checkbox("AI obsah je citován a není vydáván za vlastní práci", value=bool(current.get("ai_cited")))
+            sources_cited = st.checkbox("Všechny zdroje, obrázky a média jsou citovány", value=bool(current.get("sources_cited")))
+            school_permission = st.checkbox("Je připraven souhlas školy na oficiálním hlavičkovém papíře", value=bool(current.get("school_permission")))
+        save_rules = st.form_submit_button("Uložit a přepočítat kontrolu", type="primary", use_container_width=True)
+
+    if save_rules:
+        payload = {
+            "team_size": int(team_size), "leader_age": int(leader_age), "advisor_team_count": int(advisor_team_count),
+            "same_school": int(same_school), "eligible_students": int(eligible_students),
+            "leader_designated": int(leader_designated), "advisor_is_teacher": int(advisor_is_teacher),
+            "one_wins_account": int(one_wins_account), "members_single_team": int(members_single_team),
+            "no_client_contact": int(no_client_contact), "no_paid_advisor": int(no_paid_advisor),
+            "student_owned_work": int(student_owned_work), "ai_cited": int(ai_cited),
+            "sources_cited": int(sources_cited), "school_permission": int(school_permission),
+        }
+        fields = list(payload)
+        assignments = ", ".join(f"{field} = excluded.{field}" for field in fields)
+        with get_connection() as conn:
+            conn.execute(
+                f"INSERT INTO competition_compliance (id, {', '.join(fields)}, updated_at, updated_by) "
+                f"VALUES (1, {', '.join(['?'] * len(fields))}, ?, ?) "
+                f"ON CONFLICT(id) DO UPDATE SET {assignments}, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                (*[payload[field] for field in fields], _now_iso(), str(profile["username"])),
+            )
+            conn.commit()
+            if hasattr(conn, "sync"):
+                conn.sync()
+        st.success(f"Kontrolu aktualizoval(a) {profile['username']}.")
+        current = payload
+
+    checks = evaluate_compliance(current, _fetch_competition_positions())
+    passed = sum(item["status"] == "pass" for item in checks)
+    failed = sum(item["status"] == "fail" for item in checks)
+    pending = sum(item["status"] == "pending" for item in checks)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("✅ Splněno", passed)
+    k2.metric("❌ Nesplněno", failed)
+    k3.metric("🟡 Čeká na Wharton", pending)
+    status_map = {"pass": "✅", "fail": "❌", "pending": "🟡"}
+    st.dataframe(pd.DataFrame([
+        {"Stav": status_map[item["status"]], "Pravidlo": item["rule"], "Přesný výsledek kontroly": item["detail"]}
+        for item in checks
+    ]), use_container_width=True, hide_index=True)
+    if failed:
+        st.error(f"Tým nebo portfolio nyní nesplňuje {failed} kontrolovaných pravidel. Přesné důvody jsou uvedené výše.")
+    elif pending:
+        st.warning("Všechna zveřejněná kontrolovatelná pravidla jsou splněna; čeká se na další oficiální materiály.")
+    else:
+        st.success("Všechna kontrolovaná pravidla jsou splněna.")
+
+
+def _competition_live_prices(tickers: list[str]) -> dict[str, float]:
+    if not tickers:
+        return {}
+    try:
+        end_date = date.today() + timedelta(days=1)
+        prices = _fetch_close_prices_cached(tuple(sorted(set(tickers))), end_date - timedelta(days=10), end_date)
+        result: dict[str, float] = {}
+        for ticker in tickers:
+            if ticker in prices.columns:
+                clean = pd.Series(prices[ticker]).dropna()
+                if not clean.empty:
+                    result[ticker] = float(clean.iloc[-1])
+        return result
+    except Exception:
+        return {}
+
+
+def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
+
+    st.markdown("### Portfolio tracker — Wharton 2026–2027")
+    st.caption("Výnos se počítá od 500 000 USD. Každá pozice uchovává autora, datum a cenu vstupu i výsledek.")
+    with st.expander("Přidat novou pozici", expanded=False):
+        with st.form("competition_add_position", clear_on_submit=True):
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                ticker = st.text_input("Ticker", placeholder="např. MSFT")
+                security_type = st.selectbox("Typ", ["Stock", "ETF", "Bond", "Other"])
+            with p2:
+                quantity = st.number_input("Počet kusů", min_value=0.0, value=0.0, step=1.0)
+                entry_price = st.number_input("Vstupní cena za kus (USD)", min_value=0.0, value=0.0, step=0.01)
+            with p3:
+                entry_date = st.date_input("Datum otevření", value=date.today())
+                manual_price = st.number_input("Aktuální cena (volitelné)", min_value=0.0, value=0.0, step=0.01)
+            notes = st.text_area("Poznámka / investiční teze", height=80)
+            add_position = st.form_submit_button("Přidat pozici", type="primary", use_container_width=True)
+        if add_position:
+            clean_ticker = ticker.strip().upper()
+            if not clean_ticker or quantity <= 0 or entry_price <= 0:
+                st.error("Ticker, počet kusů a vstupní cena musí být vyplněné a kladné.")
+            else:
+                with get_connection() as conn:
+                    conn.execute(
+                        "INSERT INTO competition_positions (ticker, security_type, quantity, entry_price, entry_date, opened_by, opened_at, last_price, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+                        (clean_ticker, security_type, float(quantity), float(entry_price), entry_date.isoformat(), str(profile["username"]), _now_iso(), float(manual_price) if manual_price > 0 else None, notes.strip()),
+                    )
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                st.success(f"Pozici {clean_ticker} založil(a) {profile['username']}.")
+                st.rerun()
+
+    positions = _fetch_competition_positions()
+    open_tickers = [str(row["ticker"]).upper() for row in positions if row["status"] == "open"]
+    live_prices = _competition_live_prices(open_tickers)
+    performance = calculate_portfolio_performance(positions, live_prices)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Hodnota portfolia", f"${performance['equity']:,.2f}")
+    m2.metric("Celkové zhodnocení od začátku", f"{performance['total_return_pct']:+.2f}%", f"${performance['total_pnl']:+,.2f}")
+    m3.metric("Nerealizovaný P/L", f"${performance['unrealized_pnl']:+,.2f}")
+    m4.metric("Realizovaný P/L", f"${performance['realized_pnl']:+,.2f}")
+    st.caption(
+        f"Počáteční kapitál: ${INITIAL_CAPITAL_USD:,.0f} · Neinvestovaná hotovost před P/L: "
+        f"${performance['cash_before_pnl']:,.2f} · Živé ceny: {len(live_prices)}/{len(set(open_tickers))} tickerů."
+    )
+    if not performance["positions"]:
+        st.info("Zatím není zadaná žádná pozice.")
+        return
+
+    st.dataframe(pd.DataFrame([{
+        "Stav": "Otevřená" if row["status"] == "open" else "Uzavřená", "Ticker": row["ticker"],
+        "Typ": row["security_type"], "Kusy": row["quantity"], "Vstup": f"${row['entry_price']:,.2f}",
+        "Aktuální / výstup": f"${row['current_price']:,.2f}", "Zhodnocení pozice": f"{row['return_pct']:+.2f}%",
+        "P/L": f"${row['pnl']:+,.2f}", "Pozici založil(a)": row["opened_by"], "Datum": row["entry_date"],
+        "Zdroj ceny": row["price_source"],
+    } for row in performance["positions"]]), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Správa otevřených pozic")
+    for row in performance["positions"]:
+        if row["status"] != "open":
+            continue
+        with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · založil(a) {row['opened_by']}"):
+            st.write(row.get("notes") or "Bez poznámky.")
+            update_col, close_col = st.columns(2)
+            with update_col:
+                with st.form(f"competition_update_price_{row['id']}"):
+                    new_price = st.number_input("Ruční aktuální cena", min_value=0.0, value=float(row["current_price"]), step=0.01, key=f"competition_price_{row['id']}")
+                    if st.form_submit_button("Uložit ruční cenu", use_container_width=True):
+                        with get_connection() as conn:
+                            conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
+                            conn.commit()
+                            if hasattr(conn, "sync"):
+                                conn.sync()
+                        st.rerun()
+            with close_col:
+                with st.form(f"competition_close_{row['id']}"):
+                    exit_price = st.number_input("Výstupní cena", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
+                    exit_date = st.date_input("Datum uzavření", value=date.today(), key=f"competition_exit_date_{row['id']}")
+                    if st.form_submit_button("Uzavřít pozici", type="primary", use_container_width=True):
+                        with get_connection() as conn:
+                            conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
+                            conn.commit()
+                            if hasattr(conn, "sync"):
+                                conn.sync()
+                        st.rerun()
+            if st.button("Smazat chybně zadanou pozici", key=f"competition_delete_{row['id']}"):
+                with get_connection() as conn:
+                    conn.execute("DELETE FROM competition_positions WHERE id = ?", (int(row["id"]),))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                st.rerun()
+
 
 def _render_header(profile: dict[str, str | int]) -> None:
     username = escape(str(profile["username"]))
@@ -1785,13 +4377,13 @@ def _render_header(profile: dict[str, str | int]) -> None:
           <h1>Wharton Cockpit</h1>
           <p>Production command center · Strategy · Quant · Research · Team</p>
           <div class="wharton-badge-row">
-            <span class="wharton-badge">👤 {username}</span>
-            <span class="wharton-badge">🎯 {role}</span>
-            <span class="wharton-badge">⚡ {pm}</span>
+            <span class="wharton-badge"> {username}</span>
+            <span class="wharton-badge"> {role}</span>
+            <span class="wharton-badge"> {pm}</span>
           </div>
         </div>
     """, unsafe_allow_html=True)
-    if st.sidebar.button("🚪 Logout", use_container_width=True):
+    if st.sidebar.button(" Logout", use_container_width=True):
         _logout()
 
 
@@ -1807,25 +4399,64 @@ def render_wharton_cockpit() -> None:
     _render_header(profile)
     tabs = st.tabs([
         "Overview & Tasks",
+        "Strategy & Decisions",
+        "Quant Engine",
+        "Stock Screener",
+        "Risk Cockpit",
+        "Factor Exposure",
+        "Regime Detection",
+        "Scenario Playground",
+        "Efficient Frontier",
+        "Monte Carlo",
+        "Advanced Monte Carlo",
+        "Advanced Analytics",
         "Mind Map",
         "Sub-Projects",
-        "Quant Engine",
         "War Room",
         "File Vault",
+        "Zadání a pravidla",
+        "Portfolio tracker",
     ])
+
+    # Fetch result from state if available
+    result = st.session_state.get(QUANT_RESULT_KEY, {})
 
     with tabs[0]:
         _render_overview_action_center(profile)
     with tabs[1]:
-        _render_mindmap()
+        _render_decision_log(profile, result)
     with tabs[2]:
-        _render_subprojects(profile)
-    with tabs[3]:
         _render_quant_engine(profile)
+    with tabs[3]:
+        _render_stock_screener()
     with tabs[4]:
-        _render_chat(profile)
+        _render_risk_cockpit(result)
     with tabs[5]:
+        _render_factor_exposure(result)
+    with tabs[6]:
+        _render_regime_detection(result)
+    with tabs[7]:
+        _render_scenario_playground(result)
+    with tabs[8]:
+        _render_efficient_frontier(result)
+    with tabs[9]:
+        _render_monte_carlo(result)
+    with tabs[10]:
+        _render_advanced_monte_carlo(result)
+    with tabs[11]:
+        _render_advanced_analytics(result)
+    with tabs[12]:
+        _render_mindmap()
+    with tabs[13]:
+        _render_subprojects(profile)
+    with tabs[14]:
+        _render_chat(profile)
+    with tabs[15]:
         _render_file_center(profile)
+    with tabs[15]:
+        _render_competition_rules(profile)
+    with tabs[16]:
+        _render_competition_portfolio(profile)
 
 
 def main() -> None:

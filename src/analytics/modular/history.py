@@ -51,23 +51,52 @@ def ensure_history_dir(base_dir: str | Path | None = None, user_id: int | None =
     return path
 
 
-def save_run_record(record: RunRecord, base_dir: str | Path = "data/run_history") -> Path:
-    history_dir = ensure_history_dir(base_dir)
-    target = history_dir / f"{record.run_id}.json"
-    target.write_text(json.dumps(record.to_dict(), indent=2, default=_json_default), encoding="utf-8")
-    return target
+def save_run_record(record: RunRecord, base_dir: str | Path = "data/run_history", user_id: int | None = None) -> Path | str:
+    content = json.dumps(record.to_dict(), indent=2, default=_json_default)
+    if user_id is not None:
+        from src.auth.database import save_user_data
+        file_name = f"{record.run_id}.json"
+        save_user_data(user_id, "run_history", file_name, content)
+        return f"db://user_{user_id}/run_history/{file_name}"
+    else:
+        history_dir = ensure_history_dir(base_dir)
+        target = history_dir / f"{record.run_id}.json"
+        target.write_text(content, encoding="utf-8")
+        return target
 
 
-def load_run_record(run_id: str, base_dir: str | Path = "data/run_history") -> Dict[str, Any]:
-    path = ensure_history_dir(base_dir) / f"{run_id}.json"
-    if not path.exists():
-        raise FileNotFoundError(f"Run id not found: {run_id}")
-    return json.loads(path.read_text(encoding="utf-8"))
+def load_run_record(run_id: str, base_dir: str | Path = "data/run_history", user_id: int | None = None) -> Dict[str, Any]:
+    if user_id is not None:
+        from src.auth.database import load_user_data
+        content = load_user_data(user_id, "run_history", f"{run_id}.json")
+        if content:
+            return json.loads(content)
+        raise FileNotFoundError(f"Run id not found in DB: {run_id}")
+    else:
+        path = ensure_history_dir(base_dir) / f"{run_id}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Run id not found: {run_id}")
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
-def list_run_records(base_dir: str | Path = "data/run_history", limit: int = 50) -> List[Dict[str, Any]]:
-    history_dir = ensure_history_dir(base_dir)
+def list_run_records(base_dir: str | Path = "data/run_history", limit: int = 50, user_id: int | None = None) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    
+    if user_id is not None:
+        from src.auth.database import list_user_data, load_user_data
+        file_names = sorted(list_user_data(user_id, "run_history"), reverse=True)
+        for fname in file_names:
+            content = load_user_data(user_id, "run_history", fname)
+            if content:
+                try:
+                    rows.append(json.loads(content))
+                except Exception:
+                    continue
+            if len(rows) >= max(1, int(limit)):
+                break
+        return rows
+
+    history_dir = ensure_history_dir(base_dir)
     for file in sorted(history_dir.glob("*.json"), reverse=True):
         try:
             rows.append(json.loads(file.read_text(encoding="utf-8")))

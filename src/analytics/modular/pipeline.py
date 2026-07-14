@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -20,6 +20,7 @@ def run_quant_stack(
     returns_df: pd.DataFrame,
     config: Dict[str, Any],
     history_dir: str = "data/run_history",
+    user_id: int | None = None,
 ) -> Dict[str, Any]:
     context = {
         "returns_df": returns_df,
@@ -42,8 +43,9 @@ def run_quant_stack(
 
     start_date = config.get("start_date")
     end_date = config.get("end_date")
-    start_dt = datetime.combine(start_date, datetime.min.time()) if hasattr(start_date, "year") else datetime.utcnow()
-    end_dt = datetime.combine(end_date, datetime.min.time()) if hasattr(end_date, "year") else datetime.utcnow()
+    utc_now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    start_dt = datetime.combine(start_date, datetime.min.time()) if hasattr(start_date, "year") else utc_now_naive
+    end_dt = datetime.combine(end_date, datetime.min.time()) if hasattr(end_date, "year") else utc_now_naive
 
     news_context = {
         "tickers": config.get("tickers", []),
@@ -68,10 +70,10 @@ def run_quant_stack(
             "news_relevance_coverage": float(news.context.get("relevance_coverage", 0.0)),
         },
     )
-    prior_run = next(iter(list_run_records(base_dir=history_dir, limit=1)), None)
+    prior_run = next(iter(list_run_records(base_dir=history_dir, limit=1, user_id=user_id)), None)
     summary = build_summary(models, signals, news=news, backtest=backtest, prior_run=prior_run)
 
-    run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+    run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
     backtest_metrics = {
         f"backtest_{key}": value for key, value in backtest.get("metrics", {}).items()
     }
@@ -111,7 +113,7 @@ def run_quant_stack(
             "fetch_errors": list(news.context.get("fetch_errors", [])),
         },
     )
-    history_path = save_run_record(record, base_dir=history_dir)
+    history_path = save_run_record(record, base_dir=history_dir, user_id=user_id)
 
     return {
         "models": models,

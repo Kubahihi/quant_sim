@@ -14,9 +14,11 @@ import os
 import sqlite3
 import uuid
 
-from .backend import StorageBackend, LocalStorageBackend
+from .backend import StorageBackend, LocalStorageBackend, StorageLimits
 from .file_manager import FileManager
+from .exceptions import FileNotFound as BackendFileNotFound
 from .exceptions import FileValidationError, StorageFileNotFoundError
+from src.auth.database import get_db_connection
 
 
 # Default configuration
@@ -27,7 +29,7 @@ ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif",
     ".pptx", ".ppt", ".json", ".py", ".ipynb", ".zip",
 }
-MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_MB = StorageLimits.MAX_FILE_SIZE_MB
 
 
 def get_storage_backend(storage_path: Optional[str] = None) -> StorageBackend:
@@ -45,7 +47,7 @@ def get_storage_backend(storage_path: Optional[str] = None) -> StorageBackend:
     except Exception as e:
         try:
             import streamlit as st
-            st.warning(f"⚠️ R2 storage init failed ({e}), using local storage. Files will not persist.")
+            st.warning(f" R2 storage init failed ({e}), using local storage. Files will not persist.")
         except Exception:
             pass
 
@@ -98,10 +100,28 @@ def init_storage_db(db_path: Optional[str] = None) -> None:
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
+
+    # The adapter is also a public entry point, so it must work even when the
+    # dashboard's broader schema initialization has not run first.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            filename TEXT,
+            original_filename TEXT,
+            uploaded_by TEXT,
+            file_path TEXT,
+            file_size_bytes INTEGER DEFAULT 0,
+            mime_type TEXT DEFAULT '',
+            project_name TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            tags TEXT DEFAULT ''
+        )
+    """)
     
     # Get existing columns
     existing_cols = {
@@ -179,8 +199,8 @@ def save_uploaded_file(
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     
-    # Get file content
-    file_bytes = uploaded_file.getbuffer()
+    # Get file content as bytes (boto3 rejects memoryview from getbuffer)
+    file_bytes = uploaded_file.getvalue()
     original_filename = str(uploaded_file.name)
     
     # Validate file
@@ -208,7 +228,7 @@ def save_uploaded_file(
     stored_filename = original_filename
     
     # Save metadata to database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     try:
         # Get existing columns
         existing_cols = {
@@ -293,7 +313,7 @@ def download_file(
         db_path = DEFAULT_DB_PATH
     
     # Get file metadata from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -322,7 +342,7 @@ def download_file(
     
     try:
         content = backend.download(storage_key)
-    except FileNotFound:
+    except BackendFileNotFound:
         raise StorageFileNotFoundError(
             f"File '{original_filename}' (ID: {file_id}) is indexed but missing from storage"
         )
@@ -350,7 +370,7 @@ def file_exists(
         db_path = DEFAULT_DB_PATH
     
     # Get storage key from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -396,7 +416,7 @@ def verify_file_integrity(
         db_path = DEFAULT_DB_PATH
     
     # Get stored hash from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -452,7 +472,7 @@ def delete_file(
         db_path = DEFAULT_DB_PATH
     
     # Get storage key from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -478,7 +498,7 @@ def delete_file(
     backend.delete(storage_key)
     
     # Delete from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     try:
         conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
         conn.commit()
@@ -508,7 +528,7 @@ def get_file_status(
         db_path = DEFAULT_DB_PATH
     
     # Get file metadata from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -591,7 +611,7 @@ def list_files_with_status(
         db_path = DEFAULT_DB_PATH
     
     # Get all files from database
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -638,10 +658,10 @@ def list_files_with_status(
         # Determine status
         if not exists_in_storage:
             status = "missing"
-            status_label = "❌ Missing from storage"
+            status_label = " Missing from storage"
         else:
             status = "available"
-            status_label = "✅ Available"
+            status_label = " Available"
         
         # Format size
         if file_size < 1024:

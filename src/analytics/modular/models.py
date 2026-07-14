@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import numpy as np
@@ -56,7 +56,7 @@ def _linear_regression_model(series: pd.Series, _: Dict[str, Any]) -> ModelResul
             "trend_slope_daily": float(slope),
             "confidence": r2,
         },
-        payload={"generated_at": datetime.utcnow().isoformat()},
+        payload={"generated_at": datetime.now(timezone.utc).isoformat()},
         confidence=r2,
     )
 

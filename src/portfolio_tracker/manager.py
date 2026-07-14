@@ -75,9 +75,13 @@ def list_portfolios(user_id: int | None = None) -> list[str]:
     """
     List saved portfolio names for a user.
     
-    If user_id is provided, lists portfolios from user-specific directory.
+    If user_id is provided, lists portfolios from the database.
     Otherwise, lists from legacy directory for backward compatibility.
     """
+    if user_id is not None:
+        from src.auth.database import list_user_data
+        return [name.removesuffix(".json") for name in list_user_data(user_id, "portfolios")]
+
     portfolio_dir = _get_portfolio_dir(user_id)
     portfolio_dir.mkdir(parents=True, exist_ok=True)
     names: list[str] = []
@@ -88,18 +92,26 @@ def list_portfolios(user_id: int | None = None) -> list[str]:
 
 def load_portfolio(name: str = "default", user_id: int | None = None) -> dict[str, Any]:
     """
-    Load a portfolio JSON file or return an empty default structure.
-    
-    If user_id is provided, loads from user-specific directory.
-    Otherwise, loads from legacy directory for backward compatibility.
+    Load a portfolio JSON from DB or local file, or return an empty default structure.
     """
-    path = _portfolio_path(name, user_id)
-    if not path.exists():
-        return _default_portfolio(name)
+    payload = None
+    if user_id is not None:
+        from src.auth.database import load_user_data
+        content = load_user_data(user_id, "portfolios", f"{_sanitize_name(name)}.json")
+        if content:
+            try:
+                payload = json.loads(content)
+            except Exception:
+                pass
+    else:
+        path = _portfolio_path(name, user_id)
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    if payload is None:
         return _default_portfolio(name)
 
     portfolio = _default_portfolio(str(payload.get("name") or name))
@@ -118,18 +130,14 @@ def load_portfolio(name: str = "default", user_id: int | None = None) -> dict[st
     return portfolio
 
 
-def save_portfolio(portfolio: dict[str, Any], name: str | None = None, user_id: int | None = None) -> Path:
+def save_portfolio(portfolio: dict[str, Any], name: str | None = None, user_id: int | None = None) -> Path | str:
     """
-    Persist a portfolio dictionary.
+    Persist a portfolio dictionary to DB or local file.
     
-    If user_id is provided, saves to user-specific directory.
-    Otherwise, saves to legacy directory for backward compatibility.
+    Returns path or identifier string.
     """
-    portfolio_dir = _get_portfolio_dir(user_id)
-    portfolio_dir.mkdir(parents=True, exist_ok=True)
     portfolio_name = _sanitize_name(name or str(portfolio.get("name", "default")))
-    path = _portfolio_path(portfolio_name, user_id)
-
+    
     normalized = _default_portfolio(portfolio_name)
     normalized["created_at"] = str(portfolio.get("created_at") or normalized["created_at"])
     normalized["updated_at"] = _timestamp_now()
@@ -142,9 +150,20 @@ def save_portfolio(portfolio: dict[str, Any], name: str | None = None, user_id: 
         if position["ticker"] and abs(position["shares"]) > 0:
             positions.append(position)
     normalized["positions"] = positions
+    
+    content = json.dumps(normalized, indent=2)
 
-    path.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
-    return path
+    if user_id is not None:
+        from src.auth.database import save_user_data
+        file_name = f"{portfolio_name}.json"
+        save_user_data(user_id, "portfolios", file_name, content)
+        return f"db://user_{user_id}/portfolios/{file_name}"
+    else:
+        portfolio_dir = _get_portfolio_dir(user_id)
+        portfolio_dir.mkdir(parents=True, exist_ok=True)
+        path = _portfolio_path(portfolio_name, user_id)
+        path.write_text(content, encoding="utf-8")
+        return path
 
 
 def add_position(

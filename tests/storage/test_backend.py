@@ -221,6 +221,22 @@ class TestLocalStorageBackend:
         
         assert backend.exists(metadata.storage_key)
         assert not backend.exists("nonexistent_key")
+
+    def test_storage_keys_cannot_escape_base_directory(self, backend, temp_dir):
+        """Reject forged database keys that point outside local storage."""
+        outside_path = Path(temp_dir).parent / "outside.txt"
+
+        with pytest.raises(StorageError):
+            backend.download("../outside.txt")
+
+        assert not outside_path.exists()
+
+    def test_upload_sanitizes_path_components_in_filename(self, backend):
+        metadata = backend.upload(b"safe", "../../report.txt", "text/plain")
+
+        assert "/" not in metadata.storage_key
+        assert "\\" not in metadata.storage_key
+        assert backend.download(metadata.storage_key) == b"safe"
     
     def test_delete(self, backend):
         """Test deleting files."""
@@ -410,7 +426,7 @@ class TestStorageConfig:
             config = StorageConfig()
             result = config.load_from_secrets()
             assert result is False
-            assert config._config is None
+            assert config._config == {"backend": "local"}
     
     def test_load_from_secrets_success(self):
         """Test loading config from secrets."""

@@ -90,7 +90,12 @@ from src.reporting import (
     export_portfolio_data_csv,
     generate_pdf_report,
 )
-from src.simulation import run_monte_carlo_simulation
+import importlib
+import src.simulation.monte_carlo
+importlib.reload(src.simulation.monte_carlo)
+import src.simulation
+importlib.reload(src.simulation)
+from src.simulation import run_monte_carlo_simulation, run_advanced_monte_carlo_simulation
 from src.stock_picker.ai_filter import apply_ai_query, parse_ai_query
 import src.stock_picker.screener as stock_screener_module
 from src.stock_picker.screener import (
@@ -202,12 +207,17 @@ def _auto_login_for_smoke_tests() -> int | None:
         return None
 
     try:
-        from src.auth import login_user
-        from src.auth.migrations import DEFAULT_USERNAME, create_default_user
+        from src.auth import login_user, register_user
 
-        create_default_user()
-        password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD", "")
-        token, user, errors = login_user(DEFAULT_USERNAME, password)
+        username = "streamlit_smoke_test"
+        password = "StreamlitSmoke123"
+        register_user(
+            username=username,
+            email="streamlit-smoke@example.com",
+            password=password,
+            confirm_password=password,
+        )
+        token, user, errors = login_user(username, password)
         if errors or not token or not user:
             return None
 
@@ -221,7 +231,11 @@ def _auto_login_for_smoke_tests() -> int | None:
 
 def _bootstrap_authentication() -> int | None:
     from src.auth import init_auth_database
-    from src.auth.migrations import get_migration_status, migrate_existing_data
+    from src.auth.migrations import (
+        get_migration_status,
+        migrate_existing_data,
+        migrate_local_files_to_database,
+    )
 
     init_auth_database()
     status = get_migration_status()
@@ -233,6 +247,17 @@ def _bootstrap_authentication() -> int | None:
     user_id = _resolve_authenticated_user_id()
     if user_id is None:
         user_id = _auto_login_for_smoke_tests()
+
+    # On first login after deployment, migrate any existing local files to the DB
+    if user_id is not None:
+        migration_session_key = f"db_migration_done_{user_id}"
+        if not st.session_state.get(migration_session_key):
+            try:
+                migrate_local_files_to_database(user_id)
+            except Exception:
+                pass  # Non-fatal – never break the login flow
+            st.session_state[migration_session_key] = True
+
     return user_id
 
 
@@ -482,6 +507,8 @@ def _build_report_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "portfolio_timeseries": result["portfolio_timeseries"],
         "simulation": result["simulation_stats"],
         "simulation_percentiles": result["simulation_percentiles"],
+        "adv_simulation": result.get("adv_simulation_stats", {}),
+        "adv_simulation_percentiles": result.get("adv_simulation_percentiles", pd.DataFrame()),
         "frontier_points": serialized_frontier,
         "ai_review": result["ai_review"],
         "advanced_models": result.get("advanced_models", {}),
@@ -660,6 +687,9 @@ def _compute_analysis(
     risk_profile: str,
     n_simulations: int,
     horizon_days: int,
+    jump_intensity: float,
+    jump_mean: float,
+    jump_volatility: float,
     portfolio_samples: int,
     benchmark_ticker: str,
     rebalance_max_weight: float,
@@ -800,6 +830,18 @@ def _compute_analysis(
         n_simulations=n_simulations,
     )
     simulation_percentiles = _create_simulation_percentiles(price_paths)
+
+    adv_price_paths, adv_simulation_stats = run_advanced_monte_carlo_simulation(
+        current_value=100000.0,
+        expected_return=expected_return,
+        volatility=volatility,
+        time_horizon=horizon_days,
+        n_simulations=n_simulations,
+        jump_intensity=jump_intensity,
+        jump_mean=jump_mean,
+        jump_volatility=jump_volatility,
+    )
+    adv_simulation_percentiles = _create_simulation_percentiles(adv_price_paths)
 
     min_var_result = optimize_minimum_variance(returns)
     max_sharpe_result = optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate)
@@ -965,6 +1007,9 @@ def _compute_analysis(
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
         "simulation_percentiles": simulation_percentiles,
+        "adv_price_paths": adv_price_paths,
+        "adv_simulation_stats": adv_simulation_stats,
+        "adv_simulation_percentiles": adv_simulation_percentiles,
         "asset_metrics_df": asset_metrics_df,
         "benchmark_metrics": benchmark_metrics,
         "return_contribution_df": return_contribution_df,
@@ -978,7 +1023,7 @@ def _compute_analysis(
         "backtest_result": quant_stack["backtest"],
         "run_record": quant_stack["run_record"],
         "history_path": quant_stack["history_path"],
-        "history_records": list_run_records(limit=40),
+        "history_records": list_run_records(limit=40, user_id=user_id),
         "warnings": alignment_warnings,
         "missing_tickers": missing_tickers,
     }
@@ -3595,7 +3640,7 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
     advanced_models = analysis_result.get("advanced_models", {})
 
     st.subheader("Analysis Lab")
-    analysis_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "History", "Compare"])
+    analysis_tabs = st.tabs(["Data", "Models", "Signals", "Backtest", "News", "History", "Compare", "Forecasts", "Scenarios"])
 
     with analysis_tabs[0]:
         st.caption(
@@ -3813,8 +3858,8 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
             right_run = st.selectbox("Compare run", options=run_ids, index=0)
             if left_run and right_run and left_run != right_run:
                 try:
-                    left_data = load_run_record(left_run)
-                    right_data = load_run_record(right_run)
+                    left_data = load_run_record(left_run, user_id=user_id)
+                    right_data = load_run_record(right_run, user_id=user_id)
                     comparison = compare_runs(left_data, right_data)
                     st.dataframe(
                         pd.DataFrame([comparison["metric_diff"]]),
@@ -3832,6 +3877,20 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
                     st.warning(f"Comparison failed: {exc}")
         else:
             st.info("Need at least two saved runs for comparison.")
+            
+    with analysis_tabs[7]:
+        from ui.pages.wharton_dash import _render_advanced_analytics
+        # The result object expected by wharton_dash is just a dictionary like analysis_result
+        # The only missing key might be 'inputs'. Let's ensure it has something basic.
+        if "inputs" not in analysis_result:
+            analysis_result["inputs"] = {"current_value": 100000}
+        _render_advanced_analytics(analysis_result)
+        
+    with analysis_tabs[8]:
+        from ui.pages.wharton_dash import _render_scenario_playground
+        if "inputs" not in analysis_result:
+            analysis_result["inputs"] = {"current_value": 100000}
+        _render_scenario_playground(analysis_result)
 
 
 def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
@@ -3851,7 +3910,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
     cost_aware_rebalance = analysis_result.get("cost_aware_rebalance", {})
 
     st.subheader("Portfolio Lab")
-    lab_tabs = st.tabs(["Performance", "Optimization", "Attribution", "Simulation", "Assets"])
+    lab_tabs = st.tabs(["Performance", "Optimization", "Attribution", "Simulation", "Adv. Simulation", "Assets"])
 
     with lab_tabs[0]:
         portfolio_cumulative_fig = plot_cumulative_returns(
@@ -4062,6 +4121,28 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
             st.warning(f"3D scenario surface unavailable: {exc}")
 
     with lab_tabs[4]:
+        adv_sim = analysis_result.get("adv_simulation_stats")
+        if adv_sim:
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Mean final value", f"${adv_sim['mean']:,.0f}")
+            mc2.metric("Median final value", f"${adv_sim['median']:,.0f}")
+            mc3.metric("5th percentile", f"${adv_sim['percentile_5']:,.0f}")
+            mc4.metric("95th percentile", f"${adv_sim['percentile_95']:,.0f}")
+            
+            adv_monte_carlo_fig = plot_monte_carlo_fan(analysis_result["adv_price_paths"], title="Merton Jump Diffusion Fan")
+            st.pyplot(adv_monte_carlo_fig)
+            
+            with st.expander("Simulation percentile table", expanded=False):
+                st.dataframe(analysis_result["adv_simulation_percentiles"].round(2), use_container_width=True)
+            try:
+                adv_surface_fig = plot_monte_carlo_percentile_surface(analysis_result["adv_price_paths"])
+                st.plotly_chart(adv_surface_fig, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"3D scenario surface unavailable: {exc}")
+        else:
+            st.info("Advanced Simulation data not available.")
+
+    with lab_tabs[5]:
         asset_metrics_view = asset_metrics_df.copy()
         asset_metrics_view["Ann. Return"] = asset_metrics_view["Ann. Return"].map(
             lambda value: f"{value:.2%}"
@@ -4205,10 +4286,14 @@ with st.sidebar:
     n_simulations = st.slider(
         "Monte Carlo simulations",
         min_value=200,
-        max_value=5000,
+        max_value=15000,
         value=1200,
         step=100,
     )
+    st.markdown("#### Jump Diffusion (Advanced MC)")
+    jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
+    jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
+    jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
 
     portfolio_samples = st.slider(
         "3D sampled portfolios",
@@ -4284,6 +4369,9 @@ if run_clicked:
                 risk_profile=risk_profile,
                 n_simulations=n_simulations,
                 horizon_days=horizon_days,
+                jump_intensity=jump_intensity,
+                jump_mean=jump_mean,
+                jump_volatility=jump_volatility,
                 portfolio_samples=portfolio_samples,
                 benchmark_ticker=benchmark_ticker,
                 rebalance_max_weight=float(rebalance_max_weight),

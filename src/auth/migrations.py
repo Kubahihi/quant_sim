@@ -72,7 +72,11 @@ def _migrate_portfolio_files(user_id: int, dry_run: bool = False) -> int:
     Returns number of files migrated.
     """
     old_portfolio_dir = DATA_DIR / "portfolios"
-    new_portfolio_dir = ensure_user_dirs(user_id)["portfolios"]
+    new_portfolio_dir = (
+        get_user_data_dir(user_id) / "portfolios"
+        if dry_run
+        else ensure_user_dirs(user_id)["portfolios"]
+    )
     
     if not old_portfolio_dir.exists():
         return 0
@@ -99,7 +103,11 @@ def _migrate_swing_tracker_files(user_id: int, dry_run: bool = False) -> int:
     Returns number of files migrated.
     """
     old_swing_dir = DATA_DIR / "swing_tracker"
-    new_swing_dir = ensure_user_dirs(user_id)["swing_tracker"]
+    new_swing_dir = (
+        get_user_data_dir(user_id) / "swing_tracker"
+        if dry_run
+        else ensure_user_dirs(user_id)["swing_tracker"]
+    )
     
     if not old_swing_dir.exists():
         return 0
@@ -126,7 +134,11 @@ def _migrate_run_history_files(user_id: int, dry_run: bool = False) -> int:
     Returns number of files migrated.
     """
     old_history_dir = DATA_DIR / "run_history"
-    new_history_dir = ensure_user_dirs(user_id)["run_history"]
+    new_history_dir = (
+        get_user_data_dir(user_id) / "run_history"
+        if dry_run
+        else ensure_user_dirs(user_id)["run_history"]
+    )
     
     if not old_history_dir.exists():
         return 0
@@ -146,12 +158,22 @@ def _migrate_run_history_files(user_id: int, dry_run: bool = False) -> int:
     return migrated
 
 
-def create_default_user() -> Optional[Dict[str, Any]]:
+def create_default_user(dry_run: bool = False) -> Optional[Dict[str, Any]]:
     """
     Create the default admin user if it doesn't exist.
     
     Returns user dict if created or already exists.
     """
+    if dry_run:
+        # A dry run must not create the auth database or bootstrap credentials.
+        # ID 1 is the documented migration target for a fresh installation.
+        return {
+            "id": 1,
+            "username": DEFAULT_USERNAME,
+            "email": DEFAULT_EMAIL,
+            "planned": True,
+        }
+
     init_auth_database()
     
     # Check if default user already exists
@@ -206,7 +228,7 @@ def migrate_existing_data(dry_run: bool = False) -> Dict[str, Any]:
         }
     
     # Create default user
-    default_user = create_default_user()
+    default_user = create_default_user(dry_run=dry_run)
     if not default_user:
         return {
             "success": False,
@@ -246,6 +268,109 @@ def migrate_existing_data(dry_run: bool = False) -> Dict[str, Any]:
             f"Migration {'would be ' if dry_run else ''}completed. "
             f"{total_migrated} files {'would be ' if dry_run else ''}migrated to user '{DEFAULT_USERNAME}'."
         ),
+    }
+
+
+def migrate_local_files_to_database(user_id: int) -> Dict[str, Any]:
+    """
+    Migrate any existing local JSON files for a user into the database.
+    
+    This is called automatically on startup for users who have existing
+    local data from before the database-first storage was introduced.
+    Safe to run multiple times (idempotent).
+    
+    Returns a summary of how many records were imported.
+    """
+    from .database import save_user_data, load_user_data
+    imported: Dict[str, int] = {
+        "portfolios": 0,
+        "swing_tracker": 0,
+        "run_history": 0,
+    }
+
+    # Portfolios: data/users/{user_id}/portfolios/*.json
+    portfolio_dir = DATA_DIR / "users" / str(user_id) / "portfolios"
+    if portfolio_dir.exists():
+        for f in portfolio_dir.glob("*.json"):
+            existing = load_user_data(user_id, "portfolios", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "portfolios", f.name, content)
+                    imported["portfolios"] += 1
+                except Exception:
+                    pass
+
+    # Legacy portfolios: data/portfolios/*.json
+    legacy_portfolio_dir = DATA_DIR / "portfolios"
+    if legacy_portfolio_dir.exists():
+        for f in legacy_portfolio_dir.glob("*.json"):
+            existing = load_user_data(user_id, "portfolios", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "portfolios", f.name, content)
+                    imported["portfolios"] += 1
+                except Exception:
+                    pass
+
+    # Swing tracker: data/users/{user_id}/swing_tracker/trades.json
+    swing_file = DATA_DIR / "users" / str(user_id) / "swing_tracker" / "trades.json"
+    if swing_file.exists():
+        existing = load_user_data(user_id, "swing_tracker", "trades.json")
+        if existing is None:
+            try:
+                content = swing_file.read_text(encoding="utf-8")
+                save_user_data(user_id, "swing_tracker", "trades.json", content)
+                imported["swing_tracker"] += 1
+            except Exception:
+                pass
+
+    # Legacy swing tracker
+    legacy_swing = DATA_DIR / "swing_tracker" / "trades.json"
+    if legacy_swing.exists():
+        existing = load_user_data(user_id, "swing_tracker", "trades.json")
+        if existing is None:
+            try:
+                content = legacy_swing.read_text(encoding="utf-8")
+                save_user_data(user_id, "swing_tracker", "trades.json", content)
+                imported["swing_tracker"] += 1
+            except Exception:
+                pass
+
+    # Run history: data/users/{user_id}/run_history/*.json
+    run_history_dir = DATA_DIR / "users" / str(user_id) / "run_history"
+    if run_history_dir.exists():
+        for f in run_history_dir.glob("*.json"):
+            existing = load_user_data(user_id, "run_history", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "run_history", f.name, content)
+                    imported["run_history"] += 1
+                except Exception:
+                    pass
+
+    # Legacy run history
+    legacy_run_dir = DATA_DIR / "run_history"
+    if legacy_run_dir.exists():
+        for f in legacy_run_dir.glob("*.json"):
+            existing = load_user_data(user_id, "run_history", f.name)
+            if existing is None:
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    save_user_data(user_id, "run_history", f.name, content)
+                    imported["run_history"] += 1
+                except Exception:
+                    pass
+
+    total = sum(imported.values())
+    return {
+        "success": True,
+        "user_id": user_id,
+        "imported": imported,
+        "total": total,
+        "message": f"Imported {total} local file(s) into database for user {user_id}.",
     }
 
 

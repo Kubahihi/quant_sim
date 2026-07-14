@@ -182,21 +182,21 @@ pytest tests/storage/ -v
 
 ### Test Coverage
 
-- ✅ StorageLimits configuration
-- ✅ StorageMetadata with all fields
-- ✅ LocalStorageBackend operations
-- ✅ R2StorageBackend (mocked)
-- ✅ File size limit enforcement
-- ✅ Total storage limit enforcement
-- ✅ File count limit enforcement
-- ✅ Per-user file count limit enforcement
-- ✅ SHA256 deduplication
-- ✅ Secrets configuration parsing
-- ✅ Backend selection logic
-- ✅ Production mode validation
-- ✅ Health check functionality
-- ✅ Upload/download roundtrip
-- ✅ Failure handling when secrets missing
+-  StorageLimits configuration
+-  StorageMetadata with all fields
+-  LocalStorageBackend operations
+-  R2StorageBackend (mocked)
+-  File size limit enforcement
+-  Total storage limit enforcement
+-  File count limit enforcement
+-  Per-user file count limit enforcement
+-  SHA256 deduplication
+-  Secrets configuration parsing
+-  Backend selection logic
+-  Production mode validation
+-  Health check functionality
+-  Upload/download roundtrip
+-  Failure handling when secrets missing
 
 ## Deployment Checklist
 

@@ -397,7 +397,7 @@ class WhartonFileVault:
                     try:
                         file_bytes = self.file_manager.download_file(file_meta.storage_key)
                         st.download_button(
-                            label="⬇️ Download",
+                            label=" Download",
                             data=file_bytes,
                             file_name=file_meta.original_filename,
                             mime=file_meta.content_type,
@@ -430,7 +430,7 @@ class WhartonFileVault:
             st.progress(storage_progress)
             
             if stats['approaching_storage_limit']:
-                st.warning(f"⚠️ Approaching storage limit! {stats['storage_usage_percent']}% used.")
+                st.warning(f" Approaching storage limit! {stats['storage_usage_percent']}% used.")
         
         with col2:
             st.metric(
@@ -445,13 +445,13 @@ class WhartonFileVault:
             st.progress(files_progress)
             
             if stats['approaching_file_limit']:
-                st.warning(f"⚠️ Approaching file limit! {stats['files_usage_percent']}% used.")
+                st.warning(f" Approaching file limit! {stats['files_usage_percent']}% used.")
     
     def display_limit_info(self):
         """
         Display information about current limits.
         """
-        with st.expander("📊 Storage Limits (Free Tier)", expanded=False):
+        with st.expander(" Storage Limits (Free Tier)", expanded=False):
             st.write("""
             #### Current Limits:
             - **Max file size:** 20 MB per file
@@ -487,25 +487,25 @@ class WhartonFileVault:
             User-friendly error message
         """
         if isinstance(error, FileSizeLimitExceeded):
-            return f"🚫 File too large! Maximum file size is {StorageLimits.MAX_FILE_SIZE_MB} MB. Your file is {error.current}."
+            return f" File too large! Maximum file size is {StorageLimits.MAX_FILE_SIZE_MB} MB. Your file is {error.current}."
         
         elif isinstance(error, TotalStorageLimitExceeded):
-            return f"🚫 Storage limit reached! Upload would exceed the {StorageLimits.MAX_TOTAL_STORAGE_MB} MB limit. Current usage: {error.current}."
+            return f" Storage limit reached! Upload would exceed the {StorageLimits.MAX_TOTAL_STORAGE_MB} MB limit. Current usage: {error.current}."
         
         elif isinstance(error, FileCountLimitExceeded):
-            return f"🚫 File limit reached! Maximum {StorageLimits.MAX_FILES} files allowed. You have {error.current} files."
+            return f" File limit reached! Maximum {StorageLimits.MAX_FILES} files allowed. You have {error.current} files."
         
         elif isinstance(error, UserFileCountLimitExceeded):
-            return f"🚫 Per-user file limit reached! Maximum {StorageLimits.MAX_FILES_PER_USER} files per user."
+            return f" Per-user file limit reached! Maximum {StorageLimits.MAX_FILES_PER_USER} files per user."
         
         elif isinstance(error, DuplicateFileError):
-            return f"📄 Duplicate file detected! A file with the same content already exists."
+            return f" Duplicate file detected! A file with the same content already exists."
         
         elif isinstance(error, ProductionConfigError):
-            return f"🔧 Configuration error! Storage is not properly configured for production. Please contact the administrator."
+            return f" Configuration error! Storage is not properly configured for production. Please contact the administrator."
         
         else:
-            return f"❌ Upload failed: {str(error)}"
+            return f" Upload failed: {str(error)}"
 
 
 # Global file manager instance
@@ -537,4 +537,7 @@ def initialize_file_manager() -> Dict[str, Any]:
         Initialization status
     """
     fm = get_file_manager()
-    return fm.initialize()
+    result = fm.initialize()
+    if not result.get("success"):
+        raise StorageError(result.get("error", "Storage initialization failed"))
+    return result

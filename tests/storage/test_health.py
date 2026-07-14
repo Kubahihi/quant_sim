@@ -18,7 +18,7 @@ class TestRunStorageStartupCheck:
     """Test run_storage_startup_check function."""
     
     @patch('src.storage.health.initialize_storage')
-    @patch('src.storage.health.st.context.headers', {})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'development'}, clear=True)
     def test_startup_check_success_development(self, mock_init):
         """Test successful startup check in development mode."""
         mock_init.return_value = {
@@ -39,7 +39,7 @@ class TestRunStorageStartupCheck:
             mock_error.assert_not_called()
     
     @patch('src.storage.health.initialize_storage')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_startup_check_success_production(self, mock_init):
         """Test successful startup check in production mode."""
         mock_init.return_value = {
@@ -58,7 +58,7 @@ class TestRunStorageStartupCheck:
             mock_success.assert_called_once()
     
     @patch('src.storage.health.initialize_storage')
-    @patch('src.storage.health.st.context.headers', {})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'development'}, clear=True)
     def test_startup_check_failure_development(self, mock_init):
         """Test failed startup check in development mode."""
         mock_init.return_value = {
@@ -74,7 +74,7 @@ class TestRunStorageStartupCheck:
             mock_error.assert_called_once()
     
     @patch('src.storage.health.initialize_storage')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_startup_check_failure_production_raises(self, mock_init):
         """Test failed startup check in production raises exception."""
         mock_init.return_value = {
@@ -88,7 +88,7 @@ class TestRunStorageStartupCheck:
         assert "Storage initialization failed" in str(excinfo.value)
     
     @patch('src.storage.health.initialize_storage')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_startup_check_unhealthy_production_raises(self, mock_init):
         """Test unhealthy storage in production raises exception."""
         mock_init.return_value = {
@@ -130,7 +130,7 @@ class TestDisplayStorageStatus:
             
             display_storage_status()
             
-            mock_success.assert_called_once_with("✅ Healthy")
+            mock_success.assert_called_once_with(" Healthy")
             mock_caption.assert_any_call("Backend: local")
     
     @patch('src.storage.health.check_storage_health')
@@ -151,7 +151,7 @@ class TestDisplayStorageStatus:
             
             display_storage_status()
             
-            mock_error.assert_called_with("❌ Unhealthy")
+            mock_error.assert_called_with(" Unhealthy")
             mock_caption.assert_any_call("Error: Connection failed")
     
     @patch('src.storage.health.check_storage_health')
@@ -209,7 +209,7 @@ class TestValidateStorageForProduction:
     """Test validate_storage_for_production function."""
     
     @patch('src.storage.health.storage_config')
-    @patch('src.storage.health.st.context.headers', {})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'development'}, clear=True)
     def test_validate_development_always_passes(self, mock_config):
         """Test that validation passes in development mode."""
         mock_config.load_from_secrets.return_value = False
@@ -219,7 +219,7 @@ class TestValidateStorageForProduction:
         assert result is True
     
     @patch('src.storage.health.storage_config')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_validate_production_missing_entire_section(self, mock_config):
         """Test validation fails when storage section is missing."""
         mock_config.load_from_secrets.return_value = False
@@ -231,7 +231,7 @@ class TestValidateStorageForProduction:
             mock_show.assert_called_once()
     
     @patch('src.storage.health.storage_config')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_validate_production_local_backend_warns(self, mock_config):
         """Test that local backend in production shows warning but passes."""
         mock_config.load_from_secrets.return_value = True
@@ -244,7 +244,7 @@ class TestValidateStorageForProduction:
             mock_warning.assert_called_once()
     
     @patch('src.storage.health.storage_config')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_validate_production_r2_missing_secrets(self, mock_config):
         """Test validation fails when R2 secrets are missing."""
         mock_config.load_from_secrets.return_value = True
@@ -262,7 +262,7 @@ class TestValidateStorageForProduction:
             mock_show.assert_called_once_with(["R2_ENDPOINT_URL", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"])
     
     @patch('src.storage.health.storage_config')
-    @patch('src.storage.health.st.context.headers', {'SERVER_PORT': '8501'})
+    @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
     def test_validate_production_r2_complete(self, mock_config):
         """Test validation passes when R2 is fully configured."""
         mock_config.load_from_secrets.return_value = True

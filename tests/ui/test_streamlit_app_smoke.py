@@ -113,6 +113,23 @@ def test_streamlit_app_shows_workspace_by_default():
     assert any(item.value == "Workspace Hub" for item in at.subheader)
 
 
+def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
+    at.session_state["wharton_user_profile_v2"] = {
+        "id": 1,
+        "username": "Jakub",
+        "role": "Captain/Quant",
+        "primary_module": "Quant Engine",
+    }
+    at.run(timeout=60)
+
+    assert len(at.exception) == 0
+    tab_labels = [tab.label for tab in at.tabs]
+    assert "Zadání a pravidla" in tab_labels
+    assert "Portfolio tracker" in tab_labels
+
+
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):
     import src.ai
     import src.analytics

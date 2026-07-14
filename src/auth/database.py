@@ -26,19 +26,133 @@ if os.environ.get("AUTH_TEST_DB_PATH"):
 SESSION_EXPIRY_HOURS = 24
 
 
+def _row_to_dict(cursor, row) -> dict[str, Any] | None:
+    """Safely convert a DB row to a dict, handling both sqlite3.Row and plain tuples."""
+    if row is None:
+        return None
+    if hasattr(row, 'keys'):
+        return dict(row)
+    cols = [col[0] for col in cursor.description]
+    return dict(zip(cols, row))
+
+
+class DictRow:
+    """A wrapper around a tuple row that supports both index and key access like sqlite3.Row."""
+    def __init__(self, cursor, row):
+        self._row = row
+        self._cols = [col[0].lower() for col in cursor.description] if cursor.description else []
+    def __getitem__(self, key):
+        if isinstance(key, int) or isinstance(key, slice):
+            return self._row[key]
+        if isinstance(key, str):
+            try:
+                return self._row[self._cols.index(key.lower())]
+            except ValueError:
+                raise KeyError(f"Column {key} not found.")
+        raise TypeError("Invalid key type")
+    def keys(self):
+        return self._cols
+    def __len__(self):
+        return len(self._row)
+    def __iter__(self):
+        return iter(self._row)
+
+class LibsqlCursorWrapper:
+    def __init__(self, cursor):
+        self._cursor = cursor
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None: return None
+        if isinstance(row, tuple) and not hasattr(row, 'keys'): return DictRow(self._cursor, row)
+        return row
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        if not rows: return []
+        if isinstance(rows[0], tuple) and not hasattr(rows[0], 'keys'): return [DictRow(self._cursor, r) for r in rows]
+        return rows
+
+class LibsqlConnectionWrapper:
+    """Wraps a libsql connection to return DictRow objects when fetching."""
+    def __init__(self, conn):
+        self._conn = conn
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+    def __enter__(self):
+        if hasattr(self._conn, '__enter__'):
+            self._conn.__enter__()
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self._conn, '__exit__'):
+            return self._conn.__exit__(exc_type, exc_val, exc_tb)
+        # Fallback if connection doesn't natively support context manager
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        self._conn.close()
+        return False
+    def execute(self, *args, **kwargs):
+        cursor = self._conn.execute(*args, **kwargs)
+        return LibsqlCursorWrapper(cursor)
+    def cursor(self):
+        return LibsqlCursorWrapper(self._conn.cursor())
+
+
 def _get_db_path() -> Path:
     """Get the database path, creating parent directories if needed."""
     AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return AUTH_DB_PATH
 
 
-def _get_connection() -> sqlite3.Connection:
-    """Get a database connection with proper settings."""
-    conn = sqlite3.connect(str(_get_db_path()))
+def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
+    """Get a database connection with proper settings. Uses Turso if configured."""
+    turso_url = None
+    turso_token = None
+    try:
+        import streamlit as st
+        turso_url = st.secrets.get("TURSO_DATABASE_URL")
+        turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        pass
+    
+    if not turso_url:
+        turso_url = os.environ.get("TURSO_DATABASE_URL")
+    if not turso_token:
+        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+    
+    if turso_url and turso_token:
+        try:
+            import libsql_experimental as libsql
+        except ImportError:
+            try:
+                import libsql
+            except ImportError:
+                libsql = sqlite3
+                turso_url = None
+        
+        if turso_url:
+            conn = libsql.connect(str(db_path), sync_url=turso_url, auth_token=turso_token)
+            conn.sync()
+            try:
+                conn.row_factory = sqlite3.Row
+            except AttributeError:
+                # libsql_experimental doesn't support row_factory, use wrapper
+                return LibsqlConnectionWrapper(conn)
+            return conn
+
+    # Local SQLite fallback
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")  # Better concurrency
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+def _get_connection() -> sqlite3.Connection:
+    """Backward compatibility for existing internal calls."""
+    return get_db_connection(_get_db_path())
 
 
 def init_auth_database() -> None:
@@ -86,8 +200,22 @@ def init_auth_database() -> None:
             -- Index for brute-force tracking
             CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time 
             ON login_attempts(username, timestamp);
+
+            -- Generic User Data table (for portfolios, swing_tracker, run_history)
+            CREATE TABLE IF NOT EXISTS user_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                data_type TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE (user_id, data_type, file_name)
+            );
         """)
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -117,6 +245,8 @@ def create_user(
             (username, email, password_hash, created_at),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
         
         user_id = cursor.lastrowid
         return {
@@ -140,7 +270,7 @@ def get_user_by_username(username: str) -> Optional[dict[str, Any]]:
         )
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -157,7 +287,7 @@ def get_user_by_id(user_id: int) -> Optional[dict[str, Any]]:
         )
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -174,7 +304,7 @@ def get_user_by_email(email: str) -> Optional[dict[str, Any]]:
         )
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -203,6 +333,8 @@ def create_session(user_id: int) -> str:
             (token, user_id, created_at, expires_at, created_at),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
         return token
     finally:
         conn.close()
@@ -240,6 +372,8 @@ def validate_session_token(token: str) -> bool:
                 (now, token),
             )
             conn.commit()
+            if hasattr(conn, 'sync'):
+                conn.sync()
             return True
         return False
     finally:
@@ -274,7 +408,9 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
                 (now, token),
             )
             conn.commit()
-            return dict(row)
+            if hasattr(conn, 'sync'):
+                conn.sync()
+            return _row_to_dict(cursor, row)
         return None
     finally:
         conn.close()
@@ -286,6 +422,8 @@ def revoke_session(token: str) -> None:
     try:
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -296,6 +434,8 @@ def revoke_all_user_sessions(user_id: int) -> None:
     try:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -315,6 +455,8 @@ def cleanup_expired_sessions() -> int:
             (now,),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
         return cursor.rowcount
     finally:
         conn.close()
@@ -328,7 +470,7 @@ def list_users(limit: int = 100) -> list[dict[str, Any]]:
             "SELECT id, username, email, created_at FROM users WHERE is_active = 1 ORDER BY id LIMIT ?",
             (limit,),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -364,6 +506,8 @@ def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = 
             (username, timestamp, 1 if success else 0, ip_address),
         )
         conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
     finally:
         conn.close()
 
@@ -380,3 +524,70 @@ def get_recent_failed_attempts(username: str, minutes: int = 10) -> int:
         return cursor.fetchone()[0]
     finally:
         conn.close()
+
+
+def save_user_data(user_id: int, data_type: str, file_name: str, content_json: str) -> None:
+    """Save or update JSON data for a user."""
+    conn = _get_connection()
+    try:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO user_data (user_id, data_type, file_name, content_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, data_type, file_name) DO UPDATE SET
+                content_json = excluded.content_json,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, data_type, file_name, content_json, updated_at)
+        )
+        conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
+    finally:
+        conn.close()
+
+
+def load_user_data(user_id: int, data_type: str, file_name: str) -> Optional[str]:
+    """Load JSON data for a user. Returns None if not found."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT content_json FROM user_data WHERE user_id = ? AND data_type = ? AND file_name = ?",
+            (user_id, data_type, file_name)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        return None
+    finally:
+        conn.close()
+
+
+def list_user_data(user_id: int, data_type: str) -> list[str]:
+    """List all file names for a user and data type."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT file_name FROM user_data WHERE user_id = ? AND data_type = ?",
+            (user_id, data_type)
+        )
+        return [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def delete_user_data(user_id: int, data_type: str, file_name: str) -> bool:
+    """Delete specific data for a user. Returns True if deleted."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM user_data WHERE user_id = ? AND data_type = ? AND file_name = ?",
+            (user_id, data_type, file_name)
+        )
+        conn.commit()
+        if hasattr(conn, 'sync'):
+            conn.sync()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()

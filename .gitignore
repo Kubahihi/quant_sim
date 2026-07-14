@@ -25,6 +25,7 @@ wheels/
 venv/
 ENV/
 env/
+_venv_/
 
 # Data
 data/cache/
@@ -41,6 +42,7 @@ data/run_history/
 data/portfolios/
 data/swing_tracker/
 data/.migration_completed
+data/*.bak*
 
 # Logs
 logs/

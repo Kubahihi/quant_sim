@@ -7,6 +7,7 @@ Includes:
 - Production-ready error handling
 """
 
+import os
 import streamlit as st
 from typing import Dict, Any, Optional, List
 from .backend import (
@@ -35,7 +36,7 @@ def run_storage_startup_check() -> Dict[str, Any]:
         ConfigurationError: If required configuration is missing
     """
     # Check if running in production
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     
     # Initialize storage
     init_result = initialize_storage()
@@ -63,9 +64,9 @@ def run_storage_startup_check() -> Dict[str, Any]:
     backend_name = init_result.get("backend", "unknown")
     
     if is_production:
-        st.success(f"✅ Storage initialized: {backend_name.upper()} backend (production mode)")
+        st.success(f" Storage initialized: {backend_name.upper()} backend (production mode)")
     else:
-        st.info(f"ℹ️ Storage initialized: {backend_name.upper()} backend (development mode)")
+        st.info(f" Storage initialized: {backend_name.upper()} backend (development mode)")
     
     return init_result
 
@@ -97,7 +98,7 @@ def run_enhanced_startup_check() -> Dict[str, Any]:
         "warnings": [],
     }
     
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     results["production_mode"] = is_production
     
     try:
@@ -178,13 +179,13 @@ def display_storage_status():
     - Configuration info
     """
     with st.sidebar:
-        st.subheader("📦 Storage Status")
+        st.subheader(" Storage Status")
         
         try:
             health = check_storage_health()
             
             if health.get("status") == "healthy":
-                st.success("✅ Healthy")
+                st.success(" Healthy")
                 st.caption(f"Backend: {health.get('backend', 'unknown')}")
                 
                 if health.get("bucket"):
@@ -203,15 +204,15 @@ def display_storage_status():
                 
                 # Warnings
                 if usage["approaching_storage_limit"]:
-                    st.warning("⚠️ Storage limit approaching!")
+                    st.warning(" Storage limit approaching!")
                 if usage["approaching_file_limit"]:
-                    st.warning("⚠️ File limit approaching!")
+                    st.warning(" File limit approaching!")
             else:
-                st.error("❌ Unhealthy")
+                st.error(" Unhealthy")
                 if health.get("error"):
                     st.caption(f"Error: {health.get('error')}")
         except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
+            st.error(f" Error: {str(e)}")
         
         # Show configuration info
         if storage_config.config:
@@ -233,7 +234,7 @@ def show_production_error_message(missing_secrets: list):
         missing_secrets: List of missing secret keys
     """
     st.error("""
-    ### 🚨 Production Storage Configuration Missing
+    ###  Production Storage Configuration Missing
     
     This application is running on Streamlit Cloud but the required storage 
     configuration is incomplete. Files uploaded in this mode will be lost 
@@ -256,7 +257,7 @@ def show_production_error_message(missing_secrets: list):
     Alternatively, set up Cloudflare R2 storage as documented in README.md.
     """)
     
-    st.warning("⚠️ The application will continue in limited mode, but file uploads may not persist.")
+    st.warning(" The application will continue in limited mode, but file uploads may not persist.")
 
 
 def validate_storage_for_production() -> bool:
@@ -266,7 +267,7 @@ def validate_storage_for_production() -> bool:
     Returns:
         True if storage is ready for production, False otherwise
     """
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     
     if not is_production:
         return True  # Development mode is always valid
@@ -279,7 +280,7 @@ def validate_storage_for_production() -> bool:
     config = storage_config.config
     
     if config.get('backend') != 'r2':
-        st.warning("⚠️ Local storage backend selected in production. Files will not persist across redeployments.")
+        st.warning(" Local storage backend selected in production. Files will not persist across redeployments.")
         return True  # Not ideal but allowed with warning
     
     # Check for missing R2 secrets
@@ -298,7 +299,7 @@ def display_migration_ui() -> bool:
     Returns:
         True if migration was completed, False otherwise
     """
-    st.subheader("🔄 Migrate Local Files to R2")
+    st.subheader(" Migrate Local Files to R2")
     
     st.write("""
     Local files were found that can be migrated to Cloudflare R2 storage.
@@ -323,7 +324,7 @@ def display_migration_ui() -> bool:
             st.caption(f"... and {len(local_files) - 10} more")
         
         # Migration button
-        if st.button("🚀 Migrate Files to R2", key="migrate_files"):
+        if st.button(" Migrate Files to R2", key="migrate_files"):
             progress_bar = st.progress(0)
             success_count = 0
             error_count = 0
@@ -367,7 +368,7 @@ def check_migration_needed() -> bool:
     Returns:
         True if migration is needed
     """
-    is_production = 'STREAMLIT_SERVER_PORT' in st.context.headers
+    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
     
     if not is_production:
         return False  # No migration needed in development

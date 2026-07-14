@@ -45,6 +45,8 @@ class TestFileManager:
         assert file_manager._initialized is True
         assert isinstance(backend, LocalStorageBackend)
     
+    @patch('src.storage.backend.st.secrets', {})
+    @patch('src.storage.health.st.secrets', {})
     def test_initialize_method(self, file_manager):
         """Test explicit initialization."""
         result = file_manager.initialize()
@@ -150,6 +152,8 @@ class TestFileManager:
         assert file_manager.file_exists(metadata.storage_key)
         assert not file_manager.file_exists("nonexistent_key")
     
+    @patch('src.storage.backend.st.secrets', {})
+    @patch('src.storage.health.st.secrets', {})
     def test_health_check(self, file_manager):
         """Test health check."""
         health = file_manager.health_check()
@@ -206,6 +210,8 @@ class TestWhartonFileVault:
         assert vault.file_manager is not None
         assert isinstance(vault.file_manager, FileManager)
     
+    @patch('src.storage.backend.st.secrets', {})
+    @patch('src.storage.health.st.secrets', {})
     def test_initialize(self, vault):
         """Test initializing the vault."""
         result = vault.initialize()
@@ -323,6 +329,8 @@ class TestInitializeFileManager:
         mock_manager.initialize.assert_called_once()
     
     @patch('src.storage.file_manager.get_file_manager')
+    @patch('src.storage.backend.st.secrets', {})
+    @patch('src.storage.health.st.secrets', {})
     def test_initialize_file_manager_failure(self, mock_get_manager):
         """Test file manager initialization failure."""
         mock_manager = Mock()

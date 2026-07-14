@@ -32,7 +32,7 @@ When you first run the Streamlit app after adding the auth system, it will autom
 - Username: `admin`
 - Password: `REMOVED`
 
-⚠️ **Important:** Change the default password after first login!
+ **Important:** Change the default password after first login!
 
 ### 3. Run the Application
 
@@ -61,7 +61,7 @@ You'll be presented with a login screen. Use the default credentials or register
 
 ### Logout
 
-Click the "🚪 Logout" button in the sidebar.
+Click the " Logout" button in the sidebar.
 
 ## Data Storage
 
@@ -208,7 +208,7 @@ from src.auth.migrations import rollback_migration
 rollback_migration()
 ```
 
-⚠️ **Warning:** This only removes the marker file, not the migrated data.
+ **Warning:** This only removes the marker file, not the migrated data.
 
 ## Testing
 
@@ -259,6 +259,18 @@ Increase session expiry in `src/auth/database.py`:
 ```python
 SESSION_EXPIRY_HOURS = 48  # Change from 24 to 48
 ```
+
+## Production: Persistent User Database (Turso)
+1. Sign up at turso.tech (free tier: 5 GB, 500M reads/month)
+2. Install turso CLI and run: `turso db create quant-sim-auth`
+3. Get URL: `turso db show quant-sim-auth --url`
+4. Get token: `turso db tokens create quant-sim-auth`
+5. Add to Streamlit Cloud secrets:
+```toml
+TURSO_DATABASE_URL = "libsql://quant-sim-auth-xxx.turso.io"
+TURSO_AUTH_TOKEN = "your-token-here"
+```
+Without these secrets, auth works locally (SQLite) but resets on each Streamlit Cloud redeploy.
 
 ## Support
 
