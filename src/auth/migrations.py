@@ -72,7 +72,11 @@ def _migrate_portfolio_files(user_id: int, dry_run: bool = False) -> int:
     Returns number of files migrated.
     """
     old_portfolio_dir = DATA_DIR / "portfolios"
-    new_portfolio_dir = ensure_user_dirs(user_id)["portfolios"]
+    new_portfolio_dir = (
+        get_user_data_dir(user_id) / "portfolios"
+        if dry_run
+        else ensure_user_dirs(user_id)["portfolios"]
+    )
     
     if not old_portfolio_dir.exists():
         return 0
@@ -99,7 +103,11 @@ def _migrate_swing_tracker_files(user_id: int, dry_run: bool = False) -> int:
     Returns number of files migrated.
     """
     old_swing_dir = DATA_DIR / "swing_tracker"
-    new_swing_dir = ensure_user_dirs(user_id)["swing_tracker"]
+    new_swing_dir = (
+        get_user_data_dir(user_id) / "swing_tracker"
+        if dry_run
+        else ensure_user_dirs(user_id)["swing_tracker"]
+    )
     
     if not old_swing_dir.exists():
         return 0
@@ -126,7 +134,11 @@ def _migrate_run_history_files(user_id: int, dry_run: bool = False) -> int:
     Returns number of files migrated.
     """
     old_history_dir = DATA_DIR / "run_history"
-    new_history_dir = ensure_user_dirs(user_id)["run_history"]
+    new_history_dir = (
+        get_user_data_dir(user_id) / "run_history"
+        if dry_run
+        else ensure_user_dirs(user_id)["run_history"]
+    )
     
     if not old_history_dir.exists():
         return 0
@@ -146,12 +158,22 @@ def _migrate_run_history_files(user_id: int, dry_run: bool = False) -> int:
     return migrated
 
 
-def create_default_user() -> Optional[Dict[str, Any]]:
+def create_default_user(dry_run: bool = False) -> Optional[Dict[str, Any]]:
     """
     Create the default admin user if it doesn't exist.
     
     Returns user dict if created or already exists.
     """
+    if dry_run:
+        # A dry run must not create the auth database or bootstrap credentials.
+        # ID 1 is the documented migration target for a fresh installation.
+        return {
+            "id": 1,
+            "username": DEFAULT_USERNAME,
+            "email": DEFAULT_EMAIL,
+            "planned": True,
+        }
+
     init_auth_database()
     
     # Check if default user already exists
@@ -206,7 +228,7 @@ def migrate_existing_data(dry_run: bool = False) -> Dict[str, Any]:
         }
     
     # Create default user
-    default_user = create_default_user()
+    default_user = create_default_user(dry_run=dry_run)
     if not default_user:
         return {
             "success": False,

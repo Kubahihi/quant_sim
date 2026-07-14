@@ -31,7 +31,8 @@ ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif",
     ".pptx", ".ppt", ".json", ".py", ".ipynb", ".zip",
 }
-MAX_FILE_SIZE_MB = 50
+# Keep the UI aligned with the hard limit enforced by the storage backend.
+MAX_FILE_SIZE_MB = 20
 
 
 def _is_development_mode() -> bool:
@@ -194,6 +195,16 @@ def init_db() -> None:
         ]:
             if col not in decision_log_cols:
                 conn.execute(f"ALTER TABLE decision_log ADD COLUMN {col} {definition}")
+        # Preserve every collaboration event; decision_log only holds the latest editor.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS decision_edit_log (
+                id INTEGER PRIMARY KEY,
+                decision_id INTEGER NOT NULL,
+                ticker TEXT,
+                edited_at TEXT NOT NULL,
+                edited_by TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
@@ -305,6 +316,10 @@ def init_db() -> None:
                 "INSERT INTO mindmap_edges (id, source, target) VALUES (?, ?, ?)",
                 DEFAULT_MINDMAP_EDGES,
             )
+        # Commit schema migrations before pushing the local libSQL replica to Turso.
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -3478,10 +3493,26 @@ def _fetch_ticker_fundamentals(ticker: str) -> dict:
         return {"_error": {"value": str(e), "formatted": str(e), "desc": "Fetch failed"}}
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_six_month_price_history(ticker: str) -> list[tuple[str, float]]:
+    """Return daily closing prices for the latest six months, if available."""
+    try:
+        import yfinance as yf
+        history = yf.Ticker(ticker).history(period="6mo", interval="1d")
+        if history is None or history.empty or "Close" not in history:
+            return []
+        return [
+            (date.strftime("%Y-%m-%d"), float(close))
+            for date, close in history["Close"].dropna().items()
+        ]
+    except Exception:
+        return []
+
+
 def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
     import json
     st.markdown("### Investment Decision Log")
-    st.caption("Chronological record of strategy decisions — every team member can edit an entry. Changes made by a different member are highlighted in purple.")
+    st.caption("Chronological record of strategy decisions, including the price captured at each decision. Every team edit is marked in the price chart with that member's colour.")
 
     # ── Form to log a new decision ────────────────────────────────────────────
     with st.expander("Log New Decision", expanded=False):
@@ -3556,6 +3587,7 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
     # ── Load log ──────────────────────────────────────────────────────────────
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()
+        edit_rows = conn.execute("SELECT * FROM decision_edit_log ORDER BY id ASC").fetchall()
 
     if not rows:
         st.info("No decisions logged yet. Use the form above to log your first investment decision.")
@@ -3638,6 +3670,108 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
         df_data.append(row_dict)
     st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
 
+    # -- Price at each decision, with a persistent colour for each team editor
+    st.markdown('#### Price at Decision & Team Edit History')
+    st.caption('The curve shows the latest six months of daily prices. Circles mark the price captured at each decision; diamonds show subsequent edits in the editor’s colour.')
+    try:
+        import plotly.graph_objects as go
+
+        price_points: dict[str, list[dict[str, Any]]] = {}
+        for r in reversed(rows):
+            try:
+                snapshot = json.loads(r['quant_snapshot_json'] or '{}')
+            except Exception:
+                snapshot = {}
+            for tkr, metrics in snapshot.get('_fundamentals', {}).items():
+                price_data = metrics.get('Price', {})
+                try:
+                    price = float(price_data['value'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                price_points.setdefault(tkr, []).append({
+                    'id': int(r['id']), 'date': str(r['date']), 'price': price,
+                    'action': str(r['action']), 'author': str(r['team_member']),
+                })
+
+        # Older records only retained their latest editor. Show that edit too,
+        # without duplicating an event already stored in the audit table.
+        recorded_decision_ids = {int(event['decision_id']) for event in edit_rows}
+        chart_edits = [dict(event) for event in edit_rows]
+        for r in rows:
+            if r['updated_by'] and int(r['id']) not in recorded_decision_ids:
+                chart_edits.append({
+                    'decision_id': int(r['id']), 'ticker': str(r['ticker']),
+                    'edited_at': str(r['updated_at'] or r['date']),
+                    'edited_by': str(r['updated_by']),
+                })
+
+        editor_names = sorted({str(event['edited_by']) for event in chart_edits if event['edited_by']})
+        editor_palette = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#4f46e5']
+        editor_colours = {
+            name: editor_palette[index % len(editor_palette)]
+            for index, name in enumerate(editor_names)
+        }
+
+        chart_count = 0
+        for tkr, points in price_points.items():
+            fig = go.Figure()
+            history = _fetch_six_month_price_history(tkr)
+            if history:
+                period_start = history[0][0]
+                points = [point for point in points if point['date'][:10] >= period_start]
+                fig.add_trace(go.Scatter(
+                    x=[date for date, _ in history],
+                    y=[close for _, close in history],
+                    mode='lines',
+                    name='6-month price curve',
+                    line=dict(width=2, color='#64748b'),
+                    hovertemplate='%{x}<br>Close: $%{y:,.2f}<extra></extra>',
+                ))
+            fig.add_trace(go.Scatter(
+                x=[point['date'] for point in points],
+                y=[point['price'] for point in points],
+                mode='markers',
+                name='Decision price',
+                marker=dict(size=10, color='#f8fafc', line=dict(width=2, color='#475569')),
+                customdata=[[point['action'], point['author']] for point in points],
+                hovertemplate='%{x}<br>Price: $%{y:,.2f}<br>%{customdata[0]} by %{customdata[1]}<extra></extra>',
+            ))
+            points_by_id = {point['id']: point for point in points}
+            for editor in editor_names:
+                edited_points = [
+                    (event, points_by_id.get(int(event['decision_id'])))
+                    for event in chart_edits if str(event['edited_by']) == editor
+                ]
+                edited_points = [(event, point) for event, point in edited_points if point]
+                if not edited_points:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=[point['date'] for _, point in edited_points],
+                    y=[point['price'] for _, point in edited_points],
+                    mode='markers',
+                    name=f'Edited by {editor}',
+                    marker=dict(size=13, symbol='diamond', color=editor_colours[editor],
+                                line=dict(width=1, color='#ffffff')),
+                    customdata=[[str(event['edited_at']), point['action']] for event, point in edited_points],
+                    hovertemplate=(
+                        f'Edited by {editor}<br>%{{customdata[0]}}<br>'
+                        'Decision: %{customdata[1]}<br>Price: $%{y:,.2f}<extra></extra>'
+                    ),
+                ))
+            fig.update_layout(
+                title=f'{tkr} — six-month price curve and decisions',
+                height=310, margin=dict(l=20, r=20, t=45, b=25),
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)', yaxis_title='Price (USD)',
+                legend_title_text='Team edit markers',
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            chart_count += 1
+        if not chart_count:
+            st.info('Price charts appear once a decision is logged with live fundamentals enabled.')
+    except ImportError:
+        st.info('Install plotly to see the price and edit history charts.')
+
     # -- Per-decision metric detail cards
     st.markdown('#### Decision Detail & Metrics')
     for r in rows:
@@ -3696,18 +3830,23 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
                         if not edit_ticker.strip() or not edit_thesis.strip():
                             st.warning("Ticker and Thesis are required.")
                         else:
+                            edited_at = _now_iso()
                             with get_connection() as conn:
                                 conn.execute(
                                     "UPDATE decision_log SET ticker = ?, action = ?, thesis = ?, client_goal_tags = ?, updated_at = ?, updated_by = ? WHERE id = ?",
                                     (
                                         edit_ticker.strip().upper(), edit_action, edit_thesis.strip(), ",".join(edit_tags),
-                                        _now_iso(), str(profile["username"]), r['id'],
+                                        edited_at, str(profile["username"]), r['id'],
                                     ),
+                                )
+                                conn.execute(
+                                    "INSERT INTO decision_edit_log (decision_id, ticker, edited_at, edited_by) VALUES (?, ?, ?, ?)",
+                                    (r['id'], edit_ticker.strip().upper(), edited_at, str(profile["username"])),
                                 )
                                 conn.commit()
                                 if hasattr(conn, 'sync'):
                                     conn.sync()
-                            st.success("Decision updated. Team edits are marked in purple when the editor is not the original author.")
+                            st.success("Decision updated. Its edit marker now appears in the price chart using this team member's colour.")
                             st.rerun()
             if funds:
                 for tkr, mets in funds.items():
