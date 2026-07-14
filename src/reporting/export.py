@@ -215,6 +215,23 @@ def generate_pdf_report(
             f"95th percentile: {simulation.get('percentile_95', 0.0):,.0f}",
         ]
         _add_text_page(pdf, "Simulation Summary", simulation_lines)
+        
+        robustness = report_payload.get("robustness", {})
+        if robustness:
+            metrics_rob = robustness.get("metrics", {})
+            robustness_lines = [
+                f"Probabilistic Sharpe Ratio (PSR): {metrics_rob.get('psr', 0.0):.2%}",
+                f"Deflated Sharpe Ratio (DSR): {metrics_rob.get('dsr', 0.0):.2%}",
+                f"Walk-Forward OOS Sharpe: {metrics_rob.get('oos_sharpe', 0.0):.3f}",
+                f"Walk-Forward OOS Return (Ann): {metrics_rob.get('oos_annualized_return', 0.0):.2%}",
+                "",
+                "PSR Interpretation:",
+                metrics_rob.get('psr_interpretation', '-'),
+                "",
+                "DSR Interpretation:",
+                metrics_rob.get('dsr_interpretation', '-'),
+            ]
+            _add_text_page(pdf, "Robustness Check", robustness_lines)
 
         figure_titles = {
             "cumulative": "",

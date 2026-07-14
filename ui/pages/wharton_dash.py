@@ -88,6 +88,7 @@ QUANT_MODULES = [
     "Simulation",
     "Models & Signals",
     "News Sentiment",
+    "Robustness Check",
     "Backtest",
     "Run History",
 ]
@@ -1380,6 +1381,7 @@ def _compute_quant_run(
     tickers, weights, benchmark_ticker, start_date, end_date,
     risk_free_rate, current_value, max_weight, turnover_limit,
     transaction_cost_bps, risk_aversion, simulation_days, n_simulations, random_seed,
+    jump_intensity, jump_mean, jump_volatility,
 ) -> dict[str, Any]:
     modules = _load_quant_modules()
     analytics, optimization, simulation = modules["analytics"], modules["optimization"], modules["simulation"]
@@ -1434,6 +1436,14 @@ def _compute_quant_run(
         expected_return=float(portfolio_returns.mean() * 252.0),
         volatility=float(core_metrics.get("volatility", 0.0)),
         time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
+    )
+    
+    adv_price_paths, adv_simulation_stats = simulation.run_advanced_monte_carlo_simulation(
+        current_value=current_value,
+        expected_return=float(core_metrics.get("annualized_return", 0.0)),
+        volatility=float(core_metrics.get("volatility", 0.0)),
+        time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
+        jump_intensity=jump_intensity, jump_mean=jump_mean, jump_volatility=jump_volatility,
     )
 
     # Run full modular quant stack (models, signals, news, backtest, history)
@@ -1504,7 +1514,12 @@ def _compute_quant_run(
         "cost_aware": cost_aware,
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
+<<<<<<< HEAD
         "model_validation": model_validation,
+=======
+        "adv_price_paths": adv_price_paths,
+        "adv_simulation_stats": adv_simulation_stats,
+>>>>>>> f9c931bfc0f87598d8825fa7a42efb4c211368b5
         "quant_stack": quant_stack_result,
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
@@ -1538,8 +1553,12 @@ def _render_quant_configuration() -> None:
                 transaction_cost_bps = st.slider("Transaction Cost (bps)", 0.0, 100.0, 10.0, 1.0)
                 risk_aversion = st.slider("Risk Aversion", 0.5, 10.0, 3.0, 0.5)
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
-                n_simulations = st.slider("Simulation Count", 200, 5000, 1200, 100)
+                n_simulations = st.slider("Simulation Count", 200, 15000, 1200, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
+                st.markdown("#### Jump Diffusion (Advanced MC)")
+                jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
+                jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
+                jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
             run_clicked = st.form_submit_button(" Run Full Quant Engine", type="primary")
 
     if run_clicked:
@@ -1557,6 +1576,7 @@ def _render_quant_configuration() -> None:
                     transaction_cost_bps=float(transaction_cost_bps), risk_aversion=float(risk_aversion),
                     simulation_days=int(simulation_days), n_simulations=int(n_simulations),
                     random_seed=int(random_seed),
+                    jump_intensity=float(jump_intensity), jump_mean=float(jump_mean), jump_volatility=float(jump_volatility),
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -1843,6 +1863,68 @@ def _render_models_signals(result: dict) -> None:
         sc[2].metric("Regime", str(s_dict.get("regime_label", "—")))
         if s_dict.get("narrative"):
             st.markdown(f"> {escape(str(s_dict['narrative']))}")
+
+
+def _render_robustness_check(result: dict) -> None:
+    """Render Robustness Validation."""
+    st.markdown("### Robustness Check (Walk-Forward Validation)")
+    qs = result.get("quant_stack", {})
+    if not qs:
+        st.info("Run the Quant Engine to populate data.")
+        return
+        
+    portfolio_timeseries = result.get("portfolio_timeseries", pd.DataFrame())
+    if portfolio_timeseries.empty or "cumulative_return" not in portfolio_timeseries.columns:
+        st.warning("Portfolio returns not available for robustness validation.")
+        return
+        
+    returns = portfolio_timeseries["cumulative_return"].diff().fillna(0.0)
+    
+    st.markdown("Configure Walk-Forward Out-of-Sample Validation and run it to compute Probabilistic Sharpe Ratio (PSR) and Deflated Sharpe Ratio (DSR).")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    train_days = col1.number_input("Train Window (Days)", min_value=30, max_value=3650, value=252, step=30)
+    test_days = col2.number_input("Test Window (Days)", min_value=10, max_value=1095, value=60, step=10)
+    step_days = col3.number_input("Step (Days)", min_value=10, max_value=1095, value=30, step=10)
+    num_trials = col4.number_input("Number of Trials", min_value=1, max_value=10000, value=100, step=10, help="Number of strategy variations tested. Used for DSR.")
+    
+    if st.button("Run Validation", key="btn_run_robustness"):
+        with st.spinner("Running Walk-Forward validation..."):
+            from src.analytics.modular.robustness_validation import run_walk_forward_validation
+            
+            try:
+                res = run_walk_forward_validation(
+                    portfolio_returns=returns,
+                    train_days=train_days,
+                    test_days=test_days,
+                    step_days=step_days,
+                    num_trials=num_trials
+                )
+                
+                metrics = res["metrics"]
+                
+                r1, r2, r3 = st.columns(3)
+                r1.metric("PSR", f"{metrics['psr']:.2%}")
+                r2.metric("DSR", f"{metrics['dsr']:.2%}")
+                r3.metric("OOS Sharpe", f"{metrics['oos_sharpe']:.3f}")
+                
+                st.info(f"**PSR Interpretation:** {metrics['psr_interpretation']}")
+                st.info(f"**DSR Interpretation:** {metrics['dsr_interpretation']}")
+                
+                if res["windows"]:
+                    st.markdown("#### Walk-Forward Windows")
+                    df_windows = pd.DataFrame(res["windows"])
+                    st.dataframe(df_windows, use_container_width=True)
+                    
+                    st.markdown("#### Rolling Out-of-Sample Performance")
+                    agg_oos = res["aggregate_oos_returns"]
+                    if not agg_oos.empty:
+                        cum_oos = (1 + agg_oos).cumprod()
+                        import plotly.express as px
+                        fig = px.line(cum_oos, title="Cumulative Out-of-Sample Returns", labels={"value": "Cumulative Growth", "index": "Date"})
+                        st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error running validation: {e}")
 
 
 def _render_news_sentiment(result: dict) -> None:
@@ -2135,6 +2217,167 @@ def _render_monte_carlo(result: dict) -> None:
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
                f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
                f"Seed: {inputs.get('random_seed', 'N/A')}")
+
+
+def _render_advanced_monte_carlo(result: dict) -> None:
+    """Interactive Monte Carlo simulation tab with fan charts and VaR analysis."""
+    st.markdown("### Advanced Monte Carlo (Merton Jump Diffusion)")
+
+    try:
+        import plotly.graph_objects as go
+        HAS_PLOTLY = True
+    except ImportError:
+        HAS_PLOTLY = False
+
+    if not result:
+        st.info("Run the Quant Engine first to see Monte Carlo results.")
+        return
+
+    stats = result.get("adv_simulation_stats", {})
+    paths = result.get("adv_price_paths")
+    inputs = result.get("inputs", {})
+    current_value = inputs.get("current_value", 100_000)
+
+    if paths is None:
+        st.warning("No simulation paths available.")
+        return
+
+    # KPI cards
+    st.markdown("#### Key Outcomes")
+    k = st.columns(5)
+    k[0].metric(" Mean Final", f"${stats.get('mean', 0):,.0f}",
+                delta=f"{((stats.get('mean', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[1].metric(" Median", f"${stats.get('median', 0):,.0f}")
+    k[2].metric(" 5th Pctl (VaR)", f"${stats.get('percentile_5', 0):,.0f}",
+                delta=f"{((stats.get('percentile_5', current_value) / current_value) - 1) * 100:+.1f}%")
+    k[3].metric(" 95th Pctl", f"${stats.get('percentile_95', 0):,.0f}")
+    k[4].metric(" Std Dev", f"${stats.get('std', 0):,.0f}")
+
+    # Probability of loss
+    final_values = paths[-1] if paths is not None else np.array([])
+    if len(final_values) > 0:
+        prob_loss = float(np.mean(final_values < current_value)) * 100
+        prob_20_loss = float(np.mean(final_values < current_value * 0.80)) * 100
+        prob_gain_20 = float(np.mean(final_values > current_value * 1.20)) * 100
+
+        pc = st.columns(3)
+        pc[0].metric(" P(Loss)", f"{prob_loss:.1f}%")
+        pc[1].metric(" P(Loss > 20%)", f"{prob_20_loss:.1f}%")
+        pc[2].metric(" P(Gain > 20%)", f"{prob_gain_20:.1f}%")
+
+    if HAS_PLOTLY:
+        # Fan chart with percentile bands
+        st.markdown("#### Percentile Fan Chart")
+        percentiles = [5, 10, 25, 50, 75, 90, 95]
+        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        days = list(range(len(pctl_data["p50"])))
+
+        fig_fan = go.Figure()
+        # 5-95 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p95"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p95"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p5"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.10)",
+            name="5th–95th %ile"))
+        # 10-90 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p90"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p90"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p10"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.18)",
+            name="10th–90th %ile"))
+        # 25-75 band
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p75"].tolist(), mode="lines",
+            line=dict(width=0), showlegend=False, name="p75"))
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p25"].tolist(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(99,102,241,0.28)",
+            name="25th–75th %ile"))
+        # Median line
+        fig_fan.add_trace(go.Scatter(x=days, y=pctl_data["p50"].tolist(), mode="lines",
+            line=dict(color="#6366f1", width=2.5), name="Median"))
+        # Starting value
+        fig_fan.add_hline(y=current_value, line_dash="dash", line_color="#ef4444",
+            annotation_text=f"Initial ${current_value:,.0f}", annotation_position="top left")
+
+        fig_fan.update_layout(
+            template="plotly_dark", height=480,
+            title="Portfolio Value: Advanced Monte Carlo Fan Chart",
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_fan, use_container_width=True)
+
+        # Distribution histogram
+        if len(final_values) > 0:
+            st.markdown("#### Terminal Value Distribution")
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Histogram(
+                x=final_values, nbinsx=60, name="Final Values",
+                marker_color="rgba(99,102,241,0.7)",
+                marker_line=dict(color="rgba(99,102,241,1)", width=1),
+            ))
+            fig_dist.add_vline(x=current_value, line_dash="dash", line_color="#ef4444",
+                annotation_text=f"Initial ${current_value:,.0f}")
+            fig_dist.add_vline(x=float(stats.get("percentile_5", 0)), line_dash="dot",
+                line_color="#f59e0b", annotation_text="VaR 95%")
+            fig_dist.update_layout(
+                template="plotly_dark", height=380,
+                xaxis_title="Final Portfolio Value ($)", yaxis_title="Frequency",
+                xaxis=dict(tickformat="$,.0f"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            # VaR / CVaR metrics
+            st.markdown("#### Value-at-Risk Analysis")
+            var_cols = st.columns(4)
+            var_95 = float(np.percentile(final_values, 5))
+            var_99 = float(np.percentile(final_values, 1))
+            cvar_95 = float(np.mean(final_values[final_values <= var_95]))
+            cvar_99 = float(np.mean(final_values[final_values <= var_99]))
+
+            var_cols[0].metric("VaR 95%", f"${current_value - var_95:,.0f}",
+                delta=f"{((var_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[1].metric("VaR 99%", f"${current_value - var_99:,.0f}",
+                delta=f"{((var_99 / current_value) - 1) * 100:.1f}%")
+            var_cols[2].metric("CVaR 95%", f"${current_value - cvar_95:,.0f}",
+                delta=f"{((cvar_95 / current_value) - 1) * 100:.1f}%")
+            var_cols[3].metric("CVaR 99%", f"${current_value - cvar_99:,.0f}",
+                delta=f"{((cvar_99 / current_value) - 1) * 100:.1f}%")
+
+        # Sample paths
+        st.markdown("#### Sample Simulated Paths")
+        n_show = min(50, paths.shape[1])
+        fig_paths = go.Figure()
+        rng = np.random.default_rng(42)
+        sample_indices = rng.choice(paths.shape[1], n_show, replace=False)
+        for idx in sample_indices:
+            fig_paths.add_trace(go.Scatter(
+                x=list(range(paths.shape[0])), y=paths[:, idx].tolist(),
+                mode="lines", line=dict(width=0.5, color="rgba(99,102,241,0.15)"),
+                showlegend=False,
+            ))
+        fig_paths.add_trace(go.Scatter(
+            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
+        ))
+        fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
+        fig_paths.update_layout(
+            template="plotly_dark", height=400,
+            xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+            yaxis=dict(tickformat="$,.0f"),
+        )
+        st.plotly_chart(fig_paths, use_container_width=True)
+    else:
+        # Fallback without Plotly
+        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
+
+    st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
+               f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
+               f"Seed: {inputs.get('random_seed', 'N/A')}")
+
+
 
 
 # ─── Efficient Frontier ───────────────────────────────────────────────────────
@@ -3429,6 +3672,8 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             _render_models_signals(result)
         elif selected == "News Sentiment":
             _render_news_sentiment(result)
+        elif selected == "Robustness Check":
+            _render_robustness_check(result)
         elif selected == "Backtest":
             _render_backtest(result)
         elif selected == "Run History":
@@ -4641,6 +4886,7 @@ def render_wharton_cockpit() -> None:
         "Scenario Playground",
         "Efficient Frontier",
         "Monte Carlo",
+        "Advanced Monte Carlo",
         "Advanced Analytics",
         "Mind Map",
         "Sub-Projects",
@@ -4675,14 +4921,16 @@ def render_wharton_cockpit() -> None:
     with tabs[9]:
         _render_monte_carlo(result)
     with tabs[10]:
-        _render_advanced_analytics(result)
+        _render_advanced_monte_carlo(result)
     with tabs[11]:
-        _render_mindmap()
+        _render_advanced_analytics(result)
     with tabs[12]:
-        _render_subprojects(profile)
+        _render_mindmap()
     with tabs[13]:
-        _render_chat(profile)
+        _render_subprojects(profile)
     with tabs[14]:
+        _render_chat(profile)
+    with tabs[15]:
         _render_file_center(profile)
     with tabs[15]:
         _render_competition_rules(profile)
