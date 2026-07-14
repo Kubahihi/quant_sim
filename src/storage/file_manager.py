@@ -537,4 +537,7 @@ def initialize_file_manager() -> Dict[str, Any]:
         Initialization status
     """
     fm = get_file_manager()
-    return fm.initialize()
+    result = fm.initialize()
+    if not result.get("success"):
+        raise StorageError(result.get("error", "Storage initialization failed"))
+    return result

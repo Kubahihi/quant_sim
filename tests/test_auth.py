@@ -18,14 +18,22 @@ import tempfile
 from datetime import date
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import patch
 
 # Set up test environment
 os.environ["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+_AUTH_TEST_TEMP_DIR = tempfile.TemporaryDirectory()
+os.environ["AUTH_TEST_DB_PATH"] = str(Path(_AUTH_TEST_TEMP_DIR.name) / "test_auth.db")
 
 import src.auth
 import src.auth.database
 import src.auth.manager
 import src.auth.migrations
+
+# Other test modules can import the auth package during collection before this
+# module sets the environment variable. Set the module value explicitly so the
+# suite never writes to the real project database, regardless of test order.
+src.auth.database.AUTH_DB_PATH = Path(os.environ["AUTH_TEST_DB_PATH"])
 
 from src.auth.database import (
     init_auth_database,
@@ -152,22 +160,6 @@ class TestInputValidation(TestCase):
 
 class TestUserRegistration(TestCase):
     """Test user registration functionality."""
-    
-    @classmethod
-    def setUpClass(cls):
-        """Set up test database."""
-        # Use a temporary database for testing
-        cls.temp_dir = tempfile.mkdtemp()
-        cls.test_db_path = Path(cls.temp_dir) / "test_auth.db"
-        # Set environment variable to use test database
-        os.environ["AUTH_TEST_DB_PATH"] = str(cls.test_db_path)
-        # Reinitialize the database module to pick up the new path
-        import importlib
-        db_module = importlib.reload(src.auth.database)
-        importlib.reload(src.auth.manager)
-        importlib.reload(src.auth.migrations)
-        # Initialize the test database
-        db_module.init_auth_database()
     
     def test_register_user_success(self):
         user, errors = register_user(
@@ -357,14 +349,21 @@ class TestMigration(TestCase):
         self.assertIn("completed", status)
     
     def test_create_default_user(self):
-        user = create_default_user()
-        self.assertIsNotNone(user)
-        self.assertEqual(user["username"], "admin")
-        
-        # Second call should return existing user
-        user2 = create_default_user()
-        self.assertIsNotNone(user2)
-        self.assertEqual(user2["username"], "admin")
+        with patch.dict(os.environ, {"ADMIN_BOOTSTRAP_PASSWORD": "AdminTest123"}):
+            user = create_default_user()
+            self.assertIsNotNone(user)
+            self.assertEqual(user["username"], "admin")
+
+            # Second call should return existing user
+            user2 = create_default_user()
+            self.assertIsNotNone(user2)
+            self.assertEqual(user2["username"], "admin")
+
+    def test_create_default_user_requires_configured_password(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("src.auth.migrations.get_user_by_username", return_value=None), \
+             patch("src.auth.migrations.user_exists", return_value=False):
+            self.assertIsNone(create_default_user())
     
     def test_migrate_existing_data(self):
         result = migrate_existing_data(dry_run=True)

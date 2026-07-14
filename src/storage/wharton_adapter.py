@@ -14,8 +14,9 @@ import os
 import sqlite3
 import uuid
 
-from .backend import StorageBackend, LocalStorageBackend
+from .backend import StorageBackend, LocalStorageBackend, StorageLimits
 from .file_manager import FileManager
+from .exceptions import FileNotFound as BackendFileNotFound
 from .exceptions import FileValidationError, StorageFileNotFoundError
 from src.auth.database import get_db_connection
 
@@ -28,7 +29,7 @@ ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif",
     ".pptx", ".ppt", ".json", ".py", ".ipynb", ".zip",
 }
-MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_MB = StorageLimits.MAX_FILE_SIZE_MB
 
 
 def get_storage_backend(storage_path: Optional[str] = None) -> StorageBackend:
@@ -99,10 +100,28 @@ def init_storage_db(db_path: Optional[str] = None) -> None:
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     
     conn = get_db_connection(db_path)
     conn.row_factory = sqlite3.Row
+
+    # The adapter is also a public entry point, so it must work even when the
+    # dashboard's broader schema initialization has not run first.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            filename TEXT,
+            original_filename TEXT,
+            uploaded_by TEXT,
+            file_path TEXT,
+            file_size_bytes INTEGER DEFAULT 0,
+            mime_type TEXT DEFAULT '',
+            project_name TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            tags TEXT DEFAULT ''
+        )
+    """)
     
     # Get existing columns
     existing_cols = {
@@ -323,7 +342,7 @@ def download_file(
     
     try:
         content = backend.download(storage_key)
-    except FileNotFound:
+    except BackendFileNotFound:
         raise StorageFileNotFoundError(
             f"File '{original_filename}' (ID: {file_id}) is indexed but missing from storage"
         )

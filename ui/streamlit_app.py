@@ -202,12 +202,17 @@ def _auto_login_for_smoke_tests() -> int | None:
         return None
 
     try:
-        from src.auth import login_user
-        from src.auth.migrations import DEFAULT_USERNAME, create_default_user
+        from src.auth import login_user, register_user
 
-        create_default_user()
-        password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD", "")
-        token, user, errors = login_user(DEFAULT_USERNAME, password)
+        username = "streamlit_smoke_test"
+        password = "StreamlitSmoke123"
+        register_user(
+            username=username,
+            email="streamlit-smoke@example.com",
+            password=password,
+            confirm_password=password,
+        )
+        token, user, errors = login_user(username, password)
         if errors or not token or not user:
             return None
 

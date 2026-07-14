@@ -89,6 +89,21 @@ GROQ_API_KEY="gsk_..."
 
 Poznamka: Pokud klic chybi nebo Groq neodpovi, aplikace bezi dal a pouzije deterministic fallback komentar.
 
+### Sdilena online databaze
+
+Decision log, historie jeho uprav i ostatni data dashboardu se ukladaji do sdilene
+Turso/libSQL databaze, jakmile jsou nastaveny `TURSO_DATABASE_URL` a
+`TURSO_AUTH_TOKEN`. Aplikace pri startu automaticky vytvori nebo zaktualizuje
+tabulky a po kazdem ulozeni synchronizuje zmeny online.
+
+1. V Turso vytvorte databazi a vygenerujte pristupovy token.
+2. Hodnoty vlozte do `.streamlit/secrets.toml` pri lokalnim spusteni nebo do
+   **Secrets** v Streamlit Cloud pri nasazeni.
+3. Nasadte aplikaci; vsichni clenove tymu pak pouziji stejny decision log.
+
+Bez techto dvou secrets aplikace zamerne pouzije pouze lokalni databazi, aby
+neukladala data na neznamy vzdaleny server.
+
 ## 3) Zakladni logika aplikace
 
 ### Vstup

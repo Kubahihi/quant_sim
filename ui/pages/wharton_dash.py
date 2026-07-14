@@ -30,7 +30,8 @@ ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif",
     ".pptx", ".ppt", ".json", ".py", ".ipynb", ".zip",
 }
-MAX_FILE_SIZE_MB = 50
+# Keep the UI aligned with the hard limit enforced by the storage backend.
+MAX_FILE_SIZE_MB = 20
 
 
 def _is_development_mode() -> bool:
