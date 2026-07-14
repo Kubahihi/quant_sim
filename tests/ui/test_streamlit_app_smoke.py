@@ -122,12 +122,44 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
         "role": "Captain/Quant",
         "primary_module": "Quant Engine",
     }
+    at.session_state["wharton_company_analysis_v1"] = {
+        "MSFT": {
+            "ticker": "MSFT",
+            "fetched_at": "2026-07-14T12:00:00+00:00",
+            "info": {
+                "longName": "Microsoft Corporation",
+                "longBusinessSummary": "Software and cloud services company.",
+                "currentPrice": 100.0,
+                "marketCap": 1_000_000_000_000,
+                "freeCashflow": 10_000_000_000,
+                "sharesOutstanding": 1_000_000_000,
+                "totalCash": 5_000_000_000,
+                "totalDebt": 1_000_000_000,
+                "revenueGrowth": 0.10,
+                "earningsGrowth": 0.12,
+                "grossMargins": 0.60,
+                "operatingMargins": 0.30,
+                "returnOnEquity": 0.25,
+            },
+            "metrics": {"currentPrice": 100.0, "marketCap": 1_000_000_000_000},
+            "officers": [{"name": "Test CEO", "title": "CEO"}],
+            "history": pd.DataFrame({"Close": [90.0, 100.0]}),
+            "news": [],
+            "income_statement": pd.DataFrame(),
+            "balance_sheet": pd.DataFrame(),
+            "cash_flow": pd.DataFrame(),
+            "quarterly_income_statement": pd.DataFrame(),
+            "quarterly_balance_sheet": pd.DataFrame(),
+            "quarterly_cash_flow": pd.DataFrame(),
+        }
+    }
     at.run(timeout=60)
 
     assert len(at.exception) == 0
     tab_labels = [tab.label for tab in at.tabs]
-    assert "Zadání a pravidla" in tab_labels
-    assert "Portfolio tracker" in tab_labels
+    assert "Assignment & Rules" in tab_labels
+    assert "Portfolio Tracker" in tab_labels
+    assert "Company Analysis" in tab_labels
 
 
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):
