@@ -84,6 +84,7 @@ QUANT_MODULES = [
     "Simulation",
     "Models & Signals",
     "News Sentiment",
+    "Robustness Check",
     "Backtest",
     "Run History",
 ]
@@ -1699,6 +1700,68 @@ def _render_models_signals(result: dict) -> None:
             st.markdown(f"> {escape(str(s_dict['narrative']))}")
 
 
+def _render_robustness_check(result: dict) -> None:
+    """Render Robustness Validation."""
+    st.markdown("### Robustness Check (Walk-Forward Validation)")
+    qs = result.get("quant_stack", {})
+    if not qs:
+        st.info("Run the Quant Engine to populate data.")
+        return
+        
+    portfolio_timeseries = result.get("portfolio_timeseries", pd.DataFrame())
+    if portfolio_timeseries.empty or "cumulative_return" not in portfolio_timeseries.columns:
+        st.warning("Portfolio returns not available for robustness validation.")
+        return
+        
+    returns = portfolio_timeseries["cumulative_return"].diff().fillna(0.0)
+    
+    st.markdown("Configure Walk-Forward Out-of-Sample Validation and run it to compute Probabilistic Sharpe Ratio (PSR) and Deflated Sharpe Ratio (DSR).")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    train_days = col1.number_input("Train Window (Days)", min_value=30, max_value=3650, value=252, step=30)
+    test_days = col2.number_input("Test Window (Days)", min_value=10, max_value=1095, value=60, step=10)
+    step_days = col3.number_input("Step (Days)", min_value=10, max_value=1095, value=30, step=10)
+    num_trials = col4.number_input("Number of Trials", min_value=1, max_value=10000, value=100, step=10, help="Number of strategy variations tested. Used for DSR.")
+    
+    if st.button("Run Validation", key="btn_run_robustness"):
+        with st.spinner("Running Walk-Forward validation..."):
+            from src.analytics.modular.robustness_validation import run_walk_forward_validation
+            
+            try:
+                res = run_walk_forward_validation(
+                    portfolio_returns=returns,
+                    train_days=train_days,
+                    test_days=test_days,
+                    step_days=step_days,
+                    num_trials=num_trials
+                )
+                
+                metrics = res["metrics"]
+                
+                r1, r2, r3 = st.columns(3)
+                r1.metric("PSR", f"{metrics['psr']:.2%}")
+                r2.metric("DSR", f"{metrics['dsr']:.2%}")
+                r3.metric("OOS Sharpe", f"{metrics['oos_sharpe']:.3f}")
+                
+                st.info(f"**PSR Interpretation:** {metrics['psr_interpretation']}")
+                st.info(f"**DSR Interpretation:** {metrics['dsr_interpretation']}")
+                
+                if res["windows"]:
+                    st.markdown("#### Walk-Forward Windows")
+                    df_windows = pd.DataFrame(res["windows"])
+                    st.dataframe(df_windows, use_container_width=True)
+                    
+                    st.markdown("#### Rolling Out-of-Sample Performance")
+                    agg_oos = res["aggregate_oos_returns"]
+                    if not agg_oos.empty:
+                        cum_oos = (1 + agg_oos).cumprod()
+                        import plotly.express as px
+                        fig = px.line(cum_oos, title="Cumulative Out-of-Sample Returns", labels={"value": "Cumulative Growth", "index": "Date"})
+                        st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error running validation: {e}")
+
+
 def _render_news_sentiment(result: dict) -> None:
     """Render news sentiment from modular stack."""
     st.markdown("### News Sentiment")
@@ -3281,6 +3344,8 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             _render_models_signals(result)
         elif selected == "News Sentiment":
             _render_news_sentiment(result)
+        elif selected == "Robustness Check":
+            _render_robustness_check(result)
         elif selected == "Backtest":
             _render_backtest(result)
         elif selected == "Run History":
