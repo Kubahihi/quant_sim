@@ -5,14 +5,20 @@ import pytest
 
 from src.analytics.company_analysis import (
     _extract_geographic_revenue_from_ixbrl,
+    _imf_world_gdp_weighted_series,
     analyze_geographic_revenue,
+    analyze_macro_snapshot,
     analyze_moat,
     analyze_track_record,
     build_dcf_scenarios,
     calculate_dcf,
     classify_biography_sections,
+    fetch_imf_current_account_balance,
+    fetch_imf_general_government_debt,
+    fetch_macro_snapshot,
     fetch_management_biography,
     format_statement,
+    infer_macro_economy,
 )
 
 
@@ -225,3 +231,220 @@ def test_geographic_analysis_marks_broad_international_bucket_as_limited_detail(
     assert result["score"] == 3
     assert result["limited_granularity"] is True
     assert "limited detail" in result["label"].lower()
+
+
+def test_infer_macro_economy_maps_filing_labels_to_editable_proxies():
+    assert infer_macro_economy("United States") == "USA"
+    assert infer_macro_economy("US") == "USA"
+    assert infer_macro_economy("Europe, Middle East and Africa") == "WLD"
+    assert infer_macro_economy("Asia Pacific") == "EAS"
+    assert infer_macro_economy("International") == "WLD"
+
+
+def test_fetch_macro_snapshot_parses_latest_world_bank_observations(monkeypatch):
+    observations = []
+    sample_values = {
+        "FP.CPI.TOTL.ZG": {"2023": 3.4, "2024": 2.5},
+        "GC.DOD.TOTL.GD.ZS": {"2024": 58.0},
+        "NY.GDP.MKTP.KD.ZG": {"2024": 3.2},
+        "SL.UEM.TOTL.ZS": {"2024": 4.0},
+        "FR.INR.RINR": {"2024": 2.0},
+        "BN.CAB.XOKA.GD.ZS": {"2024": -2.0},
+        "FR.INR.LEND": {"2024": 6.0},
+    }
+    for indicator_code, values in sample_values.items():
+        for year, value in values.items():
+            observations.append({
+                "indicator": {"id": indicator_code, "value": indicator_code},
+                "country": {"id": "US", "value": "United States"},
+                "countryiso3code": "USA",
+                "date": year,
+                "value": value,
+            })
+
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._world_bank_request",
+        lambda url: [{"page": 1, "pages": 1}, observations],
+    )
+    result = fetch_macro_snapshot("USA", start_year=2023, end_year=2024)
+
+    assert result["available"] is True
+    assert result["economy_name"] == "United States"
+    assert result["available_indicator_count"] == 7
+    assert result["indicators"]["FP.CPI.TOTL.ZG"]["latest_value"] == pytest.approx(2.5)
+    assert result["indicators"]["FP.CPI.TOTL.ZG"]["latest_year"] == 2024
+    assert [point["year"] for point in result["indicators"]["FP.CPI.TOTL.ZG"]["series"]] == [2023, 2024]
+    assert "date=2023:2024" in result["source_url"]
+
+
+def test_macro_snapshot_uses_only_fixed_2024_observations(monkeypatch):
+    observations = [
+        {
+            "indicator": {"id": "FP.CPI.TOTL.ZG", "value": "Inflation"},
+            "country": {"id": "JP", "value": "Japan"},
+            "date": year,
+            "value": value,
+        }
+        for year, value in (("2023", 3.2), ("2025", 2.1))
+    ]
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._world_bank_request",
+        lambda url: [{"page": 1, "pages": 1}, observations],
+    )
+    monkeypatch.setattr(
+        "src.analytics.company_analysis.fetch_imf_general_government_debt",
+        lambda code, start, end: {"available": False},
+    )
+    monkeypatch.setattr(
+        "src.analytics.company_analysis.fetch_imf_current_account_balance",
+        lambda code, start, end: {"available": False},
+    )
+
+    result = fetch_macro_snapshot("JPN", start_year=2023, end_year=2025)
+    inflation = result["indicators"]["FP.CPI.TOTL.ZG"]
+
+    assert result["reference_year"] == 2024
+    assert inflation["latest_value"] is None
+    assert inflation["latest_year"] is None
+    assert [point["year"] for point in inflation["series"]] == [2023, 2025]
+    assert "earlier or later years are not substituted" in result["warning"]
+
+
+def test_imf_debt_fallback_uses_latest_historical_year_not_forecast(monkeypatch):
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._latest_dbnomics_imf_weo_dataset",
+        lambda: "WEO:2025-04",
+    )
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._dbnomics_request",
+        lambda url: {
+            "series": {
+                "docs": [{
+                    "period": ["2022", "2023", "2024", "2025", "2026"],
+                    "value": [66.1, 63.5, 62.2, 64.0, 65.0],
+                }]
+            }
+        },
+    )
+
+    result = fetch_imf_general_government_debt("DEU", 2020, 2026)
+
+    assert result["available"] is True
+    assert result["latest_year"] == 2024
+    assert result["latest_value"] == pytest.approx(62.2)
+    assert result["definition"] == "General government gross debt (% of GDP)"
+    assert result["is_fallback"] is True
+
+
+def test_imf_current_account_fallback_uses_percent_of_gdp_series(monkeypatch):
+    requested_urls = []
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._latest_dbnomics_imf_weo_dataset",
+        lambda: "WEO:2025-04",
+    )
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._dbnomics_request",
+        lambda url: requested_urls.append(url) or {
+            "series": {"docs": [{"period": ["2023", "2024", "2025"], "value": [-0.7, -0.4, -0.2]}]}
+        },
+    )
+
+    result = fetch_imf_current_account_balance("WLD", 2020, 2026)
+
+    assert result["available"] is True
+    assert result["latest_year"] == 2024
+    assert result["latest_value"] == pytest.approx(-0.4)
+    assert "WEOAGG:2025-04" in requested_urls[0]
+    assert "001.BCA_NGDPD.pcent_gdp" in requested_urls[0]
+
+
+def test_world_imf_fallback_calculates_gdp_weighted_country_ratio(monkeypatch):
+    ratio_docs = [
+        {"series_code": "AAA.GGXWDG_NGDP", "period": ["2024"], "value": [50.0]},
+        {"series_code": "BBB.GGXWDG_NGDP", "period": ["2024"], "value": [100.0]},
+    ]
+    gdp_docs = [
+        {"series_code": "AAA.NGDPD", "period": ["2024"], "value": [100.0]},
+        {"series_code": "BBB.NGDPD", "period": ["2024"], "value": [300.0]},
+    ]
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._dbnomics_imf_country_series",
+        lambda dataset, subject: gdp_docs if subject == "NGDPD" else ratio_docs,
+    )
+
+    result = _imf_world_gdp_weighted_series("WEO:2025-04", "GGXWDG_NGDP", 2024, 2024)
+
+    assert result == [{"year": 2024, "value": pytest.approx(87.5)}]
+
+
+def test_macro_snapshot_fills_missing_world_bank_debt_from_imf(monkeypatch):
+    observations = [{
+        "indicator": {"id": "FP.CPI.TOTL.ZG", "value": "Inflation"},
+        "country": {"id": "DE", "value": "Germany"},
+        "date": "2024",
+        "value": 2.3,
+    }]
+    monkeypatch.setattr(
+        "src.analytics.company_analysis._world_bank_request",
+        lambda url: [{"page": 1, "pages": 1}, observations],
+    )
+    monkeypatch.setattr(
+        "src.analytics.company_analysis.fetch_imf_general_government_debt",
+        lambda code, start, end: {
+            "available": True,
+            "latest_value": 62.2,
+            "latest_year": 2024,
+            "series": [{"year": 2024, "value": 62.2}],
+            "source_name": "IMF World Economic Outlook 2025-04 via DBnomics",
+            "source_url": "https://db.nomics.world/example",
+            "definition": "General government gross debt (% of GDP)",
+            "is_fallback": True,
+        },
+    )
+    monkeypatch.setattr(
+        "src.analytics.company_analysis.fetch_imf_current_account_balance",
+        lambda code, start, end: {"available": False, "error": "not available in fixture"},
+    )
+
+    result = fetch_macro_snapshot("DEU", start_year=2020, end_year=2026)
+    debt = result["indicators"]["GC.DOD.TOTL.GD.ZS"]
+
+    assert debt["latest_value"] == pytest.approx(62.2)
+    assert debt["label"] == "General government gross debt"
+    assert debt["is_fallback"] is True
+    assert result["uses_imf_debt_fallback"] is True
+    assert "IMF WEO" in result["warning"]
+
+
+def test_macro_score_is_weighted_and_reports_data_coverage():
+    snapshot = {
+        "indicators": {
+            "FP.CPI.TOTL.ZG": {"latest_value": 2.5, "latest_year": 2024},
+            "GC.DOD.TOTL.GD.ZS": {"latest_value": 55.0, "latest_year": 2023},
+            "NY.GDP.MKTP.KD.ZG": {"latest_value": 3.2, "latest_year": 2024},
+            "SL.UEM.TOTL.ZS": {"latest_value": 4.0, "latest_year": 2024},
+            "FR.INR.RINR": {"latest_value": 2.0, "latest_year": 2023},
+            "BN.CAB.XOKA.GD.ZS": {"latest_value": -2.0, "latest_year": 2024},
+            "FR.INR.LEND": {"latest_value": 6.0, "latest_year": 2024},
+        }
+    }
+
+    result = analyze_macro_snapshot(snapshot)
+
+    assert result["available"] is True
+    assert result["score"] == pytest.approx(98.75)
+    assert result["label"] == "Resilient"
+    assert result["data_coverage"] == pytest.approx(1.0)
+    lending = next(item for item in result["components"] if item["indicator_code"] == "FR.INR.LEND")
+    assert lending["component_score"] is None
+    assert lending["weight"] == 0
+
+
+def test_macro_score_flags_low_coverage_without_treating_missing_data_as_zero():
+    result = analyze_macro_snapshot({
+        "indicators": {"FP.CPI.TOTL.ZG": {"latest_value": 2.0, "latest_year": 2024}}
+    })
+
+    assert result["score"] == pytest.approx(100.0)
+    assert result["data_coverage"] == pytest.approx(0.25)
+    assert any("low-confidence" in risk for risk in result["risks"])

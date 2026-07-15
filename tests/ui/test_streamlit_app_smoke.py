@@ -151,7 +151,83 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
             "quarterly_income_statement": pd.DataFrame(),
             "quarterly_balance_sheet": pd.DataFrame(),
             "quarterly_cash_flow": pd.DataFrame(),
+            "geographic_revenue": {
+                "available": True,
+                "currency": "USD",
+                "source_name": "Test annual report",
+                "source_url": "https://example.com/annual-report",
+                "report_date": "2025-06-30",
+                "analysis": {
+                    "available": True,
+                    "score": 3,
+                    "max_score": 5,
+                    "label": "Moderately diversified",
+                    "top_region": "United States",
+                    "top_region_share": 0.55,
+                    "effective_regions": 1.98,
+                    "warning": "Test warning",
+                    "interpretation": "Test interpretation",
+                    "strengths": [],
+                    "risks": [],
+                    "rows": [
+                        {"region": "United States", "revenue": 55.0, "share": 0.55, "strategic_importance": "Core"},
+                        {"region": "Europe", "revenue": 45.0, "share": 0.45, "strategic_importance": "Material"},
+                    ],
+                },
+            },
         }
+    }
+    at.session_state["company_macro_snapshot_v5_MSFT_USA"] = {
+        "available": True,
+        "economy_code": "USA",
+        "economy_name": "United States",
+        "reference_year": 2024,
+        "fetched_at": "2026-07-15T00:00:00+00:00",
+        "source_url": "https://api.worldbank.org/v2/country/USA/indicator/test",
+        "indicators": {
+            "FP.CPI.TOTL.ZG": {
+                "label": "Inflation",
+                "latest_value": 2.5,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": 2.5}],
+            },
+            "GC.DOD.TOTL.GD.ZS": {
+                "label": "Central government debt",
+                "latest_value": 55.0,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": 55.0}],
+            },
+            "NY.GDP.MKTP.KD.ZG": {
+                "label": "Real GDP growth",
+                "latest_value": 3.2,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": 3.2}],
+            },
+            "SL.UEM.TOTL.ZS": {
+                "label": "Unemployment",
+                "latest_value": 4.0,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": 4.0}],
+            },
+            "FR.INR.RINR": {
+                "label": "Real interest rate",
+                "latest_value": 2.0,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": 2.0}],
+            },
+            "BN.CAB.XOKA.GD.ZS": {
+                "label": "Current account balance",
+                "latest_value": -2.0,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": -2.0}],
+            },
+            "FR.INR.LEND": {
+                "label": "Lending interest rate",
+                "latest_value": 6.0,
+                "latest_year": 2024,
+                "series": [{"year": 2024, "value": 6.0}],
+            },
+        },
     }
     at.run(timeout=60)
 
@@ -172,6 +248,15 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
     assert any("Portfolio Tracker" in value for value in portfolio_headings)
     assert any("Company Analysis" in value for value in company_headings)
     assert not any("Company Analysis" in value for value in portfolio_headings)
+    region_view = next(item for item in company_tab.radio if item.label == "Regional analysis view")
+    assert region_view.options == ["Revenue Exposure", "Macro Drill-down"]
+
+    region_view.set_value("Macro Drill-down").run(timeout=60)
+    assert len(at.exception) == 0
+    company_tab = next(tab for tab in at.tabs if tab.label == "Company Analysis")
+    company_headings = [item.value for item in company_tab.markdown]
+    assert any("Regional Macro Drill-down" in value for value in company_headings)
+    assert any(item.label == "Macro resilience (2024)" for item in company_tab.metric)
 
 
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):

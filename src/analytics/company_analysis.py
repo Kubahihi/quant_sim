@@ -23,6 +23,56 @@ SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{document}"
 SEC_ANNUAL_FORMS = {"10-K", "20-F", "40-F"}
+MACRO_DATA_SCHEMA_VERSION = 5
+MACRO_REFERENCE_YEAR = 2024
+WORLD_BANK_API_URL = "https://api.worldbank.org/v2/country/{economy}/indicator/{indicators}"
+DBNOMICS_IMF_DATASETS_URL = "https://api.db.nomics.world/v22/datasets/IMF?limit=500"
+DBNOMICS_IMF_SERIES_URL = "https://api.db.nomics.world/v22/series/IMF/{dataset}/{series}?observations=1"
+IMF_WEO_AGGREGATE_CODES = {
+    "WLD": "001",  # World
+    "EUU": "998",  # European Union
+    "EMU": "163",  # Euro area
+    "LCN": "205",  # Latin America and the Caribbean
+    "MEA": "400",  # Middle East and Central Asia proxy
+    "SSF": "603",  # Sub-Saharan Africa
+}
+WORLD_BANK_REGIONAL_CODES = {"WLD", "EUU", "EMU", "NAC", "EAS", "ECS", "LCN", "MEA", "SSF", "SAS"}
+WORLD_BANK_INDICATORS: dict[str, dict[str, Any]] = {
+    "FP.CPI.TOTL.ZG": {"label": "Inflation", "unit": "% y/y", "weight": 25},
+    "GC.DOD.TOTL.GD.ZS": {"label": "Central government debt", "unit": "% of GDP", "weight": 20},
+    "NY.GDP.MKTP.KD.ZG": {"label": "Real GDP growth", "unit": "% y/y", "weight": 25},
+    "SL.UEM.TOTL.ZS": {"label": "Unemployment", "unit": "% of labor force", "weight": 15},
+    "FR.INR.RINR": {"label": "Real interest rate", "unit": "%", "weight": 10},
+    "BN.CAB.XOKA.GD.ZS": {"label": "Current account balance", "unit": "% of GDP", "weight": 5},
+    "FR.INR.LEND": {"label": "Lending interest rate", "unit": "%", "weight": 0},
+}
+MACRO_ECONOMIES: dict[str, str] = {
+    "World": "WLD",
+    "United States": "USA",
+    "European Union": "EUU",
+    "Euro area": "EMU",
+    "North America": "NAC",
+    "East Asia & Pacific": "EAS",
+    "Europe & Central Asia": "ECS",
+    "Latin America & Caribbean": "LCN",
+    "Middle East & North Africa": "MEA",
+    "Sub-Saharan Africa": "SSF",
+    "South Asia": "SAS",
+    "China": "CHN",
+    "Japan": "JPN",
+    "India": "IND",
+    "Germany": "DEU",
+    "United Kingdom": "GBR",
+    "France": "FRA",
+    "Canada": "CAN",
+    "Brazil": "BRA",
+    "Mexico": "MEX",
+    "South Korea": "KOR",
+    "Australia": "AUS",
+    "Netherlands": "NLD",
+    "Switzerland": "CHE",
+    "Czechia": "CZE",
+}
 
 
 def _sec_user_agent() -> str:
@@ -696,6 +746,459 @@ def analyze_geographic_revenue(rows: Sequence[Mapping[str, Any]]) -> dict[str, A
             f"The distribution is equivalent to {effective_regions:.1f} equally sized regions and is rated {label.lower()}."
         ),
         "warning": "This rating measures revenue diversification, not regional profitability, growth quality or investment attractiveness.",
+    }
+
+
+def infer_macro_economy(region: str) -> str:
+    """Map a filing's free-form region label to a World Bank economy proxy."""
+    normalized = re.sub(r"[^a-z]", " ", str(region or "").lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    country_rules = [
+        (("united states", "usa", " u s "), "USA"),
+        (("china",), "CHN"),
+        (("japan",), "JPN"),
+        (("india",), "IND"),
+        (("germany",), "DEU"),
+        (("united kingdom", "britain",), "GBR"),
+        (("france",), "FRA"),
+        (("canada",), "CAN"),
+        (("brazil",), "BRA"),
+        (("mexico",), "MEX"),
+        (("south korea", "korea",), "KOR"),
+        (("australia",), "AUS"),
+        (("czech",), "CZE"),
+    ]
+    padded = f" {normalized} "
+    if normalized in {"us", "u s"}:
+        return "USA"
+    for tokens, code in country_rules:
+        if any(token in padded for token in tokens):
+            return code
+    if "europe" in normalized and ("middle east" in normalized or "africa" in normalized):
+        return "WLD"
+    region_rules = [
+        (("european union", "europe"), "EUU"),
+        (("north america",), "NAC"),
+        (("latin america", "south america"), "LCN"),
+        (("middle east", "north africa"), "MEA"),
+        (("sub saharan africa", "africa"), "SSF"),
+        (("south asia",), "SAS"),
+        (("asia pacific", "asia"), "EAS"),
+    ]
+    for tokens, code in region_rules:
+        if any(token in normalized for token in tokens):
+            return code
+    return "WLD"
+
+
+def _world_bank_request(url: str, timeout: int = 15) -> Any:
+    request = Request(
+        url,
+        headers={"User-Agent": "QuantSim/1.0 educational macro research"},
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _dbnomics_request(url: str, timeout: int = 20) -> Any:
+    request = Request(
+        url,
+        headers={"User-Agent": "QuantSim/1.0 educational macro research"},
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+@lru_cache(maxsize=1)
+def _latest_dbnomics_imf_weo_dataset() -> str:
+    payload = _dbnomics_request(DBNOMICS_IMF_DATASETS_URL)
+    datasets = payload.get("datasets") if isinstance(payload, Mapping) else {}
+    docs = datasets.get("docs", []) if isinstance(datasets, Mapping) else []
+    codes = sorted(
+        str(item.get("code"))
+        for item in docs
+        if isinstance(item, Mapping) and re.fullmatch(r"WEO:\d{4}-(?:04|10)", str(item.get("code") or ""))
+    )
+    if not codes:
+        raise ValueError("DBnomics returned no IMF WEO country dataset.")
+    return codes[-1]
+
+
+@lru_cache(maxsize=6)
+def _dbnomics_imf_country_series(dataset: str, subject_code: str) -> list[Mapping[str, Any]]:
+    series_mask = f".{subject_code}"
+    url = DBNOMICS_IMF_SERIES_URL.format(
+        dataset=quote(dataset, safe=":"),
+        series=quote(series_mask, safe="."),
+    ) + "&limit=1000"
+    payload = _dbnomics_request(url, timeout=45)
+    series_root = payload.get("series") if isinstance(payload, Mapping) else {}
+    docs = series_root.get("docs", []) if isinstance(series_root, Mapping) else []
+    return [item for item in docs if isinstance(item, Mapping)]
+
+
+def _imf_world_gdp_weighted_series(
+    dataset: str,
+    subject_code: str,
+    start_year: int,
+    end_year: int,
+) -> list[dict[str, Any]]:
+    ratio_docs = _dbnomics_imf_country_series(dataset, subject_code)
+    gdp_docs = _dbnomics_imf_country_series(dataset, "NGDPD")
+
+    def values_by_country(docs: Sequence[Mapping[str, Any]]) -> dict[str, dict[int, float]]:
+        result: dict[str, dict[int, float]] = {}
+        for document in docs:
+            dimensions = document.get("dimensions") if isinstance(document.get("dimensions"), Mapping) else {}
+            country = str(dimensions.get("weo-country") or dimensions.get("WEO Country") or "")
+            if not country:
+                series_code = str(document.get("series_code") or "")
+                country = series_code.split(".", 1)[0]
+            if not country:
+                continue
+            for period, raw_value in zip(document.get("period", []), document.get("value", [])):
+                period_text = str(period)
+                value = _number(raw_value, np.nan)
+                if period_text.isdigit() and np.isfinite(value):
+                    result.setdefault(country, {})[int(period_text)] = float(value)
+        return result
+
+    ratios = values_by_country(ratio_docs)
+    gdps = values_by_country(gdp_docs)
+    points: list[dict[str, Any]] = []
+    for year in range(int(start_year), int(end_year) + 1):
+        weighted_sum = 0.0
+        total_gdp = 0.0
+        for country, country_ratios in ratios.items():
+            ratio = country_ratios.get(year)
+            gdp = gdps.get(country, {}).get(year)
+            if ratio is None or gdp is None or gdp <= 0:
+                continue
+            weighted_sum += ratio * gdp
+            total_gdp += gdp
+        if total_gdp > 0:
+            points.append({"year": year, "value": weighted_sum / total_gdp})
+    return points
+
+
+def _fetch_imf_weo_percent_series(
+    economy_code: str,
+    start_year: int,
+    end_year: int,
+    subject_code: str,
+    definition: str,
+) -> dict[str, Any]:
+    """Fetch a historical IMF WEO percent-of-GDP series through DBnomics."""
+    code = str(economy_code or "").upper().strip()
+    aggregate_code = IMF_WEO_AGGREGATE_CODES.get(code)
+    if code in WORLD_BANK_REGIONAL_CODES and aggregate_code is None:
+        return {
+            "available": False,
+            "error": "No definition-compatible IMF WEO aggregate is mapped for this World Bank region.",
+    }
+    try:
+        country_dataset = _latest_dbnomics_imf_weo_dataset()
+        if aggregate_code:
+            dataset = country_dataset.replace("WEO:", "WEOAGG:", 1)
+            series_code = f"{aggregate_code}.{subject_code}.pcent_gdp"
+        else:
+            dataset = country_dataset
+            series_code = f"{code}.{subject_code}"
+        api_url = DBNOMICS_IMF_SERIES_URL.format(
+            dataset=quote(dataset, safe=":"),
+            series=quote(series_code, safe="."),
+        )
+        payload = _dbnomics_request(api_url)
+        series_root = payload.get("series") if isinstance(payload, Mapping) else {}
+        docs = series_root.get("docs", []) if isinstance(series_root, Mapping) else []
+        if not docs or not isinstance(docs[0], Mapping):
+            raise ValueError(f"IMF WEO series {subject_code} was not found.")
+        document = docs[0]
+        periods = document.get("period", [])
+        values = document.get("value", [])
+        publication_year = int(dataset.split(":", 1)[1].split("-", 1)[0])
+        # Use the year before the WEO vintage to avoid presenting forward projections as observed debt.
+        historical_end = min(int(end_year), publication_year - 1)
+        points: list[dict[str, Any]] = []
+        for period, raw_value in zip(periods, values):
+            period_text = str(period)
+            value = _number(raw_value, np.nan)
+            if not period_text.isdigit() or not np.isfinite(value):
+                continue
+            year = int(period_text)
+            if int(start_year) <= year <= historical_end:
+                points.append({"year": year, "value": float(value)})
+        points.sort(key=lambda item: item["year"])
+        derived_world_series = False
+        if not points and code == "WLD":
+            points = _imf_world_gdp_weighted_series(
+                country_dataset,
+                subject_code,
+                int(start_year),
+                historical_end,
+            )
+            derived_world_series = bool(points)
+        if not points:
+            raise ValueError("IMF WEO returned no historical observations in the requested period.")
+        source_dataset = country_dataset if derived_world_series else dataset
+        source_series = f".{subject_code}" if derived_world_series else series_code
+        source_url = f"https://db.nomics.world/IMF/{source_dataset}/{source_series}"
+        return {
+            "available": True,
+            "latest_value": points[-1]["value"],
+            "latest_year": points[-1]["year"],
+            "series": points,
+            "source_name": (
+                f"IMF World Economic Outlook {country_dataset.split(':', 1)[1]} "
+                + ("· GDP-weighted country calculation via DBnomics" if derived_world_series else "via DBnomics")
+            ),
+            "source_url": source_url,
+            "definition": definition,
+            "is_fallback": True,
+            "is_derived": derived_world_series,
+        }
+    except Exception as exc:
+        return {"available": False, "error": f"IMF WEO fallback failed: {exc}"}
+
+
+def fetch_imf_general_government_debt(
+    economy_code: str,
+    start_year: int,
+    end_year: int,
+) -> dict[str, Any]:
+    """Fetch IMF WEO general-government gross debt through the DBnomics gateway."""
+    return _fetch_imf_weo_percent_series(
+        economy_code,
+        start_year,
+        end_year,
+        "GGXWDG_NGDP",
+        "General government gross debt (% of GDP)",
+    )
+
+
+def fetch_imf_current_account_balance(
+    economy_code: str,
+    start_year: int,
+    end_year: int,
+) -> dict[str, Any]:
+    """Fetch IMF WEO current-account balance as a share of GDP through DBnomics."""
+    return _fetch_imf_weo_percent_series(
+        economy_code,
+        start_year,
+        end_year,
+        "BCA_NGDPD",
+        "Current account balance (% of GDP)",
+    )
+
+
+def fetch_macro_snapshot(
+    economy_code: str,
+    start_year: int | None = None,
+    end_year: int | None = None,
+) -> dict[str, Any]:
+    """Fetch annual macro series from the World Bank Indicators API."""
+    code = str(economy_code or "").upper().strip()
+    if not re.fullmatch(r"[A-Z0-9]{2,4}", code):
+        return {"available": False, "error": "Invalid World Bank economy code."}
+    current_year = datetime.now(timezone.utc).year
+    start = int(start_year or current_year - 10)
+    end = int(end_year or current_year)
+    if start > end:
+        raise ValueError("start_year must not be after end_year.")
+    indicator_path = ";".join(WORLD_BANK_INDICATORS)
+    url = WORLD_BANK_API_URL.format(economy=quote(code), indicators=indicator_path)
+    query_url = f"{url}?format=json&source=2&date={start}:{end}&per_page=20000"
+    try:
+        payload = _world_bank_request(query_url)
+    except Exception as exc:
+        return {"available": False, "error": f"World Bank macro data request failed: {exc}", "source_url": query_url}
+    if not isinstance(payload, list) or len(payload) < 2 or not isinstance(payload[1], list):
+        return {"available": False, "error": "World Bank returned no indicator observations.", "source_url": query_url}
+
+    grouped: dict[str, list[dict[str, Any]]] = {key: [] for key in WORLD_BANK_INDICATORS}
+    economy_name = code
+    for observation in payload[1]:
+        if not isinstance(observation, Mapping):
+            continue
+        indicator = observation.get("indicator") if isinstance(observation.get("indicator"), Mapping) else {}
+        indicator_code = str(indicator.get("id") or "")
+        value = _number(observation.get("value"), np.nan)
+        year_text = str(observation.get("date") or "")
+        if indicator_code not in grouped or not np.isfinite(value) or not year_text.isdigit():
+            continue
+        country = observation.get("country") if isinstance(observation.get("country"), Mapping) else {}
+        economy_name = str(country.get("value") or economy_name)
+        grouped[indicator_code].append({"year": int(year_text), "value": float(value)})
+
+    indicators: dict[str, dict[str, Any]] = {}
+    for indicator_code, definition in WORLD_BANK_INDICATORS.items():
+        series = sorted(grouped[indicator_code], key=lambda item: item["year"])
+        reference_point = next((item for item in series if item["year"] == MACRO_REFERENCE_YEAR), None)
+        indicators[indicator_code] = {
+            **definition,
+            "latest_value": reference_point["value"] if reference_point else None,
+            "latest_year": MACRO_REFERENCE_YEAR if reference_point else None,
+            "series": series,
+            "source_name": "World Bank World Development Indicators",
+            "source_url": query_url,
+            "definition": definition["label"],
+            "is_fallback": False,
+        }
+
+    debt_code = "GC.DOD.TOTL.GD.ZS"
+    if indicators[debt_code]["latest_value"] is None:
+        debt_fallback = fetch_imf_general_government_debt(code, start, min(end, MACRO_REFERENCE_YEAR))
+        if debt_fallback.get("available") and debt_fallback.get("latest_year") == MACRO_REFERENCE_YEAR:
+            indicators[debt_code].update({
+                "label": "General government gross debt",
+                "latest_value": debt_fallback["latest_value"],
+                "latest_year": debt_fallback["latest_year"],
+                "series": debt_fallback["series"],
+                "source_name": debt_fallback["source_name"],
+                "source_url": debt_fallback["source_url"],
+                "definition": debt_fallback["definition"],
+                "is_fallback": True,
+            })
+    current_account_code = "BN.CAB.XOKA.GD.ZS"
+    if indicators[current_account_code]["latest_value"] is None:
+        current_account_fallback = fetch_imf_current_account_balance(code, start, min(end, MACRO_REFERENCE_YEAR))
+        if (
+            current_account_fallback.get("available")
+            and current_account_fallback.get("latest_year") == MACRO_REFERENCE_YEAR
+        ):
+            indicators[current_account_code].update({
+                "latest_value": current_account_fallback["latest_value"],
+                "latest_year": current_account_fallback["latest_year"],
+                "series": current_account_fallback["series"],
+                "source_name": current_account_fallback["source_name"],
+                "source_url": current_account_fallback["source_url"],
+                "definition": current_account_fallback["definition"],
+                "is_fallback": True,
+            })
+    available_count = sum(item["latest_value"] is not None for item in indicators.values())
+    uses_imf_debt_fallback = bool(indicators[debt_code].get("is_fallback"))
+    uses_imf_current_account_fallback = bool(indicators[current_account_code].get("is_fallback"))
+    return {
+        "available": available_count > 0,
+        "economy_code": code,
+        "economy_name": economy_name,
+        "indicators": indicators,
+        "available_indicator_count": available_count,
+        "requested_start_year": start,
+        "requested_end_year": end,
+        "reference_year": MACRO_REFERENCE_YEAR,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "source_name": "World Bank World Development Indicators",
+        "source_url": query_url,
+        "uses_imf_debt_fallback": uses_imf_debt_fallback,
+        "uses_imf_current_account_fallback": uses_imf_current_account_fallback,
+        "warning": (
+            f"All score inputs use the fixed {MACRO_REFERENCE_YEAR} reference year. "
+            "Missing 2024 observations remain unavailable; earlier or later years are not substituted. "
+            + ("Debt uses IMF WEO general-government gross debt because the World Bank central-government series was unavailable."
+               if uses_imf_debt_fallback else "")
+            + (" Current account uses IMF WEO because the World Bank aggregate was unavailable."
+               if uses_imf_current_account_fallback else "")
+        ).strip(),
+        "error": "" if available_count else "No recent macro observations were available for this economy.",
+    }
+
+
+def _macro_component_score(indicator_code: str, value: float) -> float:
+    if indicator_code == "FP.CPI.TOTL.ZG":
+        if 1.0 <= value <= 3.0:
+            return 100.0
+        if 0.0 <= value <= 5.0:
+            return 80.0
+        if 5.0 < value <= 8.0:
+            return 50.0
+        if -2.0 <= value < 0.0:
+            return 45.0
+        if 8.0 < value <= 15.0:
+            return 25.0
+        return 5.0
+    if indicator_code == "GC.DOD.TOTL.GD.ZS":
+        return 100.0 if value <= 60 else 70.0 if value <= 90 else 40.0 if value <= 120 else 15.0
+    if indicator_code == "NY.GDP.MKTP.KD.ZG":
+        return 100.0 if value >= 3 else 75.0 if value >= 1 else 50.0 if value >= 0 else 15.0
+    if indicator_code == "SL.UEM.TOTL.ZS":
+        return 100.0 if value <= 5 else 70.0 if value <= 8 else 40.0 if value <= 12 else 15.0
+    if indicator_code == "FR.INR.RINR":
+        return 100.0 if -1.0 <= value <= 4.0 else 60.0 if -3.0 <= value < -1.0 else 55.0 if value <= 8.0 else 25.0
+    if indicator_code == "BN.CAB.XOKA.GD.ZS":
+        return 100.0 if value >= 0 else 75.0 if value >= -3 else 45.0 if value >= -6 else 20.0
+    return 0.0
+
+
+def analyze_macro_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Create a transparent macro-resilience score from available observations."""
+    indicators = snapshot.get("indicators") if isinstance(snapshot.get("indicators"), Mapping) else {}
+    components: list[dict[str, Any]] = []
+    weighted_score = 0.0
+    available_weight = 0.0
+    strengths: list[str] = []
+    risks: list[str] = []
+    for indicator_code, definition in WORLD_BANK_INDICATORS.items():
+        item = indicators.get(indicator_code) if isinstance(indicators.get(indicator_code), Mapping) else {}
+        value = _number(item.get("latest_value"), np.nan)
+        year = item.get("latest_year")
+        weight = float(definition["weight"])
+        component_score = None
+        if np.isfinite(value) and weight > 0:
+            component_score = _macro_component_score(indicator_code, float(value))
+            weighted_score += component_score * weight
+            available_weight += weight
+        components.append({
+            "indicator_code": indicator_code,
+            "label": item.get("label") or definition["label"],
+            "value": float(value) if np.isfinite(value) else None,
+            "year": int(year) if isinstance(year, (int, np.integer)) else year,
+            "unit": definition["unit"],
+            "weight": weight,
+            "component_score": component_score,
+            "source_name": item.get("source_name"),
+            "source_url": item.get("source_url"),
+            "definition": item.get("definition") or definition["label"],
+            "is_fallback": bool(item.get("is_fallback")),
+        })
+
+    score = float(weighted_score / available_weight) if available_weight > 0 else 0.0
+    coverage = float(available_weight / 100.0)
+    if score >= 80:
+        label = "Resilient"
+    elif score >= 65:
+        label = "Stable"
+    elif score >= 50:
+        label = "Mixed"
+    else:
+        label = "Vulnerable"
+
+    component_map = {item["indicator_code"]: item for item in components}
+    inflation = component_map["FP.CPI.TOTL.ZG"]["value"]
+    debt = component_map["GC.DOD.TOTL.GD.ZS"]["value"]
+    growth = component_map["NY.GDP.MKTP.KD.ZG"]["value"]
+    unemployment = component_map["SL.UEM.TOTL.ZS"]["value"]
+    if inflation is not None:
+        (strengths if 1 <= inflation <= 3 else risks).append(f"Inflation is {inflation:.1f}%.")
+    if debt is not None:
+        debt_label = str(component_map["GC.DOD.TOTL.GD.ZS"].get("label") or "Government debt")
+        (strengths if debt <= 60 else risks).append(f"{debt_label} is {debt:.1f}% of GDP.")
+    if growth is not None:
+        (strengths if growth >= 2 else risks).append(f"Real GDP growth is {growth:.1f}%.")
+    if unemployment is not None and unemployment > 8:
+        risks.append(f"Unemployment is elevated at {unemployment:.1f}%.")
+    if coverage < 0.60:
+        risks.append("Less than 60% of the scoring weight has current observations; treat the rating as low-confidence.")
+
+    return {
+        "available": available_weight > 0,
+        "score": score,
+        "label": label,
+        "data_coverage": coverage,
+        "components": components,
+        "strengths": strengths,
+        "risks": risks,
+        "warning": "Macro resilience is a rules-based screening score, not a sovereign credit rating or return forecast.",
     }
 
 

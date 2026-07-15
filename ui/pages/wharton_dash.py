@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from copy import deepcopy
 from html import escape
 import importlib
 import json
@@ -142,6 +143,11 @@ def init_db() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     with get_connection() as conn:
+        from src.analytics.macro_snapshot_store import init_macro_snapshot_table
+
+        # Shared, versioned macro cache. With Turso configured this table is
+        # available to every app instance; otherwise it remains a local cache.
+        init_macro_snapshot_table(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
@@ -4468,6 +4474,87 @@ def _fetch_company_analysis_cached(ticker: str) -> dict[str, Any]:
     return fetch_company_data(ticker)
 
 
+def _load_company_analysis_module(*required_names: str, minimum_macro_schema: int = 0) -> Any:
+    """Reload the analytics module when Streamlit retained a pre-feature version."""
+    module = importlib.import_module("src.analytics.company_analysis")
+    if (
+        any(not hasattr(module, name) for name in required_names)
+        or int(getattr(module, "MACRO_DATA_SCHEMA_VERSION", 0)) < minimum_macro_schema
+    ):
+        module = importlib.reload(module)
+    missing = [name for name in required_names if not hasattr(module, name)]
+    if missing:
+        raise ImportError(f"Company-analysis module is missing: {', '.join(missing)}")
+    return module
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_macro_snapshot_cached(economy_code: str) -> dict[str, Any]:
+    module = _load_company_analysis_module("fetch_macro_snapshot", minimum_macro_schema=5)
+    from src.analytics.macro_snapshot_store import load_macro_snapshot, upsert_macro_snapshot
+
+    code = str(economy_code or "").upper().strip()
+    reference_year = int(module.MACRO_REFERENCE_YEAR)
+    schema_version = int(module.MACRO_DATA_SCHEMA_VERSION)
+    backend = _macro_database_backend()
+    storage_warning = ""
+    try:
+        with get_connection() as conn:
+            cached = load_macro_snapshot(conn, code, reference_year, schema_version)
+        if cached is not None:
+            cached.setdefault("cache_info", {})["backend"] = backend
+            return cached
+    except Exception as exc:
+        storage_warning = f"Database cache read unavailable ({type(exc).__name__})."
+
+    snapshot = module.fetch_macro_snapshot(code)
+    cache_info = {
+        "origin": "live",
+        "backend": backend,
+        "schema_version": schema_version,
+        "persisted": False,
+    }
+    if snapshot.get("available"):
+        try:
+            with get_connection() as conn:
+                cache_info["persisted"] = upsert_macro_snapshot(conn, snapshot, schema_version)
+        except Exception as exc:
+            storage_warning = f"Database cache write unavailable ({type(exc).__name__})."
+    if storage_warning:
+        cache_info["warning"] = storage_warning
+    snapshot["cache_info"] = cache_info
+    return snapshot
+
+
+def _macro_database_backend() -> str:
+    """Return the configured persistence mode without exposing credentials."""
+    database_url = os.environ.get("TURSO_DATABASE_URL")
+    auth_token = os.environ.get("TURSO_AUTH_TOKEN")
+    try:
+        database_url = st.secrets.get("TURSO_DATABASE_URL") or database_url
+        auth_token = st.secrets.get("TURSO_AUTH_TOKEN") or auth_token
+    except Exception:
+        pass
+    return "turso" if database_url and auth_token else "sqlite"
+
+
+def _invalidate_macro_snapshot(economy_code: str) -> bool:
+    module = _load_company_analysis_module(minimum_macro_schema=5)
+    from src.analytics.macro_snapshot_store import delete_macro_snapshot
+
+    try:
+        with get_connection() as conn:
+            delete_macro_snapshot(
+                conn,
+                economy_code,
+                int(module.MACRO_REFERENCE_YEAR),
+                int(module.MACRO_DATA_SCHEMA_VERSION),
+            )
+        return True
+    except Exception:
+        return False
+
+
 @st.cache_data(ttl=604800, show_spinner=False)
 def _fetch_management_biography_cached(name: str, company_name: str) -> dict[str, Any]:
     from src.analytics.company_analysis import fetch_management_biography
@@ -4521,7 +4608,7 @@ def _render_statement_block(label: str, frame: pd.DataFrame) -> None:
         st.dataframe(display, use_container_width=True)
 
 
-def _render_geographic_revenue(snapshot: dict[str, Any], ticker: str, company_name: str) -> None:
+def _render_geographic_revenue_breakdown(snapshot: dict[str, Any], ticker: str, company_name: str) -> None:
     from src.analytics.company_analysis import analyze_geographic_revenue
 
     st.markdown("#### Revenue by Region")
@@ -4652,6 +4739,301 @@ def _render_geographic_revenue(snapshot: dict[str, Any], ticker: str, company_na
             f"Named-region disclosure coverage before any residual bucket: {float(geographic['coverage_ratio']):.1%}. "
             f"XBRL concept: {geographic.get('concept', '—')}."
         )
+
+
+def _render_macro_region_drilldown(snapshot: dict[str, Any], ticker: str) -> None:
+    module = _load_company_analysis_module(
+        "MACRO_ECONOMIES",
+        "analyze_macro_snapshot",
+        "infer_macro_economy",
+        minimum_macro_schema=5,
+    )
+    macro_economies = module.MACRO_ECONOMIES
+
+    st.markdown("#### Regional Macro Drill-down · 2024")
+    st.caption(
+        "All score inputs use the same 2024 reference year. Connect a disclosed revenue region to an editable "
+        "economy proxy, then inspect inflation, government debt, interest rates, growth, unemployment, and the current account."
+    )
+
+    geographic = snapshot.get("geographic_revenue", {})
+    geographic_analysis = geographic.get("analysis", {}) if isinstance(geographic, dict) else {}
+    region_rows = geographic_analysis.get("rows", []) if isinstance(geographic_analysis, dict) else []
+    region_names = [
+        str(row.get("region"))
+        for row in region_rows
+        if isinstance(row, dict)
+        and row.get("region")
+        and str(row.get("region")).lower() != "not separately disclosed"
+    ]
+    if not region_names:
+        region_names = ["Company-wide / choose proxy manually"]
+
+    control_cols = st.columns(2)
+    with control_cols[0]:
+        selected_region = st.selectbox(
+            "Revenue region",
+            region_names,
+            key=f"company_macro_region_{ticker}",
+            help="This is the filing bucket whose macro backdrop you want to inspect.",
+        )
+
+    inferred_code = module.infer_macro_economy(selected_region)
+    economy_names = list(macro_economies)
+    inferred_name = next(
+        (name for name, code in macro_economies.items() if code == inferred_code),
+        "World",
+    )
+    regional_codes = set(getattr(module, "WORLD_BANK_REGIONAL_CODES", set()))
+    exact_country_names = {
+        name.lower(): name
+        for name, code in macro_economies.items()
+        if code not in regional_codes
+    }
+    exact_country_match = exact_country_names.get(selected_region.strip().lower())
+    with control_cols[1]:
+        if exact_country_match:
+            selected_economy = st.selectbox(
+                "Macro economy used",
+                [exact_country_match],
+                disabled=True,
+                key=f"company_macro_economy_v5_{ticker}_{selected_region}",
+                help="An exact country disclosure is automatically tied to that country's macro data.",
+            )
+        else:
+            selected_economy = st.selectbox(
+                "Macro economy proxy",
+                economy_names,
+                index=economy_names.index(inferred_name),
+                key=f"company_macro_economy_v5_{ticker}_{selected_region}",
+                help="Change the proxy whenever the company's disclosure bucket does not match a World Bank economy.",
+            )
+    economy_code = macro_economies[selected_economy]
+    st.info(
+        f"Proxy used: **{selected_region} → {selected_economy} ({economy_code})**. "
+        "Revenue filing buckets and macro datasets rarely align exactly, so this mapping is an analytical proxy, "
+        "not a claim about the company's exact country mix."
+    )
+
+    state_key = f"company_macro_snapshot_v5_{ticker}_{economy_code}"
+    macro_snapshot = st.session_state.get(state_key)
+    if not isinstance(macro_snapshot, dict):
+        with st.spinner(f"Loading World Bank indicators for {selected_economy}…"):
+            macro_snapshot = _fetch_macro_snapshot_cached(economy_code)
+            st.session_state[state_key] = macro_snapshot
+
+    if not macro_snapshot.get("available"):
+        st.warning(macro_snapshot.get("error", "Macro indicators are not available for this economy proxy."))
+        if st.button(
+            "Retry macro data",
+            key=f"company_macro_retry_{ticker}_{economy_code}",
+            use_container_width=True,
+        ):
+            _invalidate_macro_snapshot(economy_code)
+            _fetch_macro_snapshot_cached.clear()
+            st.session_state.pop(state_key, None)
+            st.rerun()
+        return
+
+    reference_year = int(macro_snapshot.get("reference_year") or 2024)
+    cache_info = macro_snapshot.get("cache_info", {})
+    if isinstance(cache_info, dict) and cache_info:
+        backend_label = "shared Turso database" if cache_info.get("backend") == "turso" else "local SQLite cache"
+        if cache_info.get("origin") == "database":
+            st.caption(f"Macro snapshot loaded from the {backend_label}; expires {cache_info.get('expires_at', 'automatically')}.")
+        elif cache_info.get("persisted"):
+            st.caption(f"Fresh macro snapshot saved to the {backend_label} for reuse by other app sessions.")
+        if cache_info.get("warning"):
+            st.caption(str(cache_info["warning"]))
+    rate_codes = ("FR.INR.RINR", "FR.INR.LEND")
+    snapshot_indicators = macro_snapshot.get("indicators", {})
+    missing_rate_codes = [
+        code
+        for code in rate_codes
+        if not isinstance(snapshot_indicators.get(code), dict)
+        or snapshot_indicators[code].get("latest_value") is None
+    ]
+    if missing_rate_codes:
+        rate_proxy_names = [
+            name for name, code in macro_economies.items() if code not in regional_codes
+        ]
+        selected_rate_proxy = st.selectbox(
+            "Interest-rate country proxy",
+            rate_proxy_names,
+            index=rate_proxy_names.index("United States") if "United States" in rate_proxy_names else 0,
+            key=f"company_macro_rate_proxy_v5_{ticker}_{economy_code}",
+            help=(
+                "Broad regions do not have a comparable lending or real-interest-rate aggregate. "
+                "Choose a representative country; proxy rates are labeled separately and used transparently."
+            ),
+        )
+        rate_proxy_code = macro_economies[selected_rate_proxy]
+        with st.spinner(f"Loading interest-rate proxy for {selected_rate_proxy}…"):
+            rate_snapshot = _fetch_macro_snapshot_cached(rate_proxy_code)
+        proxy_indicators = rate_snapshot.get("indicators", {}) if isinstance(rate_snapshot, dict) else {}
+        working_snapshot = deepcopy(macro_snapshot)
+        working_indicators = working_snapshot.get("indicators", {})
+        applied_rate_labels: list[str] = []
+        for rate_code in missing_rate_codes:
+            proxy_item = proxy_indicators.get(rate_code, {}) if isinstance(proxy_indicators, dict) else {}
+            if not isinstance(proxy_item, dict) or proxy_item.get("latest_value") is None:
+                continue
+            replacement = deepcopy(proxy_item)
+            base_label = str(replacement.get("label") or rate_code)
+            replacement["label"] = f"{base_label} ({selected_rate_proxy} proxy)"
+            replacement["definition"] = f"{base_label}; {selected_rate_proxy} country proxy"
+            replacement["source_name"] = (
+                f"{replacement.get('source_name') or 'World Bank World Development Indicators'} "
+                f"· {selected_rate_proxy} rate proxy"
+            )
+            replacement["is_proxy"] = True
+            working_indicators[rate_code] = replacement
+            applied_rate_labels.append(base_label)
+        if applied_rate_labels:
+            macro_snapshot = working_snapshot
+            st.info(
+                f"Regional rate aggregates were unavailable. {', '.join(applied_rate_labels)} now use the "
+                f"editable **{selected_rate_proxy}** country proxy; the macro economy itself remains "
+                f"**{selected_economy}**."
+            )
+
+    analysis = module.analyze_macro_snapshot(macro_snapshot)
+    if not analysis.get("available"):
+        st.warning("There are not enough recent observations to calculate the macro score.")
+        return
+
+    score_cols = st.columns(4)
+    score_cols[0].metric(f"Macro resilience ({reference_year})", f"{analysis['score']:.0f}/100")
+    score_cols[1].metric("Assessment", analysis["label"])
+    score_cols[2].metric("Scoring coverage", f"{analysis['data_coverage']:.0%}")
+    score_cols[3].metric("Macro economy used", str(macro_snapshot.get("economy_name") or selected_economy))
+    st.caption(analysis["warning"])
+
+    components = analysis.get("components", [])
+    metric_columns = st.columns(3)
+    for index, component in enumerate(components):
+        value = component.get("value")
+        year = component.get("year")
+        display_value = f"{float(value):.1f}%" if value is not None else "Not published"
+        metric_columns[index % 3].metric(
+            str(component.get("label")),
+            display_value,
+            delta=f"Observation: {year}" if year else f"No {reference_year} observation",
+            delta_color="off",
+        )
+
+    interpretation_cols = st.columns(2)
+    with interpretation_cols[0]:
+        st.markdown("##### Supportive signals")
+        strengths = analysis.get("strengths", [])
+        if strengths:
+            for strength in strengths:
+                st.success(strength)
+        else:
+            st.caption("No indicator currently meets the score's supportive threshold.")
+    with interpretation_cols[1]:
+        st.markdown("##### Watch items")
+        risks = analysis.get("risks", [])
+        if risks:
+            for risk in risks:
+                st.warning(risk)
+        else:
+            st.caption("No indicator currently breaches the score's watch threshold.")
+
+    latest_table = pd.DataFrame([
+        {
+            "Indicator": component.get("label"),
+            "Latest value": component.get("value"),
+            "Observation year": component.get("year"),
+            "Score weight": float(component.get("weight", 0.0)) / 100.0,
+            "Component score": component.get("component_score"),
+            "Source": component.get("source_name") or "World Bank World Development Indicators",
+        }
+        for component in components
+    ])
+    st.markdown("##### Latest observations and score inputs")
+    st.dataframe(
+        latest_table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Latest value": st.column_config.NumberColumn("Latest value (%)", format="%.2f"),
+            "Score weight": st.column_config.ProgressColumn(
+                "Score weight", min_value=0.0, max_value=1.0, format="percent"
+            ),
+            "Component score": st.column_config.NumberColumn("Component score", format="%.0f"),
+        },
+    )
+
+    st.markdown("##### Ten-year macro trends")
+    chart_groups = [
+        ("Inflation and interest rates", ["FP.CPI.TOTL.ZG", "FR.INR.RINR", "FR.INR.LEND"]),
+        ("Growth and labor market", ["NY.GDP.MKTP.KD.ZG", "SL.UEM.TOTL.ZS"]),
+        ("Debt and external balance", ["GC.DOD.TOTL.GD.ZS", "BN.CAB.XOKA.GD.ZS"]),
+    ]
+    indicators = macro_snapshot.get("indicators", {})
+    import plotly.graph_objects as go
+
+    for title, indicator_codes in chart_groups:
+        figure = go.Figure()
+        for indicator_code in indicator_codes:
+            indicator = indicators.get(indicator_code, {}) if isinstance(indicators, dict) else {}
+            series = indicator.get("series", []) if isinstance(indicator, dict) else []
+            series = [point for point in series if int(point.get("year", 0)) <= reference_year]
+            if not series:
+                continue
+            figure.add_trace(go.Scatter(
+                x=[point["year"] for point in series],
+                y=[point["value"] for point in series],
+                name=str(indicator.get("label") or indicator_code),
+                mode="lines+markers",
+                hovertemplate="%{x}: %{y:.2f}%<extra>%{fullData.name}</extra>",
+            ))
+        if figure.data:
+            figure.update_layout(
+                title=title,
+                height=340,
+                margin=dict(l=10, r=10, t=55, b=20),
+                yaxis_title="Percent",
+                legend=dict(orientation="h", yanchor="top", y=-0.18),
+            )
+            st.plotly_chart(figure, use_container_width=True)
+
+    source_url = str(macro_snapshot.get("source_url") or "")
+    fetched_at = str(macro_snapshot.get("fetched_at") or "")
+    if source_url:
+        st.markdown(f"Source: [World Bank World Development Indicators]({source_url}) · fetched {fetched_at}")
+    debt_component = next(
+        (component for component in components if component.get("indicator_code") == "GC.DOD.TOTL.GD.ZS"),
+        {},
+    )
+    if debt_component.get("is_fallback") and debt_component.get("source_url"):
+        st.markdown(
+            f"Debt fallback: [{debt_component.get('source_name')}]({debt_component.get('source_url')}) · "
+            "general government gross debt, historical year only."
+        )
+    debt_definition = (
+        "Debt is IMF WEO general-government gross debt because the World Bank series was unavailable."
+        if debt_component.get("is_fallback")
+        else "Debt is the World Bank central-government-debt series, not a complete general-government measure."
+    )
+    st.caption(
+        f"{debt_definition} Rates shown are annual real and lending rates, not a live central-bank policy rate. "
+        "Observation years may differ."
+    )
+
+
+def _render_geographic_revenue(snapshot: dict[str, Any], ticker: str, company_name: str) -> None:
+    selected_view = st.radio(
+        "Regional analysis view",
+        ["Revenue Exposure", "Macro Drill-down"],
+        horizontal=True,
+        key=f"company_region_view_{ticker}",
+    )
+    if selected_view == "Revenue Exposure":
+        _render_geographic_revenue_breakdown(snapshot, ticker, company_name)
+    else:
+        _render_macro_region_drilldown(snapshot, ticker)
 
 
 def _render_company_analysis(profile: dict[str, str | int]) -> None:
