@@ -1,5 +1,8 @@
 # Quant Investment Platform
 
+![Lines of Code](https://tokei.rs/b1/github/Kubahihi/quant_sim)
+
+
 Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - validace tickeru a vah
 - nacitani trznich dat z Yahoo Finance
