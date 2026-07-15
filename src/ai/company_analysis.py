@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Mapping, Optional
 
+import openai
 from openai import OpenAI
 
 from .ai_review import DEFAULT_GROQ_MODEL, _extract_json_payload, _extract_message_text
@@ -29,32 +31,49 @@ def generate_company_deep_dive(
         "(array of strings), moat_analysis (string), risks (array of strings), investment_view (string), "
         "evidence_limitations (string)."
     )
-    try:
-        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-        payload = json.dumps(dict(evidence), ensure_ascii=False, default=str)
-        completion = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            max_tokens=1400,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"EVIDENCE_JSON:\n{payload}"},
-            ],
-        )
-        content = _extract_message_text(completion.choices[0].message) if completion.choices else ""
-        parsed = _extract_json_payload(content)
-        return {
-            "available": True,
-            "source": "groq",
-            "company_summary": str(parsed.get("company_summary") or ""),
-            "management_history": str(parsed.get("management_history") or ""),
-            "successes": [str(item) for item in parsed.get("successes", [])],
-            "failures": [str(item) for item in parsed.get("failures", [])],
-            "moat_analysis": str(parsed.get("moat_analysis") or ""),
-            "risks": [str(item) for item in parsed.get("risks", [])],
-            "investment_view": str(parsed.get("investment_view") or ""),
-            "evidence_limitations": str(parsed.get("evidence_limitations") or ""),
-        }
-    except Exception as exc:
-        return {"available": False, "source": "ai_error", "error": str(exc)}
+    
+    max_retries = 3
+    base_delay = 2.0
+    
+    for attempt in range(max_retries):
+        try:
+            client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+            payload = json.dumps(dict(evidence), ensure_ascii=False, default=str)
+            completion = client.chat.completions.create(
+                model=model,
+                temperature=0.1,
+                max_tokens=1400,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"EVIDENCE_JSON:\n{payload}"},
+                ],
+            )
+            content = _extract_message_text(completion.choices[0].message) if completion.choices else ""
+            parsed = _extract_json_payload(content)
+            return {
+                "available": True,
+                "source": "groq",
+                "company_summary": str(parsed.get("company_summary") or ""),
+                "management_history": str(parsed.get("management_history") or ""),
+                "successes": [str(item) for item in parsed.get("successes", [])],
+                "failures": [str(item) for item in parsed.get("failures", [])],
+                "moat_analysis": str(parsed.get("moat_analysis") or ""),
+                "risks": [str(item) for item in parsed.get("risks", [])],
+                "investment_view": str(parsed.get("investment_view") or ""),
+                "evidence_limitations": str(parsed.get("evidence_limitations") or ""),
+            }
+        except openai.RateLimitError as exc:
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt))
+                continue
+            return {"available": False, "source": "ai_error", "error": f"Rate limited: {exc}"}
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "429" in err_str or "too many requests" in err_str or "rate limit" in err_str:
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+                    continue
+            return {"available": False, "source": "ai_error", "error": str(exc)}
+    
+    return {"available": False, "source": "ai_error", "error": "Max retries exceeded"}
