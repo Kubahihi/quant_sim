@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from copy import deepcopy
 from html import escape
 import importlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -69,6 +71,7 @@ TASK_EDITOR_VERSION_KEY = "wharton_task_editor_version"
 QUANT_RESULT_KEY = "wharton_quant_result"
 QUANT_ERROR_KEY = "wharton_quant_error"
 QUANT_STACK_RESULT_KEY = "wharton_quant_stack_result"
+COMPANY_ANALYSIS_KEY = "wharton_company_analysis_v1"
 
 TASK_PRIORITIES = ["Critical", "High", "Medium", "Low"]
 TASK_PRIORITY_COLORS = {
@@ -79,6 +82,7 @@ TASK_PRIORITY_COLORS = {
 }
 GRAPH_NODE_TYPES = ["Policy", "Company", "Model", "Market", "Risk", "Research", "Other"]
 QUANT_MODULES = [
+    "Methodology & Validation",
     "Benchmark Analytics",
     "Cost-Aware Rebalance",
     "Performance Attribution",
@@ -139,6 +143,11 @@ def init_db() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     with get_connection() as conn:
+        from src.analytics.macro_snapshot_store import init_macro_snapshot_table
+
+        # Shared, versioned macro cache. With Turso configured this table is
+        # available to every app instance; otherwise it remains a local cache.
+        init_macro_snapshot_table(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
@@ -1428,7 +1437,9 @@ def _compute_quant_run(
     portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
     price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
         current_value=current_value,
-        expected_return=float(core_metrics.get("annualized_return", 0.0)),
+        # GBM expects arithmetic drift; CAGR remains the headline realized
+        # return metric but is not the correct drift estimator here.
+        expected_return=float(portfolio_returns.mean() * 252.0),
         volatility=float(core_metrics.get("volatility", 0.0)),
         time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
     )
@@ -1452,6 +1463,7 @@ def _compute_quant_run(
             "end_date": end_date,
             "risk_free_rate": risk_free_rate,
             "portfolio_metrics": {**core_metrics, **concentration, "avg_correlation": avg_corr},
+            "transaction_cost_bps": transaction_cost_bps,
             "news_max_items": 80,
             "news_api_key": "",
         }
@@ -1469,6 +1481,19 @@ def _compute_quant_run(
         )
     except Exception as stack_err:
         quant_stack_result = {"_error": str(stack_err)}
+
+    backtest_for_validation = (
+        quant_stack_result.get("backtest", {})
+        if isinstance(quant_stack_result, dict) and "_error" not in quant_stack_result
+        else {}
+    )
+    model_validation = analytics.build_model_validation_report(
+        portfolio_returns=portfolio_returns,
+        simulation_stats=simulation_stats,
+        backtest=backtest_for_validation,
+        risk_free_rate=risk_free_rate,
+        random_seed=random_seed,
+    )
 
     metrics = {
         **core_metrics, **concentration,
@@ -1495,6 +1520,7 @@ def _compute_quant_run(
         "cost_aware": cost_aware,
         "price_paths": price_paths,
         "simulation_stats": simulation_stats,
+        "model_validation": model_validation,
         "adv_price_paths": adv_price_paths,
         "adv_simulation_stats": adv_simulation_stats,
         "quant_stack": quant_stack_result,
@@ -1714,6 +1740,77 @@ def _render_simulation(result: dict, advanced: bool) -> None:
     })
     st.markdown("#### Final Value Distribution")
     st.bar_chart(hist_df.set_index("Bucket"), use_container_width=True, height=320)
+
+
+def _render_methodology_validation(result: dict) -> None:
+    """Explain what QuantSim can and cannot support with current evidence."""
+    st.markdown("### Methodology & Validation")
+    report = result.get("model_validation", {})
+    if not report:
+        st.info("Run the Quant Engine to generate the validation report.")
+        return
+
+    score = float(report.get("methodology_score", 0.0))
+    distribution = report.get("distribution", {})
+    backtest = result.get("quant_stack", {}).get("backtest", {}) if isinstance(result.get("quant_stack"), dict) else {}
+    metrics = backtest.get("metrics", {}) if isinstance(backtest, dict) else {}
+    top = st.columns(4)
+    top[0].metric("Methodology score", f"{score:.0f}/100")
+    top[1].metric("Evidence band", str(report.get("band", "unknown")).replace("_", " ").title())
+    top[2].metric("History", f"{float(distribution.get('observations', 0)) / 252.0:.1f} years")
+    top[3].metric("Causal baseline hit rate", _fmt_pct(metrics.get("directional_hit_rate")))
+
+    st.info(
+        "This score measures evidence quality and reproducibility — not future predictive accuracy, "
+        "and it is not an official Wharton rating or endorsement."
+    )
+    st.markdown(f"**Assessment:** {escape(str(report.get('verdict', '')))}")
+
+    st.markdown("#### Validation gates")
+    gate_rows = []
+    status_labels = {"pass": "Pass", "warning": "Partial", "fail": "Gap"}
+    for gate in report.get("gates", []):
+        gate_rows.append({
+            "Gate": gate.get("gate", ""),
+            "Status": status_labels.get(str(gate.get("status", "")), str(gate.get("status", ""))),
+            "Score": f"{float(gate.get('points', 0)):.0f}/{float(gate.get('maximum', 0)):.0f}",
+            "Evidence": gate.get("evidence", ""),
+        })
+    st.dataframe(pd.DataFrame(gate_rows), use_container_width=True, hide_index=True)
+
+    intervals = report.get("metric_intervals", {})
+    if intervals:
+        labels = {
+            "annualized_return": "Annualized return",
+            "volatility": "Volatility",
+            "sharpe_ratio": "Sharpe ratio",
+            "var_95": "Daily VaR 95%",
+            "cvar_95": "Daily CVaR 95%",
+        }
+        interval_rows = []
+        for key, values in intervals.items():
+            is_ratio = key == "sharpe_ratio"
+            formatter = _fmt_float if is_ratio else _fmt_pct
+            interval_rows.append({
+                "Metric": labels.get(key, key),
+                "Estimate": formatter(values.get("estimate")),
+                "95% low": formatter(values.get("ci_low")),
+                "95% high": formatter(values.get("ci_high")),
+                "Method": values.get("method", ""),
+            })
+        st.markdown("#### Estimates with uncertainty")
+        st.dataframe(pd.DataFrame(interval_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Model-risk diagnostics")
+    diag = st.columns(4)
+    diag[0].metric("Skewness", _fmt_float(distribution.get("skewness")))
+    diag[1].metric("Excess kurtosis", _fmt_float(distribution.get("excess_kurtosis")))
+    diag[2].metric("Normality p-value", _fmt_float(distribution.get("normality_p_value")))
+    diag[3].metric("Lag-1 autocorrelation", _fmt_float(distribution.get("lag1_autocorrelation")))
+
+    with st.expander("Limitations that must accompany a Wharton-level presentation", expanded=True):
+        for limitation in report.get("limitations", []):
+            st.markdown(f"- {escape(str(limitation))}")
 
 
 def _render_models_signals(result: dict) -> None:
@@ -3564,7 +3661,9 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             st.error("Stack ")
 
     with content_col:
-        if selected == "Benchmark Analytics":
+        if selected == "Methodology & Validation":
+            _render_methodology_validation(result)
+        elif selected == "Benchmark Analytics":
             _render_benchmark_analytics(result, advanced)
         elif selected == "Cost-Aware Rebalance":
             _render_cost_aware_rebalance(result, advanced)
@@ -4168,45 +4267,45 @@ def _fetch_competition_positions() -> list[dict[str, Any]]:
 def _render_competition_rules(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import COMPETITION_URL, OFFICIAL_RULES_URL, evaluate_compliance
 
-    st.markdown("### Zadání a pravidla — Wharton 2026–2027")
-    st.caption("Kontrola používá pouze aktuálně zveřejněná oficiální pravidla. U každého nesplnění uvádí přesný důvod.")
+    st.markdown("### Assignment & Rules — Wharton 2026–2027")
+    st.caption("The compliance check uses only currently published official rules and gives the exact reason for every failed check.")
     source_col, overview_col = st.columns(2)
-    source_col.link_button("Oficiální pravidla 2026–2027", OFFICIAL_RULES_URL, use_container_width=True)
-    overview_col.link_button("Oficiální přehled soutěže", COMPETITION_URL, use_container_width=True)
+    source_col.link_button("Official 2026–2027 Rules", OFFICIAL_RULES_URL, use_container_width=True)
+    overview_col.link_button("Official Competition Overview", COMPETITION_URL, use_container_width=True)
     st.info(
-        "**Aktuálně zveřejněné zadání:** během 10 týdnů vytvořit pro klienta dlouhodobou investiční "
-        "strategii a spravovat 500 000 USD virtuálního kapitálu ve WInS. Hodnotí se síla a "
-        "vysvětlení strategie, ne pouze nejvyšší výnos."
+        "**Currently published assignment:** build a long-term investment strategy for the client and "
+        "manage USD 500,000 of virtual capital in WInS over 10 weeks. The competition evaluates the "
+        "quality and explanation of the strategy, not simply the highest return."
     )
     st.warning(
-        "Wharton zatím u obchodních pravidel 2026–2027 uvádí „More information coming soon“. "
-        "Nové zadání klienta a podrobné deliverables rovněž ještě nejsou zveřejněné. Tyto kontroly "
-        "proto zůstávají žluté, místo aby se použila zastaralá pravidla."
+        "Wharton currently marks the 2026–2027 trading rules as ‘More information coming soon.’ "
+        "The new client case and detailed deliverables have not been published either. These checks "
+        "therefore remain yellow instead of relying on outdated requirements."
     )
 
     current = _fetch_competition_settings()
-    st.markdown("#### Týmové prohlášení")
+    st.markdown("#### Team Declaration")
     with st.form("competition_compliance_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            team_size = st.number_input("Počet aktivních studentů", 0, 20, int(current.get("team_size") or 0))
-            leader_age = st.number_input("Věk vedoucího týmu na začátku", 0, 25, int(current.get("leader_age") or 0))
-            advisor_team_count = st.number_input("Kolik týmů vede hlavní advisor", 0, 50, int(current.get("advisor_team_count") or 0))
+            team_size = st.number_input("Number of active students", 0, 20, int(current.get("team_size") or 0))
+            leader_age = st.number_input("Team leader's age at the start", 0, 25, int(current.get("leader_age") or 0))
+            advisor_team_count = st.number_input("Number of teams led by the primary advisor", 0, 50, int(current.get("advisor_team_count") or 0))
         with c2:
-            same_school = st.checkbox("Všichni jsou ze stejné školy a pobočky", value=bool(current.get("same_school")))
-            eligible_students = st.checkbox("Všichni splňují věk, status studenta a nemají ukončenou střední školu", value=bool(current.get("eligible_students")))
-            leader_designated = st.checkbox("Je určen právě jeden student leader", value=bool(current.get("leader_designated")))
-            advisor_is_teacher = st.checkbox("Hlavní advisor je učitel této školy", value=bool(current.get("advisor_is_teacher")))
-            one_wins_account = st.checkbox("Tým používá jeden sdílený WInS účet", value=bool(current.get("one_wins_account")))
-            members_single_team = st.checkbox("Žádný student není v jiném soutěžním týmu", value=bool(current.get("members_single_team")))
+            same_school = st.checkbox("All members attend the same school and campus", value=bool(current.get("same_school")))
+            eligible_students = st.checkbox("All members meet the age and student-status rules and have not graduated from high school", value=bool(current.get("eligible_students")))
+            leader_designated = st.checkbox("Exactly one student leader has been designated", value=bool(current.get("leader_designated")))
+            advisor_is_teacher = st.checkbox("The primary advisor is a teacher at the team's school", value=bool(current.get("advisor_is_teacher")))
+            one_wins_account = st.checkbox("The team uses one shared WInS account", value=bool(current.get("one_wins_account")))
+            members_single_team = st.checkbox("No student participates on another competition team", value=bool(current.get("members_single_team")))
         with c3:
-            no_client_contact = st.checkbox("Tým nekontaktoval soutěžního klienta", value=bool(current.get("no_client_contact")))
-            no_paid_advisor = st.checkbox("Bez placeného advisora, konzultanta či zakázaného kurzu", value=bool(current.get("no_paid_advisor")))
-            student_owned_work = st.checkbox("Strategii a rozhodnutí vytvořili studenti", value=bool(current.get("student_owned_work")))
-            ai_cited = st.checkbox("AI obsah je citován a není vydáván za vlastní práci", value=bool(current.get("ai_cited")))
-            sources_cited = st.checkbox("Všechny zdroje, obrázky a média jsou citovány", value=bool(current.get("sources_cited")))
-            school_permission = st.checkbox("Je připraven souhlas školy na oficiálním hlavičkovém papíře", value=bool(current.get("school_permission")))
-        save_rules = st.form_submit_button("Uložit a přepočítat kontrolu", type="primary", use_container_width=True)
+            no_client_contact = st.checkbox("The team has not contacted the competition client", value=bool(current.get("no_client_contact")))
+            no_paid_advisor = st.checkbox("No paid advisor, consultant, or prohibited course has been used", value=bool(current.get("no_paid_advisor")))
+            student_owned_work = st.checkbox("Students created the strategy and made the decisions", value=bool(current.get("student_owned_work")))
+            ai_cited = st.checkbox("AI-generated content is cited and is not presented as original student work", value=bool(current.get("ai_cited")))
+            sources_cited = st.checkbox("All sources, images, and media are cited", value=bool(current.get("sources_cited")))
+            school_permission = st.checkbox("School authorization on official letterhead is ready", value=bool(current.get("school_permission")))
+        save_rules = st.form_submit_button("Save and Recalculate Compliance", type="primary", use_container_width=True)
 
     if save_rules:
         payload = {
@@ -4230,7 +4329,7 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
             conn.commit()
             if hasattr(conn, "sync"):
                 conn.sync()
-        st.success(f"Kontrolu aktualizoval(a) {profile['username']}.")
+        st.success(f"Compliance declaration updated by {profile['username']}.")
         current = payload
 
     checks = evaluate_compliance(current, _fetch_competition_positions())
@@ -4238,20 +4337,20 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
     failed = sum(item["status"] == "fail" for item in checks)
     pending = sum(item["status"] == "pending" for item in checks)
     k1, k2, k3 = st.columns(3)
-    k1.metric("✅ Splněno", passed)
-    k2.metric("❌ Nesplněno", failed)
-    k3.metric("🟡 Čeká na Wharton", pending)
+    k1.metric("✅ Passed", passed)
+    k2.metric("❌ Failed", failed)
+    k3.metric("🟡 Awaiting Wharton", pending)
     status_map = {"pass": "✅", "fail": "❌", "pending": "🟡"}
     st.dataframe(pd.DataFrame([
-        {"Stav": status_map[item["status"]], "Pravidlo": item["rule"], "Přesný výsledek kontroly": item["detail"]}
+        {"Status": status_map[item["status"]], "Rule": item["rule"], "Exact Check Result": item["detail"]}
         for item in checks
     ]), use_container_width=True, hide_index=True)
     if failed:
-        st.error(f"Tým nebo portfolio nyní nesplňuje {failed} kontrolovaných pravidel. Přesné důvody jsou uvedené výše.")
+        st.error(f"The team or portfolio currently fails {failed} checked rule(s). The exact reasons are shown above.")
     elif pending:
-        st.warning("Všechna zveřejněná kontrolovatelná pravidla jsou splněna; čeká se na další oficiální materiály.")
+        st.warning("All published, verifiable rules are satisfied; additional official materials are still pending.")
     else:
-        st.success("Všechna kontrolovaná pravidla jsou splněna.")
+        st.success("All checked rules are satisfied.")
 
 
 def _competition_live_prices(tickers: list[str]) -> dict[str, float]:
@@ -4274,26 +4373,26 @@ def _competition_live_prices(tickers: list[str]) -> dict[str, float]:
 def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
 
-    st.markdown("### Portfolio tracker — Wharton 2026–2027")
-    st.caption("Výnos se počítá od 500 000 USD. Každá pozice uchovává autora, datum a cenu vstupu i výsledek.")
-    with st.expander("Přidat novou pozici", expanded=False):
+    st.markdown("### Portfolio Tracker — Wharton 2026–2027")
+    st.caption("Returns are measured from USD 500,000. Every position records its creator, dates, entry price, and performance.")
+    with st.expander("Add a New Position", expanded=False):
         with st.form("competition_add_position", clear_on_submit=True):
             p1, p2, p3 = st.columns(3)
             with p1:
-                ticker = st.text_input("Ticker", placeholder="např. MSFT")
-                security_type = st.selectbox("Typ", ["Stock", "ETF", "Bond", "Other"])
+                ticker = st.text_input("Ticker", placeholder="e.g. MSFT")
+                security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Other"])
             with p2:
-                quantity = st.number_input("Počet kusů", min_value=0.0, value=0.0, step=1.0)
-                entry_price = st.number_input("Vstupní cena za kus (USD)", min_value=0.0, value=0.0, step=0.01)
+                quantity = st.number_input("Quantity", min_value=0.0, value=0.0, step=1.0)
+                entry_price = st.number_input("Entry Price per Unit (USD)", min_value=0.0, value=0.0, step=0.01)
             with p3:
-                entry_date = st.date_input("Datum otevření", value=date.today())
-                manual_price = st.number_input("Aktuální cena (volitelné)", min_value=0.0, value=0.0, step=0.01)
-            notes = st.text_area("Poznámka / investiční teze", height=80)
-            add_position = st.form_submit_button("Přidat pozici", type="primary", use_container_width=True)
+                entry_date = st.date_input("Opening Date", value=date.today())
+                manual_price = st.number_input("Current Price (optional)", min_value=0.0, value=0.0, step=0.01)
+            notes = st.text_area("Notes / Investment Thesis", height=80)
+            add_position = st.form_submit_button("Add Position", type="primary", use_container_width=True)
         if add_position:
             clean_ticker = ticker.strip().upper()
             if not clean_ticker or quantity <= 0 or entry_price <= 0:
-                st.error("Ticker, počet kusů a vstupní cena musí být vyplněné a kladné.")
+                st.error("Ticker, quantity, and entry price are required and must be positive.")
             else:
                 with get_connection() as conn:
                     conn.execute(
@@ -4303,7 +4402,7 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                     conn.commit()
                     if hasattr(conn, "sync"):
                         conn.sync()
-                st.success(f"Pozici {clean_ticker} založil(a) {profile['username']}.")
+                st.success(f"Position {clean_ticker} was opened by {profile['username']}.")
                 st.rerun()
 
     positions = _fetch_competition_positions()
@@ -4311,37 +4410,37 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     live_prices = _competition_live_prices(open_tickers)
     performance = calculate_portfolio_performance(positions, live_prices)
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Hodnota portfolia", f"${performance['equity']:,.2f}")
-    m2.metric("Celkové zhodnocení od začátku", f"{performance['total_return_pct']:+.2f}%", f"${performance['total_pnl']:+,.2f}")
-    m3.metric("Nerealizovaný P/L", f"${performance['unrealized_pnl']:+,.2f}")
-    m4.metric("Realizovaný P/L", f"${performance['realized_pnl']:+,.2f}")
+    m1.metric("Portfolio Value", f"${performance['equity']:,.2f}")
+    m2.metric("Total Return Since Inception", f"{performance['total_return_pct']:+.2f}%", f"${performance['total_pnl']:+,.2f}")
+    m3.metric("Unrealized P/L", f"${performance['unrealized_pnl']:+,.2f}")
+    m4.metric("Realized P/L", f"${performance['realized_pnl']:+,.2f}")
     st.caption(
-        f"Počáteční kapitál: ${INITIAL_CAPITAL_USD:,.0f} · Neinvestovaná hotovost před P/L: "
-        f"${performance['cash_before_pnl']:,.2f} · Živé ceny: {len(live_prices)}/{len(set(open_tickers))} tickerů."
+        f"Initial capital: ${INITIAL_CAPITAL_USD:,.0f} · Uninvested cash before P/L: "
+        f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(open_tickers))} tickers."
     )
     if not performance["positions"]:
-        st.info("Zatím není zadaná žádná pozice.")
+        st.info("No positions have been entered yet.")
         return
 
     st.dataframe(pd.DataFrame([{
-        "Stav": "Otevřená" if row["status"] == "open" else "Uzavřená", "Ticker": row["ticker"],
-        "Typ": row["security_type"], "Kusy": row["quantity"], "Vstup": f"${row['entry_price']:,.2f}",
-        "Aktuální / výstup": f"${row['current_price']:,.2f}", "Zhodnocení pozice": f"{row['return_pct']:+.2f}%",
-        "P/L": f"${row['pnl']:+,.2f}", "Pozici založil(a)": row["opened_by"], "Datum": row["entry_date"],
-        "Zdroj ceny": row["price_source"],
+        "Status": "Open" if row["status"] == "open" else "Closed", "Ticker": row["ticker"],
+        "Type": row["security_type"], "Quantity": row["quantity"], "Entry Price": f"${row['entry_price']:,.2f}",
+        "Current / Exit Price": f"${row['current_price']:,.2f}", "Position Return": f"{row['return_pct']:+.2f}%",
+        "P/L": f"${row['pnl']:+,.2f}", "Opened By": row["opened_by"], "Opening Date": row["entry_date"],
+        "Price Source": row["price_source"],
     } for row in performance["positions"]]), use_container_width=True, hide_index=True)
 
-    st.markdown("#### Správa otevřených pozic")
+    st.markdown("#### Manage Open Positions")
     for row in performance["positions"]:
         if row["status"] != "open":
             continue
-        with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · založil(a) {row['opened_by']}"):
-            st.write(row.get("notes") or "Bez poznámky.")
+        with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · opened by {row['opened_by']}"):
+            st.write(row.get("notes") or "No notes.")
             update_col, close_col = st.columns(2)
             with update_col:
                 with st.form(f"competition_update_price_{row['id']}"):
-                    new_price = st.number_input("Ruční aktuální cena", min_value=0.0, value=float(row["current_price"]), step=0.01, key=f"competition_price_{row['id']}")
-                    if st.form_submit_button("Uložit ruční cenu", use_container_width=True):
+                    new_price = st.number_input("Manual Current Price", min_value=0.0, value=float(row["current_price"]), step=0.01, key=f"competition_price_{row['id']}")
+                    if st.form_submit_button("Save Manual Price", use_container_width=True):
                         with get_connection() as conn:
                             conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
                             conn.commit()
@@ -4350,22 +4449,922 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                         st.rerun()
             with close_col:
                 with st.form(f"competition_close_{row['id']}"):
-                    exit_price = st.number_input("Výstupní cena", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
-                    exit_date = st.date_input("Datum uzavření", value=date.today(), key=f"competition_exit_date_{row['id']}")
-                    if st.form_submit_button("Uzavřít pozici", type="primary", use_container_width=True):
+                    exit_price = st.number_input("Exit Price", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
+                    exit_date = st.date_input("Closing Date", value=date.today(), key=f"competition_exit_date_{row['id']}")
+                    if st.form_submit_button("Close Position", type="primary", use_container_width=True):
                         with get_connection() as conn:
                             conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
                             conn.commit()
                             if hasattr(conn, "sync"):
                                 conn.sync()
                         st.rerun()
-            if st.button("Smazat chybně zadanou pozici", key=f"competition_delete_{row['id']}"):
+            if st.button("Delete Incorrectly Entered Position", key=f"competition_delete_{row['id']}"):
                 with get_connection() as conn:
                     conn.execute("DELETE FROM competition_positions WHERE id = ?", (int(row["id"]),))
                     conn.commit()
                     if hasattr(conn, "sync"):
                         conn.sync()
                 st.rerun()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_company_analysis_cached(ticker: str) -> dict[str, Any]:
+    from src.analytics.company_analysis import fetch_company_data
+
+    return fetch_company_data(ticker)
+
+
+def _load_company_analysis_module(*required_names: str, minimum_macro_schema: int = 0) -> Any:
+    """Reload the analytics module when Streamlit retained a pre-feature version."""
+    module = importlib.import_module("src.analytics.company_analysis")
+    if (
+        any(not hasattr(module, name) for name in required_names)
+        or int(getattr(module, "MACRO_DATA_SCHEMA_VERSION", 0)) < minimum_macro_schema
+    ):
+        module = importlib.reload(module)
+    missing = [name for name in required_names if not hasattr(module, name)]
+    if missing:
+        raise ImportError(f"Company-analysis module is missing: {', '.join(missing)}")
+    return module
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_macro_snapshot_cached(economy_code: str) -> dict[str, Any]:
+    module = _load_company_analysis_module("fetch_macro_snapshot", minimum_macro_schema=5)
+    from src.analytics.macro_snapshot_store import load_macro_snapshot, upsert_macro_snapshot
+
+    code = str(economy_code or "").upper().strip()
+    reference_year = int(module.MACRO_REFERENCE_YEAR)
+    schema_version = int(module.MACRO_DATA_SCHEMA_VERSION)
+    backend = _macro_database_backend()
+    storage_warning = ""
+    try:
+        with get_connection() as conn:
+            cached = load_macro_snapshot(conn, code, reference_year, schema_version)
+        if cached is not None:
+            cached.setdefault("cache_info", {})["backend"] = backend
+            return cached
+    except Exception as exc:
+        storage_warning = f"Database cache read unavailable ({type(exc).__name__})."
+
+    snapshot = module.fetch_macro_snapshot(code)
+    cache_info = {
+        "origin": "live",
+        "backend": backend,
+        "schema_version": schema_version,
+        "persisted": False,
+    }
+    if snapshot.get("available"):
+        try:
+            with get_connection() as conn:
+                cache_info["persisted"] = upsert_macro_snapshot(conn, snapshot, schema_version)
+        except Exception as exc:
+            storage_warning = f"Database cache write unavailable ({type(exc).__name__})."
+    if storage_warning:
+        cache_info["warning"] = storage_warning
+    snapshot["cache_info"] = cache_info
+    return snapshot
+
+
+def _macro_database_backend() -> str:
+    """Return the configured persistence mode without exposing credentials."""
+    database_url = os.environ.get("TURSO_DATABASE_URL")
+    auth_token = os.environ.get("TURSO_AUTH_TOKEN")
+    try:
+        database_url = st.secrets.get("TURSO_DATABASE_URL") or database_url
+        auth_token = st.secrets.get("TURSO_AUTH_TOKEN") or auth_token
+    except Exception:
+        pass
+    return "turso" if database_url and auth_token else "sqlite"
+
+
+def _invalidate_macro_snapshot(economy_code: str) -> bool:
+    module = _load_company_analysis_module(minimum_macro_schema=5)
+    from src.analytics.macro_snapshot_store import delete_macro_snapshot
+
+    try:
+        with get_connection() as conn:
+            delete_macro_snapshot(
+                conn,
+                economy_code,
+                int(module.MACRO_REFERENCE_YEAR),
+                int(module.MACRO_DATA_SCHEMA_VERSION),
+            )
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=604800, show_spinner=False)
+def _fetch_management_biography_cached(name: str, company_name: str) -> dict[str, Any]:
+    from src.analytics.company_analysis import fetch_management_biography
+
+    return fetch_management_biography(name, company_name)
+
+
+def _company_news_rows(news: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for index, item in enumerate(news, start=1):
+        content = item.get("content") if isinstance(item.get("content"), dict) else {}
+        canonical = content.get("canonicalUrl") if isinstance(content.get("canonicalUrl"), dict) else {}
+        click_through = content.get("clickThroughUrl") if isinstance(content.get("clickThroughUrl"), dict) else {}
+        provider = content.get("provider") if isinstance(content.get("provider"), dict) else {}
+        title = str(item.get("title") or content.get("title") or "Untitled")
+        url = str(item.get("link") or canonical.get("url") or click_through.get("url", ""))
+        publisher = str(item.get("publisher") or provider.get("displayName") or "Yahoo Finance")
+        rows.append({"id": f"N{index}", "title": title, "url": url, "publisher": publisher})
+    return rows
+
+
+def _format_company_metric(key: str, value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return "—"
+        if any(token in key.lower() for token in ("margin", "growth", "yield", "returnon", "heldpercent")):
+            return f"{value:.2%}"
+        if abs(value) >= 1e9:
+            return f"{value / 1e9:,.2f}B"
+        if abs(value) >= 1e6:
+            return f"{value / 1e6:,.2f}M"
+        return f"{value:,.4g}"
+    if isinstance(value, int) and abs(value) >= 1_000_000:
+        return f"{value / 1e6:,.2f}M"
+    return str(value)
+
+
+def _render_statement_block(label: str, frame: pd.DataFrame) -> None:
+    from src.analytics.company_analysis import format_statement
+
+    st.markdown(f"##### {label}")
+    display = format_statement(frame)
+    if display.empty:
+        st.info("Data are not available for this ticker.")
+    else:
+        st.caption("Values are in millions of the reporting currency; the newest period is shown first.")
+        st.dataframe(display, use_container_width=True)
+
+
+def _render_geographic_revenue_breakdown(snapshot: dict[str, Any], ticker: str, company_name: str) -> None:
+    from src.analytics.company_analysis import analyze_geographic_revenue
+
+    st.markdown("#### Revenue by Region")
+    st.caption(
+        "Automatic data come from the most recent SEC annual filing available through the configured sources "
+        "and are used only when a non-overlapping Inline XBRL geographic table can be verified."
+    )
+    geographic = snapshot.get("geographic_revenue", {})
+    analysis = geographic.get("analysis", {}) if isinstance(geographic, dict) else {}
+
+    if not geographic.get("available"):
+        st.warning(geographic.get("error", "A reliable geographic revenue breakdown was not found."))
+        st.info(
+            "Yahoo Finance does not normally publish revenue by region. You can enter values from the company's "
+            "annual report below; QuantSim will analyze them without inventing missing regions."
+        )
+        manual_key = f"company_region_manual_{ticker}"
+        starter = pd.DataFrame(
+            [
+                {"Region": "", "Revenue": None},
+                {"Region": "", "Revenue": None},
+            ]
+        )
+        manual = st.data_editor(
+            starter,
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key=manual_key,
+            column_config={
+                "Region": st.column_config.TextColumn("Region", help="Use the exact label from the annual report."),
+                "Revenue": st.column_config.NumberColumn("Revenue", min_value=0.0, format="%.2f"),
+            },
+        )
+        manual_rows = [
+            {"region": row.get("Region"), "revenue": row.get("Revenue")}
+            for row in manual.to_dict("records")
+        ]
+        manual_analysis = analyze_geographic_revenue(manual_rows)
+        if manual_analysis.get("available"):
+            analysis = manual_analysis
+            geographic = {
+                "available": True,
+                "rows": [{"region": row["region"], "revenue": row["revenue"]} for row in analysis["rows"]],
+                "currency": "entered units",
+                "source_name": "Manual annual-report input",
+                "source_url": "",
+                "report_date": "",
+                "analysis": analysis,
+            }
+        else:
+            st.caption("Enter at least two regions with positive revenue to generate the chart and rating.")
+            return
+
+    if not analysis.get("available"):
+        analysis = analyze_geographic_revenue(geographic.get("rows", []))
+    if not analysis.get("available"):
+        st.warning(analysis.get("error", "Regional analysis is unavailable."))
+        return
+
+    score_cols = st.columns(5)
+    score_cols[0].metric("Diversification rating", f"{analysis['score']}/{analysis['max_score']}")
+    score_cols[1].metric("Assessment", analysis["label"])
+    score_cols[2].metric("Largest region", str(analysis["top_region"]))
+    score_cols[3].metric("Largest share", f"{analysis['top_region_share']:.1%}")
+    score_cols[4].metric("Effective regions", f"{analysis['effective_regions']:.1f}")
+    st.caption(analysis["warning"])
+
+    rows = analysis["rows"]
+    chart_col, detail_col = st.columns([0.56, 0.44], gap="large")
+    with chart_col:
+        import plotly.graph_objects as go
+
+        figure = go.Figure(
+            go.Pie(
+                labels=[row["region"] for row in rows],
+                values=[row["revenue"] for row in rows],
+                hole=0.38,
+                sort=False,
+                textinfo="label+percent",
+                hovertemplate="%{label}<br>Revenue: %{value:,.2f}<br>Share: %{percent}<extra></extra>",
+            )
+        )
+        figure.update_layout(
+            title=f"{company_name}: Revenue by Region",
+            height=460,
+            margin=dict(l=10, r=10, t=60, b=10),
+            legend=dict(orientation="h", yanchor="top", y=-0.08),
+        )
+        st.plotly_chart(figure, use_container_width=True)
+    with detail_col:
+        st.markdown("##### Regional interpretation")
+        st.write(analysis["interpretation"])
+        for strength in analysis.get("strengths", []):
+            st.success(strength)
+        for risk in analysis.get("risks", []):
+            st.warning(risk)
+
+    currency = str(geographic.get("currency") or "reporting currency")
+    table = pd.DataFrame([
+        {
+            "Region": row["region"],
+            f"Revenue ({currency})": row["revenue"],
+            "Revenue share": row["share"],
+            "Strategic importance": row["strategic_importance"],
+        }
+        for row in rows
+    ])
+    st.dataframe(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Revenue share": st.column_config.ProgressColumn(
+                "Revenue share", min_value=0.0, max_value=1.0, format="percent"
+            ),
+        },
+    )
+    source_url = str(geographic.get("source_url") or "")
+    source_name = str(geographic.get("source_name") or "Annual filing")
+    report_date = str(geographic.get("report_date") or geographic.get("fiscal_end") or "")
+    if source_url:
+        st.markdown(f"Source: [{source_name}]({source_url}) · reporting period ended {report_date or 'not specified'}")
+    else:
+        st.caption(f"Source: {source_name}. Verify manually entered values against the cited annual report.")
+    if geographic.get("coverage_ratio") is not None:
+        st.caption(
+            f"Named-region disclosure coverage before any residual bucket: {float(geographic['coverage_ratio']):.1%}. "
+            f"XBRL concept: {geographic.get('concept', '—')}."
+        )
+
+
+def _render_macro_region_drilldown(snapshot: dict[str, Any], ticker: str) -> None:
+    module = _load_company_analysis_module(
+        "MACRO_ECONOMIES",
+        "analyze_macro_snapshot",
+        "infer_macro_economy",
+        minimum_macro_schema=5,
+    )
+    macro_economies = module.MACRO_ECONOMIES
+
+    st.markdown("#### Regional Macro Drill-down · 2024")
+    st.caption(
+        "All score inputs use the same 2024 reference year. Connect a disclosed revenue region to an editable "
+        "economy proxy, then inspect inflation, government debt, interest rates, growth, unemployment, and the current account."
+    )
+
+    geographic = snapshot.get("geographic_revenue", {})
+    geographic_analysis = geographic.get("analysis", {}) if isinstance(geographic, dict) else {}
+    region_rows = geographic_analysis.get("rows", []) if isinstance(geographic_analysis, dict) else []
+    region_names = [
+        str(row.get("region"))
+        for row in region_rows
+        if isinstance(row, dict)
+        and row.get("region")
+        and str(row.get("region")).lower() != "not separately disclosed"
+    ]
+    if not region_names:
+        region_names = ["Company-wide / choose proxy manually"]
+
+    control_cols = st.columns(2)
+    with control_cols[0]:
+        selected_region = st.selectbox(
+            "Revenue region",
+            region_names,
+            key=f"company_macro_region_{ticker}",
+            help="This is the filing bucket whose macro backdrop you want to inspect.",
+        )
+
+    inferred_code = module.infer_macro_economy(selected_region)
+    economy_names = list(macro_economies)
+    inferred_name = next(
+        (name for name, code in macro_economies.items() if code == inferred_code),
+        "World",
+    )
+    regional_codes = set(getattr(module, "WORLD_BANK_REGIONAL_CODES", set()))
+    exact_country_names = {
+        name.lower(): name
+        for name, code in macro_economies.items()
+        if code not in regional_codes
+    }
+    exact_country_match = exact_country_names.get(selected_region.strip().lower())
+    with control_cols[1]:
+        if exact_country_match:
+            selected_economy = st.selectbox(
+                "Macro economy used",
+                [exact_country_match],
+                disabled=True,
+                key=f"company_macro_economy_v5_{ticker}_{selected_region}",
+                help="An exact country disclosure is automatically tied to that country's macro data.",
+            )
+        else:
+            selected_economy = st.selectbox(
+                "Macro economy proxy",
+                economy_names,
+                index=economy_names.index(inferred_name),
+                key=f"company_macro_economy_v5_{ticker}_{selected_region}",
+                help="Change the proxy whenever the company's disclosure bucket does not match a World Bank economy.",
+            )
+    economy_code = macro_economies[selected_economy]
+    st.info(
+        f"Proxy used: **{selected_region} → {selected_economy} ({economy_code})**. "
+        "Revenue filing buckets and macro datasets rarely align exactly, so this mapping is an analytical proxy, "
+        "not a claim about the company's exact country mix."
+    )
+
+    state_key = f"company_macro_snapshot_v5_{ticker}_{economy_code}"
+    macro_snapshot = st.session_state.get(state_key)
+    if not isinstance(macro_snapshot, dict):
+        with st.spinner(f"Loading World Bank indicators for {selected_economy}…"):
+            macro_snapshot = _fetch_macro_snapshot_cached(economy_code)
+            st.session_state[state_key] = macro_snapshot
+
+    if not macro_snapshot.get("available"):
+        st.warning(macro_snapshot.get("error", "Macro indicators are not available for this economy proxy."))
+        if st.button(
+            "Retry macro data",
+            key=f"company_macro_retry_{ticker}_{economy_code}",
+            use_container_width=True,
+        ):
+            _invalidate_macro_snapshot(economy_code)
+            _fetch_macro_snapshot_cached.clear()
+            st.session_state.pop(state_key, None)
+            st.rerun()
+        return
+
+    reference_year = int(macro_snapshot.get("reference_year") or 2024)
+    cache_info = macro_snapshot.get("cache_info", {})
+    if isinstance(cache_info, dict) and cache_info:
+        backend_label = "shared Turso database" if cache_info.get("backend") == "turso" else "local SQLite cache"
+        if cache_info.get("origin") == "database":
+            st.caption(f"Macro snapshot loaded from the {backend_label}; expires {cache_info.get('expires_at', 'automatically')}.")
+        elif cache_info.get("persisted"):
+            st.caption(f"Fresh macro snapshot saved to the {backend_label} for reuse by other app sessions.")
+        if cache_info.get("warning"):
+            st.caption(str(cache_info["warning"]))
+    rate_codes = ("FR.INR.RINR", "FR.INR.LEND")
+    snapshot_indicators = macro_snapshot.get("indicators", {})
+    missing_rate_codes = [
+        code
+        for code in rate_codes
+        if not isinstance(snapshot_indicators.get(code), dict)
+        or snapshot_indicators[code].get("latest_value") is None
+    ]
+    if missing_rate_codes:
+        rate_proxy_names = [
+            name for name, code in macro_economies.items() if code not in regional_codes
+        ]
+        selected_rate_proxy = st.selectbox(
+            "Interest-rate country proxy",
+            rate_proxy_names,
+            index=rate_proxy_names.index("United States") if "United States" in rate_proxy_names else 0,
+            key=f"company_macro_rate_proxy_v5_{ticker}_{economy_code}",
+            help=(
+                "Broad regions do not have a comparable lending or real-interest-rate aggregate. "
+                "Choose a representative country; proxy rates are labeled separately and used transparently."
+            ),
+        )
+        rate_proxy_code = macro_economies[selected_rate_proxy]
+        with st.spinner(f"Loading interest-rate proxy for {selected_rate_proxy}…"):
+            rate_snapshot = _fetch_macro_snapshot_cached(rate_proxy_code)
+        proxy_indicators = rate_snapshot.get("indicators", {}) if isinstance(rate_snapshot, dict) else {}
+        working_snapshot = deepcopy(macro_snapshot)
+        working_indicators = working_snapshot.get("indicators", {})
+        applied_rate_labels: list[str] = []
+        for rate_code in missing_rate_codes:
+            proxy_item = proxy_indicators.get(rate_code, {}) if isinstance(proxy_indicators, dict) else {}
+            if not isinstance(proxy_item, dict) or proxy_item.get("latest_value") is None:
+                continue
+            replacement = deepcopy(proxy_item)
+            base_label = str(replacement.get("label") or rate_code)
+            replacement["label"] = f"{base_label} ({selected_rate_proxy} proxy)"
+            replacement["definition"] = f"{base_label}; {selected_rate_proxy} country proxy"
+            replacement["source_name"] = (
+                f"{replacement.get('source_name') or 'World Bank World Development Indicators'} "
+                f"· {selected_rate_proxy} rate proxy"
+            )
+            replacement["is_proxy"] = True
+            working_indicators[rate_code] = replacement
+            applied_rate_labels.append(base_label)
+        if applied_rate_labels:
+            macro_snapshot = working_snapshot
+            st.info(
+                f"Regional rate aggregates were unavailable. {', '.join(applied_rate_labels)} now use the "
+                f"editable **{selected_rate_proxy}** country proxy; the macro economy itself remains "
+                f"**{selected_economy}**."
+            )
+
+    analysis = module.analyze_macro_snapshot(macro_snapshot)
+    if not analysis.get("available"):
+        st.warning("There are not enough recent observations to calculate the macro score.")
+        return
+
+    score_cols = st.columns(4)
+    score_cols[0].metric(f"Macro resilience ({reference_year})", f"{analysis['score']:.0f}/100")
+    score_cols[1].metric("Assessment", analysis["label"])
+    score_cols[2].metric("Scoring coverage", f"{analysis['data_coverage']:.0%}")
+    score_cols[3].metric("Macro economy used", str(macro_snapshot.get("economy_name") or selected_economy))
+    st.caption(analysis["warning"])
+
+    components = analysis.get("components", [])
+    metric_columns = st.columns(3)
+    for index, component in enumerate(components):
+        value = component.get("value")
+        year = component.get("year")
+        display_value = f"{float(value):.1f}%" if value is not None else "Not published"
+        metric_columns[index % 3].metric(
+            str(component.get("label")),
+            display_value,
+            delta=f"Observation: {year}" if year else f"No {reference_year} observation",
+            delta_color="off",
+        )
+
+    interpretation_cols = st.columns(2)
+    with interpretation_cols[0]:
+        st.markdown("##### Supportive signals")
+        strengths = analysis.get("strengths", [])
+        if strengths:
+            for strength in strengths:
+                st.success(strength)
+        else:
+            st.caption("No indicator currently meets the score's supportive threshold.")
+    with interpretation_cols[1]:
+        st.markdown("##### Watch items")
+        risks = analysis.get("risks", [])
+        if risks:
+            for risk in risks:
+                st.warning(risk)
+        else:
+            st.caption("No indicator currently breaches the score's watch threshold.")
+
+    latest_table = pd.DataFrame([
+        {
+            "Indicator": component.get("label"),
+            "Latest value": component.get("value"),
+            "Observation year": component.get("year"),
+            "Score weight": float(component.get("weight", 0.0)) / 100.0,
+            "Component score": component.get("component_score"),
+            "Source": component.get("source_name") or "World Bank World Development Indicators",
+        }
+        for component in components
+    ])
+    st.markdown("##### Latest observations and score inputs")
+    st.dataframe(
+        latest_table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Latest value": st.column_config.NumberColumn("Latest value (%)", format="%.2f"),
+            "Score weight": st.column_config.ProgressColumn(
+                "Score weight", min_value=0.0, max_value=1.0, format="percent"
+            ),
+            "Component score": st.column_config.NumberColumn("Component score", format="%.0f"),
+        },
+    )
+
+    st.markdown("##### Ten-year macro trends")
+    chart_groups = [
+        ("Inflation and interest rates", ["FP.CPI.TOTL.ZG", "FR.INR.RINR", "FR.INR.LEND"]),
+        ("Growth and labor market", ["NY.GDP.MKTP.KD.ZG", "SL.UEM.TOTL.ZS"]),
+        ("Debt and external balance", ["GC.DOD.TOTL.GD.ZS", "BN.CAB.XOKA.GD.ZS"]),
+    ]
+    indicators = macro_snapshot.get("indicators", {})
+    import plotly.graph_objects as go
+
+    for title, indicator_codes in chart_groups:
+        figure = go.Figure()
+        for indicator_code in indicator_codes:
+            indicator = indicators.get(indicator_code, {}) if isinstance(indicators, dict) else {}
+            series = indicator.get("series", []) if isinstance(indicator, dict) else []
+            series = [point for point in series if int(point.get("year", 0)) <= reference_year]
+            if not series:
+                continue
+            figure.add_trace(go.Scatter(
+                x=[point["year"] for point in series],
+                y=[point["value"] for point in series],
+                name=str(indicator.get("label") or indicator_code),
+                mode="lines+markers",
+                hovertemplate="%{x}: %{y:.2f}%<extra>%{fullData.name}</extra>",
+            ))
+        if figure.data:
+            figure.update_layout(
+                title=title,
+                height=340,
+                margin=dict(l=10, r=10, t=55, b=20),
+                yaxis_title="Percent",
+                legend=dict(orientation="h", yanchor="top", y=-0.18),
+            )
+            st.plotly_chart(figure, use_container_width=True)
+
+    source_url = str(macro_snapshot.get("source_url") or "")
+    fetched_at = str(macro_snapshot.get("fetched_at") or "")
+    if source_url:
+        st.markdown(f"Source: [World Bank World Development Indicators]({source_url}) · fetched {fetched_at}")
+    debt_component = next(
+        (component for component in components if component.get("indicator_code") == "GC.DOD.TOTL.GD.ZS"),
+        {},
+    )
+    if debt_component.get("is_fallback") and debt_component.get("source_url"):
+        st.markdown(
+            f"Debt fallback: [{debt_component.get('source_name')}]({debt_component.get('source_url')}) · "
+            "general government gross debt, historical year only."
+        )
+    debt_definition = (
+        "Debt is IMF WEO general-government gross debt because the World Bank series was unavailable."
+        if debt_component.get("is_fallback")
+        else "Debt is the World Bank central-government-debt series, not a complete general-government measure."
+    )
+    st.caption(
+        f"{debt_definition} Rates shown are annual real and lending rates, not a live central-bank policy rate. "
+        "Observation years may differ."
+    )
+
+
+def _render_geographic_revenue(snapshot: dict[str, Any], ticker: str, company_name: str) -> None:
+    selected_view = st.radio(
+        "Regional analysis view",
+        ["Revenue Exposure", "Macro Drill-down"],
+        horizontal=True,
+        key=f"company_region_view_{ticker}",
+    )
+    if selected_view == "Revenue Exposure":
+        _render_geographic_revenue_breakdown(snapshot, ticker, company_name)
+    else:
+        _render_macro_region_drilldown(snapshot, ticker)
+
+
+def _render_company_analysis(profile: dict[str, str | int]) -> None:
+    from src.analytics.company_analysis import (
+        analyze_moat,
+        analyze_track_record,
+        build_dcf_scenarios,
+        default_dcf_assumptions,
+    )
+
+    st.markdown("### Company Analysis")
+    st.caption(
+        "Company profile, all available metrics, financial statements, management, operating track record, "
+        "moat screening, risks, news, and a configurable DCF for every company."
+    )
+    existing_positions = _fetch_competition_positions()
+    suggested = ", ".join(dict.fromkeys(str(row["ticker"]).upper() for row in existing_positions))
+    raw_tickers = st.text_area(
+        "Tickers (comma, space, or newline separated; maximum 8)",
+        value=suggested,
+        placeholder="MSFT, ASML, NVDA",
+        key="wharton_company_analysis_tickers",
+        height=75,
+    )
+    run_analysis = st.button("Analyze Companies", type="primary", use_container_width=True)
+    if run_analysis:
+        import re
+
+        tickers = list(dict.fromkeys(item.upper() for item in re.split(r"[\s,;]+", raw_tickers) if item.strip()))
+        if not tickers:
+            st.error("Enter at least one ticker.")
+        elif len(tickers) > 8:
+            st.error("You can analyze up to 8 companies at once.")
+        else:
+            results: dict[str, Any] = {}
+            progress = st.progress(0.0, text="Loading company data…")
+            for index, ticker in enumerate(tickers, start=1):
+                try:
+                    results[ticker] = _fetch_company_analysis_cached(ticker)
+                except Exception as exc:
+                    results[ticker] = {"ticker": ticker, "error": str(exc)}
+                progress.progress(index / len(tickers), text=f"Loaded {index}/{len(tickers)}: {ticker}")
+            progress.empty()
+            st.session_state[COMPANY_ANALYSIS_KEY] = results
+
+    results = st.session_state.get(COMPANY_ANALYSIS_KEY, {})
+    if not isinstance(results, dict) or not results:
+        st.info("Enter tickers and run the analysis. Tickers from Portfolio Tracker are prefilled automatically.")
+        return
+
+    valid_results = {ticker: data for ticker, data in results.items() if isinstance(data, dict) and not data.get("error")}
+    for ticker, data in results.items():
+        if isinstance(data, dict) and data.get("error"):
+            st.error(f"{ticker}: {data['error']}")
+    if not valid_results:
+        return
+
+    st.markdown("#### Company Comparison")
+    comparison_rows: list[dict[str, Any]] = []
+    for ticker, snapshot in valid_results.items():
+        info = snapshot.get("info", {})
+        moat = analyze_moat(info)
+        base_dcf = build_dcf_scenarios(info).get("Base", {})
+        geographic_analysis = snapshot.get("geographic_revenue", {}).get("analysis", {})
+        comparison_rows.append({
+            "Ticker": ticker,
+            "Company": info.get("shortName") or info.get("longName") or ticker,
+            "Sector": info.get("sector") or "—",
+            "Price": _format_company_metric("price", info.get("currentPrice") or info.get("regularMarketPrice")),
+            "Market cap": _format_company_metric("marketCap", info.get("marketCap")),
+            "Revenue YoY": _format_company_metric("revenueGrowth", info.get("revenueGrowth")),
+            "Operating margin": _format_company_metric("operatingMargins", info.get("operatingMargins")),
+            "FCF": _format_company_metric("freeCashflow", info.get("freeCashflow")),
+            "Moat signal": f"{moat['score']}/{moat['max_score']} · {moat['label']}",
+            "Regional diversification": (
+                f"{geographic_analysis.get('score')}/5 · {geographic_analysis.get('label')}"
+                if geographic_analysis.get("available")
+                else "Not disclosed"
+            ),
+            "Base DCF / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
+        })
+    st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+
+    selected_ticker = st.selectbox("Company Detail", list(valid_results), key="wharton_company_detail_ticker")
+    snapshot = valid_results[selected_ticker]
+    info = snapshot.get("info", {})
+    company_name = info.get("longName") or info.get("shortName") or selected_ticker
+    st.markdown(f"## {company_name} ({selected_ticker})")
+    st.caption(f"Data fetched: {snapshot.get('fetched_at', '—')} · Market-data source: Yahoo Finance")
+
+    overview_tab, regions_tab, financials_tab, management_tab, moat_tab, dcf_tab, metrics_tab = st.tabs([
+        "Overview", "Revenue by Region", "Financial Statements", "Management", "Moat, Track Record & Risks", "DCF", "All Metrics",
+    ])
+
+    with overview_tab:
+        kpis = st.columns(6)
+        overview_metrics = [
+            ("Price", info.get("currentPrice") or info.get("regularMarketPrice")),
+            ("Market cap", info.get("marketCap")),
+            ("Forward P/E", info.get("forwardPE")),
+            ("Revenue growth", info.get("revenueGrowth")),
+            ("Operating margin", info.get("operatingMargins")),
+            ("ROE", info.get("returnOnEquity")),
+        ]
+        for column, (label, value) in zip(kpis, overview_metrics):
+            column.metric(label, _format_company_metric(label, value))
+        st.markdown("#### What the Company Does")
+        st.write(info.get("longBusinessSummary") or "A company description is not available from the data source.")
+        profile_rows = {
+            "Sector": info.get("sector"), "Industry": info.get("industry"),
+            "Country": info.get("country"), "City": info.get("city"),
+            "Employees": info.get("fullTimeEmployees"), "Website": info.get("website"),
+        }
+        st.dataframe(pd.DataFrame([{"Field": key, "Value": value or "—"} for key, value in profile_rows.items()]), hide_index=True, use_container_width=True)
+        history = snapshot.get("history")
+        if isinstance(history, pd.DataFrame) and not history.empty and "Close" in history:
+            st.markdown("#### Five-Year Price History")
+            st.line_chart(history[["Close"]].rename(columns={"Close": selected_ticker}), use_container_width=True)
+
+    with regions_tab:
+        _render_geographic_revenue(snapshot, selected_ticker, str(company_name))
+
+    with financials_tab:
+        annual, quarterly = st.tabs(["Annual", "Quarterly"])
+        with annual:
+            _render_statement_block("Income Statement", snapshot.get("income_statement", pd.DataFrame()))
+            _render_statement_block("Balance Sheet", snapshot.get("balance_sheet", pd.DataFrame()))
+            _render_statement_block("Cash Flow Statement", snapshot.get("cash_flow", pd.DataFrame()))
+        with quarterly:
+            _render_statement_block("Quarterly Income Statement", snapshot.get("quarterly_income_statement", pd.DataFrame()))
+            _render_statement_block("Quarterly Balance Sheet", snapshot.get("quarterly_balance_sheet", pd.DataFrame()))
+            _render_statement_block("Quarterly Cash Flow Statement", snapshot.get("quarterly_cash_flow", pd.DataFrame()))
+
+    with management_tab:
+        st.markdown("#### Current Management")
+        officers = snapshot.get("officers", [])
+        if officers:
+            officer_rows = []
+            for officer in officers:
+                officer_rows.append({
+                    "Name": officer.get("name") or "—", "Role": officer.get("title") or "—",
+                    "Age": officer.get("age") or "—", "Year born": officer.get("yearBorn") or "—",
+                    "Reported fiscal year": officer.get("fiscalYear") or "—",
+                    "Total compensation": _format_company_metric("totalPay", officer.get("totalPay")),
+                })
+            st.dataframe(pd.DataFrame(officer_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("The source did not provide a management roster.")
+        st.warning(
+            "Yahoo Finance usually does not provide complete executive education and career histories. "
+            "The app never invents them. Source-backed public biographies can be loaded below."
+        )
+        biography_key = f"wharton_management_biographies_{selected_ticker}"
+        if officers and st.button(
+            "Load Education and Career Histories",
+            key=f"load_{biography_key}",
+            use_container_width=True,
+        ):
+            biographies: dict[str, Any] = {}
+            biography_progress = st.progress(0.0, text="Searching public biographies…")
+            for officer_index, officer in enumerate(officers, start=1):
+                officer_name = str(officer.get("name") or "").strip()
+                if officer_name:
+                    try:
+                        biographies[officer_name] = _fetch_management_biography_cached(officer_name, company_name)
+                    except Exception as exc:
+                        biographies[officer_name] = {"available": False, "error": str(exc)}
+                biography_progress.progress(
+                    officer_index / len(officers),
+                    text=f"Checked {officer_index}/{len(officers)}: {officer_name or 'Unnamed executive'}",
+                )
+            biography_progress.empty()
+            st.session_state[biography_key] = biographies
+
+        biographies = st.session_state.get(biography_key, {})
+        if isinstance(biographies, dict) and biographies:
+            st.markdown("#### Education and Historical Career")
+            st.caption(
+                "Profiles are matched to public English Wikipedia biographies and include a direct source link. "
+                "Unmatched executives remain explicitly unavailable. Verify material facts against official company biographies or filings."
+            )
+            for officer in officers:
+                officer_name = str(officer.get("name") or "").strip()
+                biography = biographies.get(officer_name, {})
+                with st.expander(f"{officer_name or 'Unnamed executive'} — {officer.get('title') or 'Role unavailable'}"):
+                    if biography.get("available"):
+                        st.markdown("**Education**")
+                        st.write(biography.get("education"))
+                        st.markdown("**Historical career**")
+                        st.write(biography.get("career"))
+                        st.markdown(f"[Source: {biography.get('matched_title')}]({biography.get('source_url')})")
+                        st.caption(biography.get("verification_note") or "")
+                    else:
+                        st.info(f"Source-backed profile unavailable: {biography.get('error', 'No confident match found.')}")
+        elif officers:
+            st.info("Select **Load Education and Career Histories** to enrich the management roster with source-backed public biographies.")
+        news_rows = _company_news_rows(snapshot.get("news", []))
+        st.markdown("#### Current Evidence Sources")
+        if news_rows:
+            for item in news_rows[:10]:
+                if item["url"]:
+                    st.markdown(f"- **[{item['id']}]** [{item['title']}]({item['url']}) — {item['publisher']}")
+                else:
+                    st.markdown(f"- **[{item['id']}]** {item['title']} — {item['publisher']}")
+        else:
+            st.info("No current news is available.")
+
+        ai_key = f"wharton_company_ai_{selected_ticker}"
+        if st.button("Generate Evidence-Constrained Management Synthesis", key=f"run_{ai_key}"):
+            from src.ai.ai_review import resolve_groq_api_key
+            from src.ai.company_analysis import generate_company_deep_dive
+
+            api_key = resolve_groq_api_key(st.secrets)
+            evidence = {
+                "ticker": selected_ticker, "company": company_name,
+                "business_summary": info.get("longBusinessSummary"), "officers": officers,
+                "management_biographies": biographies if isinstance(biographies, dict) else {},
+                "selected_metrics": {key: info.get(key) for key in [
+                    "revenueGrowth", "earningsGrowth", "operatingMargins", "profitMargins",
+                    "returnOnEquity", "freeCashflow", "totalDebt", "marketCap",
+                ]},
+                "news": news_rows,
+                "deterministic_track_record": analyze_track_record(info, snapshot.get("history")),
+            }
+            with st.spinner("Groq is synthesizing only the supplied evidence…"):
+                st.session_state[ai_key] = generate_company_deep_dive(evidence, api_key)
+        ai_result = st.session_state.get(ai_key)
+        if isinstance(ai_result, dict):
+            if ai_result.get("available"):
+                st.markdown("#### AI Management-History Synthesis")
+                st.write(ai_result.get("management_history") or "Insufficient evidence.")
+                st.markdown("**Investment View**")
+                st.write(ai_result.get("investment_view") or "—")
+                st.caption(ai_result.get("evidence_limitations") or "")
+            else:
+                st.warning(f"AI synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
+
+    with moat_tab:
+        moat = analyze_moat(info)
+        track = analyze_track_record(info, snapshot.get("history"))
+        score_col, label_col = st.columns(2)
+        score_col.metric("Quantitative Moat Score", f"{moat['score']}/{moat['max_score']}")
+        label_col.metric("Result", moat["label"])
+        st.caption(moat["warning"])
+        st.dataframe(pd.DataFrame([{
+            "Status": "✅" if signal["passed"] else "❌", "Area": signal["name"], "Evidence": signal["evidence"],
+        } for signal in moat["signals"]]), use_container_width=True, hide_index=True)
+        success_col, failure_col = st.columns(2)
+        with success_col:
+            st.markdown("#### Observable Successes")
+            if track["successes"]:
+                for item in track["successes"]:
+                    st.success(item)
+            else:
+                st.info("Available metrics did not establish a clear positive signal.")
+        with failure_col:
+            st.markdown("#### Failures / Warning Signals")
+            if track["failures"]:
+                for item in track["failures"]:
+                    st.error(item)
+            else:
+                st.info("Available metrics did not establish a clear negative signal.")
+        if isinstance(ai_result := st.session_state.get(f"wharton_company_ai_{selected_ticker}"), dict) and ai_result.get("available"):
+            st.markdown("#### Qualitative Moat Synthesis")
+            st.write(ai_result.get("moat_analysis") or "—")
+            ai_success, ai_failure = st.columns(2)
+            with ai_success:
+                for item in ai_result.get("successes", []):
+                    st.success(item)
+            with ai_failure:
+                for item in ai_result.get("failures", []):
+                    st.error(item)
+
+    with dcf_tab:
+        defaults = default_dcf_assumptions(info)
+        st.markdown("#### Custom DCF Assumptions")
+        with st.form(f"dcf_form_{selected_ticker}"):
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                fcf_b = st.number_input("Normalized FCF (billions)", value=float(defaults["free_cash_flow"]) / 1e9, step=0.1, key=f"dcf_fcf_{selected_ticker}")
+                growth_pct = st.number_input("FCF Growth (%)", value=float(defaults["growth_rate"]) * 100, step=0.5, key=f"dcf_growth_{selected_ticker}")
+            with d2:
+                discount_pct = st.number_input("Discount Rate / WACC (%)", value=float(defaults["discount_rate"]) * 100, step=0.5, key=f"dcf_wacc_{selected_ticker}")
+                terminal_pct = st.number_input("Terminal Growth (%)", value=float(defaults["terminal_growth_rate"]) * 100, step=0.25, key=f"dcf_terminal_{selected_ticker}")
+            with d3:
+                years = st.number_input("Explicit Forecast Years", 1, 20, int(defaults["years"]), key=f"dcf_years_{selected_ticker}")
+                shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, value=float(defaults["shares_outstanding"]) / 1e6, step=1.0, key=f"dcf_shares_{selected_ticker}")
+            with d4:
+                cash_b = st.number_input("Cash (billions)", value=float(defaults["cash"]) / 1e9, step=0.1, key=f"dcf_cash_{selected_ticker}")
+                debt_b = st.number_input("Debt (billions)", value=float(defaults["debt"]) / 1e9, step=0.1, key=f"dcf_debt_{selected_ticker}")
+            st.form_submit_button("Recalculate DCF", type="primary", use_container_width=True)
+        assumptions = {
+            "free_cash_flow": float(fcf_b) * 1e9, "growth_rate": float(growth_pct) / 100,
+            "discount_rate": float(discount_pct) / 100, "terminal_growth_rate": float(terminal_pct) / 100,
+            "years": int(years), "cash": float(cash_b) * 1e9, "debt": float(debt_b) * 1e9,
+            "shares_outstanding": float(shares_m) * 1e6, "current_price": float(defaults["current_price"]),
+        }
+        scenarios = build_dcf_scenarios(info, assumptions)
+        scenario_columns = st.columns(3)
+        for column, (name, result) in zip(scenario_columns, scenarios.items()):
+            with column:
+                st.markdown(f"#### {name}")
+                if result.get("available"):
+                    st.metric("Fair Value / Share", f"${result['fair_value_per_share']:,.2f}", f"{result['upside_pct']:+.1%}" if result.get("upside_pct") is not None else None)
+                    st.caption(f"Terminal value: {result['terminal_value_share']:.1%} EV")
+                else:
+                    st.error(result.get("error", "DCF cannot be calculated."))
+        base_result = scenarios.get("Base", {})
+        if base_result.get("available"):
+            st.markdown("#### Base-Case Projection")
+            st.dataframe(pd.DataFrame([{
+                "Year": row["year"], "FCF": f"${row['free_cash_flow'] / 1e9:,.2f}B", "Present Value": f"${row['present_value'] / 1e9:,.2f}B",
+            } for row in base_result["projected"]]), use_container_width=True, hide_index=True)
+            if base_result["terminal_value_share"] > 0.75:
+                st.warning("More than 75% of enterprise value comes from terminal value; the result is highly sensitive to WACC and terminal growth.")
+        st.caption("DCF is a scenario model, not a price target or investment recommendation.")
+
+    with metrics_tab:
+        st.markdown(f"#### All Available Scalar Metrics ({len(snapshot.get('metrics', {}))})")
+        metric_rows = [
+            {"Metric / Key": key, "Value": _format_company_metric(key, value), "Raw": str(value)}
+            for key, value in sorted(snapshot.get("metrics", {}).items())
+        ]
+        st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True, height=650)
+        st.download_button(
+            "Download Metrics as JSON",
+            data=json.dumps(snapshot.get("metrics", {}), ensure_ascii=False, indent=2, default=str),
+            file_name=f"{selected_ticker}_company_metrics.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
 
 def _render_header(profile: dict[str, str | int]) -> None:
@@ -4414,8 +5413,9 @@ def render_wharton_cockpit() -> None:
         "Sub-Projects",
         "War Room",
         "File Vault",
-        "Zadání a pravidla",
-        "Portfolio tracker",
+        "Assignment & Rules",
+        "Portfolio Tracker",
+        "Company Analysis",
     ])
 
     # Fetch result from state if available
@@ -4453,10 +5453,12 @@ def render_wharton_cockpit() -> None:
         _render_chat(profile)
     with tabs[15]:
         _render_file_center(profile)
-    with tabs[15]:
-        _render_competition_rules(profile)
     with tabs[16]:
+        _render_competition_rules(profile)
+    with tabs[17]:
         _render_competition_portfolio(profile)
+    with tabs[18]:
+        _render_company_analysis(profile)
 
 
 def main() -> None:

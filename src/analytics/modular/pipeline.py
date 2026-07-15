@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from .backtest import deterministic_signal_backtest
+from .backtest import walk_forward_baseline_backtest
 from .history import list_run_records, save_run_record
 from .models import run_model_bundle
 from .news import build_news_analysis
@@ -30,15 +30,14 @@ def run_quant_stack(
 
     models = run_model_bundle(portfolio_returns, context=context)
     preliminary_signals = run_signal_bundle(models, context=context)
-    pre_composite = float(preliminary_signals.get("composite_vote").score if preliminary_signals.get("composite_vote") else 0.0)
     pre_risk = float(preliminary_signals.get("risk_on_off").score if preliminary_signals.get("risk_on_off") else 0.0)
-    model_conf = [model.confidence for model in models.values() if model.available]
 
-    backtest = deterministic_signal_backtest(
+    # Full-sample model scores must not be replayed over their own estimation
+    # window.  Use a strictly causal walk-forward baseline as validation
+    # evidence and keep the full model bundle as a current-state diagnostic.
+    backtest = walk_forward_baseline_backtest(
         portfolio_returns=portfolio_returns,
-        composite_signal=pre_composite,
-        risk_signal=pre_risk,
-        confidence=float(pd.Series(model_conf, dtype=float).mean()) if model_conf else 0.0,
+        transaction_cost_bps=float(config.get("transaction_cost_bps", 10.0)),
     )
 
     start_date = config.get("start_date")
@@ -99,7 +98,9 @@ def run_quant_stack(
             "signals": {name: item.to_dict() for name, item in signals.items()},
             "backtest": {
                 "metrics": backtest.get("metrics", {}),
-                "lookahead_safe": backtest.get("lookahead_safe", True),
+                "lookahead_safe": backtest.get("lookahead_safe", False),
+                "validation_type": backtest.get("validation_type", "unknown"),
+                "scope": backtest.get("scope", ""),
             },
         },
         metrics=metrics,

@@ -91,15 +91,19 @@ Poznamka: Pokud klic chybi nebo Groq neodpovi, aplikace bezi dal a pouzije deter
 
 ### Sdilena online databaze
 
-Decision log, historie jeho uprav i ostatni data dashboardu se ukladaji do sdilene
-Turso/libSQL databaze, jakmile jsou nastaveny `TURSO_DATABASE_URL` a
-`TURSO_AUTH_TOKEN`. Aplikace pri startu automaticky vytvori nebo zaktualizuje
-tabulky a po kazdem ulozeni synchronizuje zmeny online.
+Decision log, historie jeho uprav, data dashboardu a verzovane makro snapshoty
+pro regionalni analyzu se ukladaji do sdilene Turso/libSQL databaze, jakmile
+jsou nastaveny `TURSO_DATABASE_URL` a `TURSO_AUTH_TOKEN`. Aplikace pri startu
+automaticky vytvori nebo zaktualizuje tabulky a po kazdem ulozeni synchronizuje
+zmeny online. Makro snapshoty pro referencni rok 2024 maji sestihodinovou
+expiraci; stejna data tak sdileji vsechny bezici instance a po expiraci se
+automaticky obnovi z primarnich zdroju.
 
 1. V Turso vytvorte databazi a vygenerujte pristupovy token.
 2. Hodnoty vlozte do `.streamlit/secrets.toml` pri lokalnim spusteni nebo do
    **Secrets** v Streamlit Cloud pri nasazeni.
-3. Nasadte aplikaci; vsichni clenove tymu pak pouziji stejny decision log.
+3. Nasadte aplikaci; vsichni clenove tymu pak pouziji stejny decision log i
+   stejnou makro cache. Zadna dalsi databazova migrace ani secret nejsou potreba.
 
 Bez techto dvou secrets aplikace zamerne pouzije pouze lokalni databazi, aby
 neukladala data na neznamy vzdaleny server.
@@ -262,3 +266,24 @@ Aktualni testy pokryvaji:
 - persistence round-trip
 - failure isolation
 - deterministic backtest example
+
+## 11) Methodology & Validation (Wharton presentation readiness)
+
+Wharton Cockpit now includes a **Methodology & Validation** module. It reports
+an internal evidence-quality score rather than claiming a percentage of future
+forecast accuracy. The module includes:
+
+- 95% moving-block bootstrap intervals for annualized return, volatility,
+  Sharpe ratio, daily VaR and CVaR;
+- Monte Carlo convergence error, an analytic GBM cross-check and reproducible
+  seeded runs;
+- skewness, excess kurtosis, normality and lag-1 dependence diagnostics;
+- a causal walk-forward baseline with turnover and transaction costs;
+- explicit validation gates and limitations for a competition presentation.
+
+The score is **not an official Wharton rating or endorsement**. QuantSim is
+currently suitable as structured decision support, not as a validated
+forecasting system. Claiming predictive accuracy requires a frozen strategy,
+nested walk-forward testing of the full ensemble, untouched holdout data and
+comparison with investable benchmarks after costs. See
+`docs/MODEL_VALIDATION.md` for the methodology and interpretation rules.

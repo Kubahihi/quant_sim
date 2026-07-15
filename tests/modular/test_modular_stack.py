@@ -6,7 +6,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.analytics.modular.backtest import deterministic_signal_backtest
+from src.analytics.modular.backtest import (
+    deterministic_signal_backtest,
+    walk_forward_baseline_backtest,
+)
 from src.analytics.modular.history import compare_runs, load_run_record, save_run_record
 from src.analytics.modular.models import run_model_bundle
 from src.analytics.modular.news import (
@@ -144,6 +147,30 @@ def test_no_lookahead_and_deterministic_backtest():
 
     # first strategy return must be zero due to lagged position (no look-ahead)
     assert float(result_a["strategy_returns"].iloc[0]) == 0.0
+
+
+def test_walk_forward_baseline_is_causal_and_reports_complete_metrics():
+    series = _sample_returns(n=180)
+    changed_future = series.copy()
+    changed_future.iloc[140:] = changed_future.iloc[140:] * -7.0
+
+    original = walk_forward_baseline_backtest(series, transaction_cost_bps=10.0)
+    changed = walk_forward_baseline_backtest(changed_future, transaction_cost_bps=10.0)
+
+    assert original["lookahead_safe"] is True
+    assert original["validation_type"] == "walk_forward_causal_baseline"
+    pd.testing.assert_series_equal(
+        original["position"].iloc[:141],
+        changed["position"].iloc[:141],
+    )
+    assert {
+        "annualized_return",
+        "sharpe_ratio",
+        "calmar_ratio",
+        "win_rate",
+        "directional_hit_rate",
+        "transaction_cost_drag",
+    }.issubset(original["metrics"])
 
 
 def test_news_relevance_scoring_orders_items():
