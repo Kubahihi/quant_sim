@@ -144,10 +144,12 @@ def init_db() -> None:
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
+        from src.portfolio_tracker.strategy_store import init_strategy_tables
 
         # Shared, versioned macro cache. With Turso configured this table is
         # available to every app instance; otherwise it remains a local cache.
         init_macro_snapshot_table(conn)
+        init_strategy_tables(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
@@ -178,7 +180,7 @@ def init_db() -> None:
         """)
         # Extended files table with project/description support
         # login_attempts table is managed by src.auth.database.py, so we don't recreate it here.
-        # Adding decision_log for P1a Strategy Narrative
+        # Decision log stores the analytical context captured with each action.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS decision_log (
                 id INTEGER PRIMARY KEY,
@@ -3825,8 +3827,793 @@ def _fetch_six_month_price_history(ticker: str) -> list[tuple[str, float]]:
         return []
 
 
-def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
+def _strategy_payload(record: Any) -> dict[str, Any]:
+    """Return the JSON payload from a strategy-store record."""
+    if not isinstance(record, dict):
+        return {}
+    payload = record.get("payload")
+    return dict(payload) if isinstance(payload, dict) else dict(record)
+
+
+def _finite_form_number(value: Any, default: float = 0.0) -> float:
+    """Coerce editable-table cells without allowing NaN into JSON storage."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return number if np.isfinite(number) else float(default)
+
+
+def _saved_number(payload: dict[str, Any], key: str, default: float) -> float:
+    value = payload.get(key)
+    return _finite_form_number(value, default) if value is not None else float(default)
+
+
+def _strategy_rows(value: Any, key_label: str) -> list[dict[str, Any]]:
+    """Normalize mapping/list analytics output for display."""
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        rows: list[dict[str, Any]] = []
+        for key, item in value.items():
+            if isinstance(item, dict):
+                rows.append({key_label: key, **item})
+            else:
+                rows.append({key_label: key, "value": item})
+        return rows
+    return []
+
+
+def _load_strategy_workspace_data() -> dict[str, Any]:
+    from src.portfolio_tracker.strategy_store import (
+        get_active_strategy_version,
+        list_approved_securities,
+        list_holding_theses,
+        list_strategy_versions,
+        load_client_mandate,
+    )
+
+    with get_connection() as conn:
+        return {
+            "mandate_record": load_client_mandate(conn),
+            "strategy_record": get_active_strategy_version(conn),
+            "strategy_versions": list_strategy_versions(conn),
+            "theses": list_holding_theses(conn),
+            "approved_securities": list_approved_securities(conn),
+        }
+
+
+def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any] | None) -> None:
+    from src.portfolio_tracker.strategy_alignment import normalize_client_mandate
+    from src.portfolio_tracker.strategy_store import save_client_mandate
+
+    current = _strategy_payload(record)
+    st.markdown("#### Client Mandate")
+    st.caption(
+        "Translate the case study into measurable goals, horizons, liquidity needs, risk tolerance, and constraints. "
+        "These fields are analyst inputs until Wharton publishes the 2026–2027 client case."
+    )
+    st.info("The official 2026–2027 client case is still pending. Save assumptions explicitly and replace them when it is released.")
+
+    current_goals = current.get("goals", []) if isinstance(current.get("goals"), list) else []
+    current_constraints = current.get("values_constraints", {}) if isinstance(current.get("values_constraints"), dict) else {}
+    goal_frame = pd.DataFrame([
+        {
+            "Goal": str(item.get("name") or ""),
+            "Target %": float(item.get("target_weight") or 0.0) * 100.0,
+            "Priority (1–5)": int(round(_finite_form_number(item.get("priority"), 3.0))),
+            "Horizon": str(item.get("horizon") or "Long term"),
+            "Description / success condition": str(item.get("description") or ""),
+        }
+        for item in current_goals if isinstance(item, dict)
+    ])
+    if goal_frame.empty:
+        goal_frame = pd.DataFrame([
+            {"Goal": "", "Target %": 0.0, "Priority (1–5)": 5, "Horizon": "Long term", "Description / success condition": ""},
+            {"Goal": "", "Target %": 0.0, "Priority (1–5)": 3, "Horizon": "Short term", "Description / success condition": ""},
+        ])
+
+    risk_options = ["Not specified", "Conservative", "Moderate", "Growth", "Aggressive"]
+    saved_risk = str(current.get("risk_tolerance") or "Not specified")
+    risk_index = risk_options.index(saved_risk) if saved_risk in risk_options else 0
+    with st.form("strategy_client_mandate_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            client_name = st.text_input("Client / mandate name", value=str(current.get("client_name") or ""))
+            case_status = st.selectbox(
+                "Case status",
+                ["Pending official case", "Analyst assumptions", "Official case entered"],
+                index=["Pending official case", "Analyst assumptions", "Official case entered"].index(
+                    str(current.get("case_status") or "Pending official case")
+                ) if str(current.get("case_status") or "Pending official case") in
+                ["Pending official case", "Analyst assumptions", "Official case entered"] else 0,
+            )
+        with c2:
+            risk_tolerance = st.selectbox("Risk tolerance", risk_options, index=risk_index)
+            horizon_years = st.number_input(
+                "Primary horizon (years)", min_value=0.0, max_value=100.0,
+                value=float(current.get("horizon_years") or 0.0), step=0.5,
+            )
+        with c3:
+            liquidity_need_pct = st.number_input(
+                "Near-term liquidity need (%)", min_value=0.0, max_value=100.0,
+                value=float(current.get("liquidity_need_pct") or 0.0) * 100.0, step=1.0,
+            )
+            base_currency = st.text_input("Base currency", value=str(current.get("base_currency") or "USD"))
+        mandate_summary = st.text_area(
+            "Mandate summary and explicit assumptions",
+            value=str(current.get("mandate_summary") or ""),
+            height=100,
+        )
+        values_constraints = st.text_area(
+            "Values, exclusions, liquidity, legal, or ethical constraints",
+            value=str(current.get("values_constraints_text") or ""),
+            height=80,
+        )
+        v1, v2, v3 = st.columns(3)
+        with v1:
+            mandate_excluded_tickers = st.text_input(
+                "Client-excluded tickers",
+                value=", ".join(current_constraints.get("excluded_tickers", [])),
+            )
+        with v2:
+            mandate_excluded_sectors = st.text_input(
+                "Client-excluded sectors",
+                value=", ".join(current_constraints.get("excluded_sectors", [])),
+            )
+        with v3:
+            mandate_required_tags = st.text_input(
+                "Required holding tags",
+                value=", ".join(current_constraints.get("required_tags", [])),
+                help="For example impact, climate, income. Add matching tags in Thesis Monitor.",
+            )
+        st.markdown("##### Goal and capital buckets")
+        edited_goals = st.data_editor(
+            goal_frame,
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key="strategy_client_goal_editor",
+            column_config={
+                "Target %": st.column_config.NumberColumn("Target %", min_value=0.0, max_value=100.0, format="%.1f"),
+                "Priority (1–5)": st.column_config.NumberColumn("Priority (1–5)", min_value=1, max_value=5, step=1),
+                "Horizon": st.column_config.SelectboxColumn("Horizon", options=["Short term", "Medium term", "Long term"]),
+            },
+        )
+        save_mandate = st.form_submit_button("Save Client Mandate", type="primary", use_container_width=True)
+
+    if save_mandate:
+        goals = []
+        for row in edited_goals.to_dict("records"):
+            name = str(row.get("Goal") or "").strip()
+            if not name:
+                continue
+            goals.append({
+                "name": name,
+                "target_weight": _finite_form_number(row.get("Target %"), 0.0) / 100.0,
+                "priority": min(5, max(1, int(round(_finite_form_number(row.get("Priority (1–5)"), 3.0))))),
+                "horizon": str(row.get("Horizon") or "Long term"),
+                "description": str(row.get("Description / success condition") or "").strip(),
+            })
+        total_target = sum(float(item["target_weight"]) for item in goals)
+        if not client_name.strip() or not goals:
+            st.error("Enter a mandate name and at least one measurable client goal.")
+        elif abs(total_target - 1.0) > 0.005:
+            st.error(f"Client goal targets must total 100%; the current total is {total_target:.1%}.")
+        else:
+            payload = normalize_client_mandate({
+                "client_name": client_name.strip(),
+                "case_status": case_status,
+                "risk_tolerance": risk_tolerance,
+                "horizon_years": float(horizon_years),
+                "liquidity_need_pct": float(liquidity_need_pct) / 100.0,
+                "base_currency": base_currency.strip().upper() or "USD",
+                "mandate_summary": mandate_summary.strip(),
+                "values_constraints": {
+                    "notes": [values_constraints.strip()] if values_constraints.strip() else [],
+                    "excluded_tickers": [item.strip().upper() for item in mandate_excluded_tickers.replace(";", ",").split(",") if item.strip()],
+                    "excluded_sectors": [item.strip() for item in mandate_excluded_sectors.replace(";", ",").split(",") if item.strip()],
+                    "required_tags": [item.strip().lower() for item in mandate_required_tags.replace(";", ",").split(",") if item.strip()],
+                },
+                "goals": goals,
+            })
+            payload.update({
+                "case_status": case_status,
+                "risk_tolerance": risk_tolerance,
+                "mandate_summary": mandate_summary.strip(),
+                "values_constraints_text": values_constraints.strip(),
+            })
+            with get_connection() as conn:
+                save_client_mandate(conn, payload, updated_by=str(profile["username"]))
+            st.success("Client Mandate saved to the shared database.")
+            st.rerun()
+
+    if current:
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Goal buckets", len(current_goals))
+        summary_cols[1].metric("Risk tolerance", str(current.get("risk_tolerance") or "Not specified"))
+        summary_cols[2].metric("Horizon", f"{float(current.get('horizon_years') or 0):g} years")
+        summary_cols[3].metric("Liquidity need", f"{float(current.get('liquidity_need_pct') or 0):.1%}")
+
+
+def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any]) -> None:
+    from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
+    from src.portfolio_tracker.strategy_store import append_strategy_version, set_active_strategy_version
+
+    record = data.get("strategy_record")
+    current = _strategy_payload(record)
+    mandate = _strategy_payload(data.get("mandate_record"))
+    st.markdown("#### Versioned Strategy Rulebook")
+    st.caption(
+        "Define the repeatable rules that turn the client mandate into security selection, sizing, diversification, "
+        "cash, and sell discipline. Every save creates an auditable strategy version."
+    )
+
+    sector_targets = current.get("sector_targets", []) if isinstance(current.get("sector_targets"), list) else []
+    sector_frame = pd.DataFrame([{
+        "Sector": str(item.get("sector") or item.get("name") or ""),
+        "Target %": float(item.get("target_weight") or 0.0) * 100.0,
+        "Minimum %": float(item.get("min_weight") or 0.0) * 100.0,
+        "Maximum %": float(item.get("max_weight") or 0.0) * 100.0,
+    } for item in sector_targets if isinstance(item, dict)])
+    if sector_frame.empty:
+        sector_frame = pd.DataFrame([{"Sector": "", "Target %": 0.0, "Minimum %": 0.0, "Maximum %": 100.0}])
+
+    factor_rows = current.get("selection_factors", []) if isinstance(current.get("selection_factors"), list) else []
+    factor_frame = pd.DataFrame([{
+        "Factor": str(item.get("factor") or ""),
+        "Weight %": float(item.get("weight") or 0.0) * 100.0,
+        "Minimum / decision rule": str(item.get("rule") or ""),
+    } for item in factor_rows if isinstance(item, dict)])
+    if factor_frame.empty:
+        factor_frame = pd.DataFrame([
+            {"Factor": "Quality", "Weight %": 0.0, "Minimum / decision rule": ""},
+            {"Factor": "Valuation", "Weight %": 0.0, "Minimum / decision rule": ""},
+            {"Factor": "Growth", "Weight %": 0.0, "Minimum / decision rule": ""},
+        ])
+
+    with st.form("strategy_rulebook_form"):
+        name = st.text_input("Strategy name", value=str(current.get("name") or ""))
+        thesis = st.text_area(
+            "One-sentence strategy thesis",
+            value=str(current.get("thesis") or ""),
+            height=75,
+            help="It should explain who you invest for, what you select, and why the process should work over the client's horizon.",
+        )
+        process = st.text_area(
+            "Selection, review, and sell discipline",
+            value=str(current.get("process") or ""),
+            height=110,
+        )
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            max_position = st.number_input("Maximum position (%)", 0.0, 100.0, _saved_number(current, "max_position_weight", 0.15) * 100.0, 1.0)
+            max_sector = st.number_input("Maximum sector (%)", 0.0, 100.0, _saved_number(current, "max_sector_weight", 0.35) * 100.0, 1.0)
+        with r2:
+            min_cash = st.number_input("Minimum cash (%)", 0.0, 100.0, _saved_number(current, "min_cash_weight", 0.0) * 100.0, 1.0)
+            max_cash = st.number_input("Maximum cash (%)", 0.0, 100.0, _saved_number(current, "max_cash_weight", 0.20) * 100.0, 1.0)
+        with r3:
+            target_holdings = st.number_input("Target holdings", 1, 100, int(current.get("target_holdings") or 12))
+            max_goal_drift = st.number_input("Maximum goal drift (pp)", 0.0, 100.0, _saved_number(current, "max_goal_drift", 0.10) * 100.0, 1.0)
+        with r4:
+            max_sector_drift = st.number_input("Maximum sector drift (pp)", 0.0, 100.0, _saved_number(current, "max_sector_drift", 0.10) * 100.0, 1.0)
+            max_turnover = st.number_input("Maximum cumulative turnover (%)", 0.0, 500.0, _saved_number(current, "max_turnover", 0.25) * 100.0, 5.0)
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            min_holdings = st.number_input("Minimum holdings", 0, 100, int(current.get("min_holdings") or 0))
+        with a2:
+            max_holdings = st.number_input("Maximum holdings", 0, 100, int(current.get("max_holdings") or 0))
+        with a3:
+            enforce_beta = st.checkbox(
+                "Enforce portfolio beta range",
+                value=current.get("min_beta") is not None or current.get("max_beta") is not None,
+            )
+            min_beta = st.number_input("Minimum portfolio beta", -5.0, 10.0, float(current.get("min_beta") if current.get("min_beta") is not None else 0.0), 0.1)
+        with a4:
+            max_beta = st.number_input("Maximum portfolio beta", -5.0, 10.0, float(current.get("max_beta") if current.get("max_beta") is not None else 2.0), 0.1)
+        require_approved = st.checkbox(
+            "Require every holding to be on the loaded Approved Universe",
+            value=bool(current.get("require_approved")),
+        )
+        allowed_type_options = ["Stock", "ETF", "Bond", "Other"]
+        saved_allowed_types = {str(item).casefold() for item in current.get("allowed_asset_types", [])}
+        default_allowed_types = [
+            item for item in allowed_type_options if item.casefold() in saved_allowed_types
+        ] or ["Stock", "ETF"]
+        allowed_types = st.multiselect(
+            "Allowed security types",
+            allowed_type_options,
+            default=default_allowed_types,
+        )
+        e1, e2 = st.columns(2)
+        with e1:
+            excluded_tickers = st.text_input(
+                "Excluded tickers (comma separated)",
+                value=", ".join(str(item) for item in current.get("prohibited_tickers", []) if item),
+            )
+        with e2:
+            excluded_sectors = st.text_input(
+                "Excluded sectors (comma separated)",
+                value=", ".join(str(item) for item in current.get("excluded_sectors", []) if item),
+            )
+        st.markdown("##### Sector risk budgets")
+        edited_sectors = st.data_editor(
+            sector_frame, num_rows="dynamic", hide_index=True, use_container_width=True,
+            key="strategy_sector_target_editor",
+            column_config={name: st.column_config.NumberColumn(name, min_value=0.0, max_value=100.0, format="%.1f")
+                           for name in ("Target %", "Minimum %", "Maximum %")},
+        )
+        st.markdown("##### Security-selection model")
+        edited_factors = st.data_editor(
+            factor_frame, num_rows="dynamic", hide_index=True, use_container_width=True,
+            key="strategy_factor_editor",
+            column_config={"Weight %": st.column_config.NumberColumn("Weight %", min_value=0.0, max_value=100.0, format="%.1f")},
+        )
+        save_strategy = st.form_submit_button("Save as New Active Strategy Version", type="primary", use_container_width=True)
+
+    if save_strategy:
+        parsed_sectors = []
+        for row in edited_sectors.to_dict("records"):
+            sector = str(row.get("Sector") or "").strip()
+            if sector:
+                parsed_sectors.append({
+                    "sector": sector,
+                    "target_weight": _finite_form_number(row.get("Target %"), 0.0) / 100.0,
+                    "min_weight": _finite_form_number(row.get("Minimum %"), 0.0) / 100.0,
+                    "max_weight": _finite_form_number(row.get("Maximum %"), 100.0) / 100.0,
+                })
+        parsed_factors = []
+        for row in edited_factors.to_dict("records"):
+            factor = str(row.get("Factor") or "").strip()
+            if factor:
+                parsed_factors.append({
+                    "factor": factor,
+                    "weight": _finite_form_number(row.get("Weight %"), 0.0) / 100.0,
+                    "rule": str(row.get("Minimum / decision rule") or "").strip(),
+                })
+        factor_total = sum(float(item["weight"]) for item in parsed_factors)
+        sector_total = sum(float(item["target_weight"]) for item in parsed_sectors)
+        invalid_sector = any(
+            not item["min_weight"] <= item["target_weight"] <= item["max_weight"]
+            for item in parsed_sectors
+        )
+        if not name.strip() or not thesis.strip():
+            st.error("Strategy name and one-sentence thesis are required.")
+        elif min_cash > max_cash:
+            st.error("Minimum cash cannot exceed maximum cash.")
+        elif min_holdings and max_holdings and min_holdings > max_holdings:
+            st.error("Minimum holdings cannot exceed maximum holdings.")
+        elif enforce_beta and min_beta > max_beta:
+            st.error("Minimum beta cannot exceed maximum beta.")
+        elif invalid_sector:
+            st.error("Every sector target must lie between its minimum and maximum.")
+        elif parsed_sectors and abs(sector_total - 1.0) > 0.005:
+            st.error(f"Sector target weights must total 100%; the current total is {sector_total:.1%}.")
+        elif parsed_factors and abs(factor_total - 1.0) > 0.005:
+            st.error(f"Selection-factor weights must total 100%; the current total is {factor_total:.1%}.")
+        else:
+            ticker_exclusions = [item.strip().upper() for item in excluded_tickers.replace(";", ",").split(",") if item.strip()]
+            sector_exclusions = [item.strip() for item in excluded_sectors.replace(";", ",").split(",") if item.strip()]
+            payload = normalize_strategy_rulebook({
+                "name": name.strip(), "thesis": thesis.strip(), "process": process.strip(),
+                "max_position_weight": max_position / 100.0,
+                "max_sector_weight": max_sector / 100.0,
+                "min_cash_weight": min_cash / 100.0,
+                "max_cash_weight": max_cash / 100.0,
+                "target_holdings": int(target_holdings),
+                "min_holdings": int(min_holdings) if min_holdings else None,
+                "max_holdings": int(max_holdings) if max_holdings else None,
+                "max_goal_drift": max_goal_drift / 100.0,
+                "max_sector_drift": max_sector_drift / 100.0,
+                "max_turnover": max_turnover / 100.0,
+                "min_beta": float(min_beta) if enforce_beta else None,
+                "max_beta": float(max_beta) if enforce_beta else None,
+                "require_approved": bool(require_approved),
+                "allowed_asset_types": allowed_types,
+                "prohibited_tickers": ticker_exclusions,
+                "excluded_sectors": sector_exclusions,
+                "sector_targets": parsed_sectors,
+                "selection_factors": parsed_factors,
+            }, mandate)
+            payload.update({"process": process.strip(), "selection_factors": parsed_factors})
+            with get_connection() as conn:
+                append_strategy_version(conn, payload, created_by=str(profile["username"]), activate=True)
+            st.success("A new active strategy version was saved.")
+            st.rerun()
+
+    versions = data.get("strategy_versions", [])
+    if versions:
+        st.markdown("##### Strategy version history")
+        st.dataframe(pd.DataFrame([{
+            "Version": item.get("version") or item.get("version_number") or item.get("id"),
+            "Strategy": _strategy_payload(item).get("name") or "—",
+            "Created": item.get("created_at") or "—",
+            "Created by": item.get("created_by") or "—",
+            "Active": bool(item.get("is_active") or item.get("active")),
+        } for item in versions]), use_container_width=True, hide_index=True)
+        version_options = [int(item.get("version") or item.get("version_number") or item.get("id")) for item in versions]
+        selected_version = st.selectbox("Activate an earlier version", version_options, key="strategy_version_selector")
+        if st.button("Set Selected Version Active", use_container_width=True):
+            with get_connection() as conn:
+                set_active_strategy_version(conn, int(selected_version))
+            st.rerun()
+
+
+def _render_approved_universe(profile: dict[str, str | int], data: dict[str, Any]) -> None:
+    from src.portfolio_tracker.strategy_store import replace_approved_securities
+
+    records = data.get("approved_securities", [])
+    current_tickers = sorted({str(item.get("ticker") or "").upper() for item in records if item.get("ticker")})
+    first_payload = _strategy_payload(records[0]) if records else {}
+    try:
+        saved_source_as_of = date.fromisoformat(str(first_payload.get("source_as_of") or ""))
+    except ValueError:
+        saved_source_as_of = date.today()
+    st.markdown("#### Approved Security Universe")
+    st.caption(
+        "Paste the official approved list when Wharton releases it. Until then, this is an analyst-controlled universe, "
+        "clearly separated from official competition rules."
+    )
+    with st.form("strategy_approved_universe_form"):
+        raw_universe = st.text_area(
+            "Approved tickers (comma, space, or newline separated)",
+            value="\n".join(current_tickers), height=220,
+        )
+        u1, u2 = st.columns(2)
+        with u1:
+            source_name = st.text_input("List source", value=str(first_payload.get("source_name") or "Analyst-entered list"))
+        with u2:
+            source_url = st.text_input("Source URL", value=str(first_payload.get("source_url") or ""))
+        source_as_of = st.date_input("List as-of date", value=saved_source_as_of)
+        save_universe = st.form_submit_button("Replace Approved Universe", type="primary", use_container_width=True)
+    if save_universe:
+        import re
+
+        tickers = sorted(set(item.upper() for item in re.split(r"[\s,;]+", raw_universe) if item.strip()))
+        shared_payload = {
+            "source_name": source_name.strip() or "Analyst-entered list",
+            "source_url": source_url.strip(),
+            "source_as_of": source_as_of.isoformat(),
+        }
+        try:
+            with get_connection() as conn:
+                replace_approved_securities(
+                    conn,
+                    [{"ticker": ticker, "payload": shared_payload, "approved": True} for ticker in tickers],
+                    updated_by=str(profile["username"]),
+                )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.success(f"Approved universe now contains {len(tickers)} securities.")
+            st.rerun()
+    if current_tickers:
+        st.metric("Approved securities", len(current_tickers))
+        st.dataframe(pd.DataFrame({"Ticker": current_tickers}), use_container_width=True, hide_index=True)
+    else:
+        st.warning("No approved list is loaded. Alignment analysis will label universe validation as not configured.")
+
+
+def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) -> None:
+    from src.portfolio_tracker.strategy_store import upsert_holding_thesis
+
+    positions = _fetch_competition_positions()
+    open_tickers = [
+        str(row.get("ticker") or "").upper() for row in positions
+        if row.get("ticker") and str(row.get("status") or "open").lower() == "open"
+    ]
+    closed_tickers = [
+        str(row.get("ticker") or "").upper() for row in positions
+        if row.get("ticker") and str(row.get("status") or "open").lower() != "open"
+    ]
+    portfolio_state = {
+        str(row.get("ticker") or "").upper(): str(row.get("status") or "open").replace("_", " ").title()
+        for row in positions if row.get("ticker")
+    }
+    thesis_records = data.get("theses", [])
+    thesis_by_ticker = {str(item.get("ticker") or "").upper(): item for item in thesis_records if item.get("ticker")}
+    tickers = list(dict.fromkeys([*open_tickers, *closed_tickers, *thesis_by_ticker]))
+    mandate = _strategy_payload(data.get("mandate_record"))
+    goal_names = [str(item.get("name")) for item in mandate.get("goals", []) if isinstance(item, dict) and item.get("name")]
+
+    st.markdown("#### Holding Thesis Monitor")
+    st.caption(
+        "Track the forward-looking thesis, scenarios, catalysts, invalidation condition, conviction, and review date. "
+        "A price move by itself does not validate or invalidate a thesis."
+    )
+    if not tickers:
+        st.info("Add a position in Portfolio Tracker to start thesis monitoring.")
+        return
+    selected = st.selectbox("Holding", tickers, key="strategy_thesis_ticker")
+    current_record = thesis_by_ticker.get(selected, {})
+    current = _strategy_payload(current_record)
+    current_goal = str(current.get("primary_goal") or "")
+    goal_options = ["Not assigned", *goal_names]
+    current_goal_label = current_goal if current_goal in goal_options else "Not assigned"
+    status_options = ["Active", "Watch", "Under Review", "Invalidated", "Exited"]
+    saved_status = str(current_record.get("status") or current.get("status") or "Active").replace("_", " ").title()
+    status_index = status_options.index(saved_status) if saved_status in status_options else 0
+    try:
+        saved_review_date = date.fromisoformat(str(current.get("review_date") or ""))
+    except ValueError:
+        saved_review_date = date.today() + timedelta(days=30)
+
+    with st.form(f"strategy_thesis_form_{selected}"):
+        t1, t2, t3, t4 = st.columns(4)
+        with t1:
+            sector = st.text_input("Sector", value=str(current.get("sector") or ""))
+        with t2:
+            primary_goal = st.selectbox("Primary client goal", goal_options, index=goal_options.index(current_goal_label))
+        with t3:
+            conviction = st.slider("Conviction", 1, 5, int(current.get("conviction") or 3))
+        with t4:
+            thesis_status = st.selectbox("Thesis status", status_options, index=status_index)
+        detail1, detail2, detail3 = st.columns(3)
+        with detail1:
+            review_date = st.date_input("Next thesis review", value=saved_review_date)
+        with detail2:
+            beta_available = st.checkbox(
+                "Beta has been verified",
+                value=current.get("beta") is not None,
+                key=f"thesis_beta_available_{selected}",
+            )
+            holding_beta = st.number_input(
+                "Observed beta (optional)",
+                -5.0, 10.0,
+                float(current.get("beta") if current.get("beta") is not None else 0.0),
+                0.1,
+                disabled=not beta_available,
+            )
+        with detail3:
+            holding_tags = st.text_input(
+                "Mandate tags",
+                value=", ".join(current.get("tags", [])),
+                help="Tags are checked against required tags in the Client Mandate.",
+            )
+        investment_thesis = st.text_area("Core investment thesis", value=str(current.get("investment_thesis") or ""), height=100)
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            bear_case = st.text_area("Bear case", value=str(current.get("bear_case") or ""), height=100)
+        with s2:
+            base_case = st.text_area("Base case", value=str(current.get("base_case") or ""), height=100)
+        with s3:
+            bull_case = st.text_area("Bull case", value=str(current.get("bull_case") or ""), height=100)
+        catalysts = st.text_area("Catalysts (one per line)", value="\n".join(current.get("catalysts", [])), height=80)
+        risks = st.text_area("Key risks (one per line)", value="\n".join(current.get("risks", [])), height=80)
+        invalidation = st.text_area(
+            "Observable thesis-invalidation condition",
+            value=str(current.get("invalidation") or ""), height=80,
+        )
+        save_thesis = st.form_submit_button("Save Thesis Monitor", type="primary", use_container_width=True)
+    if save_thesis:
+        payload = {
+            "sector": sector.strip(),
+            "primary_goal": "" if primary_goal == "Not assigned" else primary_goal,
+            "goals": [] if primary_goal == "Not assigned" else [primary_goal],
+            "conviction": int(conviction),
+            "beta": float(holding_beta) if beta_available else None,
+            "tags": [item.strip().lower() for item in holding_tags.replace(";", ",").split(",") if item.strip()],
+            "review_date": review_date.isoformat(),
+            "investment_thesis": investment_thesis.strip(),
+            "bear_case": bear_case.strip(), "base_case": base_case.strip(), "bull_case": bull_case.strip(),
+            "catalysts": [item.strip() for item in catalysts.splitlines() if item.strip()],
+            "risks": [item.strip() for item in risks.splitlines() if item.strip()],
+            "invalidation": invalidation.strip(),
+            "updated_by": str(profile["username"]),
+        }
+        with get_connection() as conn:
+            active_strategy = data.get("strategy_record") if isinstance(data.get("strategy_record"), dict) else {}
+            upsert_holding_thesis(
+                conn,
+                selected,
+                payload,
+                status=thesis_status.lower().replace(" ", "_"),
+                conviction=int(conviction),
+                strategy_version=active_strategy.get("version"),
+                next_review_at=review_date.isoformat(),
+                updated_by=str(profile["username"]),
+            )
+        st.success(f"{selected} thesis monitor saved.")
+        st.rerun()
+
+    monitor_rows = []
+    today = date.today()
+    for ticker in tickers:
+        item = thesis_by_ticker.get(ticker, {})
+        payload = _strategy_payload(item)
+        required = ["sector", "primary_goal", "investment_thesis", "bear_case", "base_case", "bull_case", "invalidation", "review_date"]
+        completeness = sum(bool(payload.get(field)) for field in required) / len(required)
+        review_text = str(payload.get("review_date") or "")
+        try:
+            overdue = date.fromisoformat(review_text) < today
+        except ValueError:
+            overdue = False
+        monitor_rows.append({
+            "Ticker": ticker,
+            "Portfolio state": portfolio_state.get(ticker, "Not in tracker"),
+            "Status": str(item.get("status") or "Not created").replace("_", " ").title(),
+            "Primary goal": payload.get("primary_goal") or "Unassigned",
+            "Sector": payload.get("sector") or "Unassigned",
+            "Conviction": payload.get("conviction") or "—",
+            "Next review": review_text or "Not scheduled",
+            "Overdue": overdue,
+            "Completeness": completeness,
+        })
+    st.dataframe(
+        pd.DataFrame(monitor_rows), hide_index=True, use_container_width=True,
+        column_config={"Completeness": st.column_config.ProgressColumn("Completeness", min_value=0.0, max_value=1.0, format="percent")},
+    )
+
+
+def _render_strategy_alignment(data: dict[str, Any]) -> None:
+    from src.portfolio_tracker.strategy_alignment import analyze_strategy_alignment
+    from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
+
+    mandate = _strategy_payload(data.get("mandate_record"))
+    strategy = _strategy_payload(data.get("strategy_record"))
+    positions = _fetch_competition_positions()
+    open_tickers = [str(row.get("ticker") or "").upper() for row in positions if str(row.get("status") or "open") == "open"]
+    performance = calculate_portfolio_performance(positions, _competition_live_prices(open_tickers))
+    thesis_by_ticker = {
+        str(item.get("ticker") or "").upper(): item
+        for item in data.get("theses", []) if item.get("ticker")
+    }
+    approved_tickers = {
+        str(item.get("ticker") or "").upper()
+        for item in data.get("approved_securities", [])
+        if item.get("ticker") and bool(item.get("approved", True))
+    }
+    universe_configured = bool(approved_tickers)
+    holdings = []
+    for row in performance.get("positions", []):
+        if str(row.get("status") or "open") != "open":
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        thesis_record = thesis_by_ticker.get(ticker, {})
+        thesis = _strategy_payload(thesis_record)
+        holdings.append({
+            "ticker": ticker,
+            "market_value": float(row.get("current_value") or 0.0),
+            "sector": thesis.get("sector") or "Unassigned",
+            "primary_goal": thesis.get("primary_goal") or "",
+            "goals": thesis.get("goals") or [],
+            "thesis_status": thesis_record.get("status") or "missing",
+            "beta": thesis.get("beta"),
+            "approved": ticker in approved_tickers if universe_configured else None,
+            "asset_type": row.get("security_type") or "Stock",
+            "tags": thesis.get("tags") or [],
+        })
+
+    st.markdown("#### Strategy Alignment & Drift")
+    st.caption(
+        "Measures whether the live analytical portfolio follows the Client Mandate and active Strategy Rulebook. "
+        "The score is a transparent process diagnostic, not a return forecast."
+    )
+    if not mandate or not strategy:
+        st.warning("Save both a Client Mandate and an active Strategy Rulebook to calculate alignment.")
+        return
+    observed_turnover = sum(
+        abs(float(row.get("quantity") or 0.0) * float(row.get("entry_price") or 0.0))
+        for row in positions
+        if str(row.get("status") or "open").lower() == "closed"
+    ) / INITIAL_CAPITAL_USD
+    strategy_with_observations = dict(strategy)
+    strategy_with_observations["current_turnover"] = observed_turnover
+    actual_cash = float(performance.get("cash_before_pnl") or 0.0) + float(performance.get("realized_pnl") or 0.0)
+    analysis = analyze_strategy_alignment(
+        holdings,
+        mandate,
+        strategy_with_observations,
+        cash_value=actual_cash,
+        portfolio_value=float(performance.get("equity") or INITIAL_CAPITAL_USD),
+    )
+    top = st.columns(5)
+    top[0].metric("Strategy alignment", f"{float(analysis.get('alignment_score') or 0):.0f}/100")
+    top[1].metric("Assessment", str(analysis.get("rating") or "Not rated"))
+    summary = analysis.get("portfolio_summary", {}) if isinstance(analysis.get("portfolio_summary"), dict) else {}
+    top[2].metric("Cash weight", f"{float(summary.get('cash_weight') or 0):.1%}")
+    top[3].metric("Largest holding", f"{float(summary.get('largest_position_weight') or 0):.1%}")
+    top[4].metric("Effective holdings", f"{float(summary.get('effective_holdings') or 0):.1f}")
+    st.caption(
+        f"Observed cumulative turnover: {observed_turnover:.1%} (entry cost of closed positions ÷ initial capital)."
+    )
+
+    components = _strategy_rows(analysis.get("components"), "Component")
+    if components:
+        st.markdown("##### Alignment components")
+        st.dataframe(pd.DataFrame(components), use_container_width=True, hide_index=True)
+
+    goal_rows = _strategy_rows(analysis.get("goal_allocation"), "Goal")
+    sector_rows = _strategy_rows(analysis.get("sector_allocation"), "Sector")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("##### Client goal allocation drift")
+        if goal_rows:
+            goal_df = pd.DataFrame(goal_rows)
+            st.dataframe(goal_df, use_container_width=True, hide_index=True)
+            chart_columns = [column for column in ("actual_weight", "target_weight") if column in goal_df]
+            if chart_columns:
+                label_column = "goal_name" if "goal_name" in goal_df else goal_df.columns[0]
+                st.bar_chart(goal_df.set_index(label_column)[chart_columns])
+        else:
+            st.info("Assign holdings to client goals in Thesis Monitor.")
+    with right:
+        st.markdown("##### Sector allocation drift")
+        if sector_rows:
+            sector_df = pd.DataFrame(sector_rows)
+            st.dataframe(sector_df, use_container_width=True, hide_index=True)
+            chart_columns = [column for column in ("actual_weight", "target_weight") if column in sector_df]
+            if chart_columns:
+                label_column = "sector_name" if "sector_name" in sector_df else sector_df.columns[0]
+                st.bar_chart(sector_df.set_index(label_column)[chart_columns])
+        else:
+            st.info("Enter sectors in Thesis Monitor and risk budgets in Strategy Rulebook.")
+
+    violations = analysis.get("violations", [])
+    warnings = analysis.get("warnings", [])
+    if violations:
+        st.markdown("##### Rule violations")
+        for item in violations:
+            st.error(str(item.get("message") or item) if isinstance(item, dict) else str(item))
+    if warnings:
+        st.markdown("##### Data and coverage warnings")
+        for item in warnings:
+            st.warning(str(item.get("message") or item) if isinstance(item, dict) else str(item))
+    holding_rows = _strategy_rows(analysis.get("holdings"), "Ticker")
+    if holding_rows:
+        st.markdown("##### Holding-level strategy fit")
+        st.dataframe(pd.DataFrame(holding_rows), use_container_width=True, hide_index=True)
+    if not universe_configured:
+        if bool(strategy.get("require_approved")):
+            st.error("The active strategy requires an Approved Universe, but no list has been loaded.")
+        else:
+            st.caption("Approved-universe validation is not scored because the rule is disabled and no list is loaded.")
+
+
+def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> None:
+    st.markdown("### Strategy Lab")
+    st.caption(
+        "Client mandate, repeatable investment rules, portfolio alignment, thesis lifecycle, and approved-universe control. "
+        "This is an analytical workspace; it does not generate competition submissions."
+    )
+    data = _load_strategy_workspace_data()
+    mandate = _strategy_payload(data.get("mandate_record"))
+    goal_names = [
+        str(item.get("name")) for item in mandate.get("goals", [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    mandate_tab, rulebook_tab, alignment_tab, thesis_tab, universe_tab, decisions_tab = st.tabs([
+        "Client Mandate", "Strategy Rulebook", "Alignment & Drift",
+        "Thesis Monitor", "Approved Universe", "Decision Journal",
+    ])
+    with mandate_tab:
+        _render_client_mandate(profile, data.get("mandate_record"))
+    with rulebook_tab:
+        _render_strategy_rulebook(profile, data)
+    with alignment_tab:
+        _render_strategy_alignment(data)
+    with thesis_tab:
+        _render_thesis_monitor(profile, data)
+    with universe_tab:
+        _render_approved_universe(profile, data)
+    with decisions_tab:
+        _render_decision_log(profile, result, goal_names=goal_names or None)
+
+
+def _render_decision_log(
+    profile: dict[str, str | int],
+    result: dict,
+    goal_names: list[str] | None = None,
+) -> None:
     import json
+    available_goals = goal_names or ["Growth", "Income", "Risk Tolerance", "Community/Impact"]
+    metric_groups = {
+        "Valuation": ["Trailing P/E", "Forward P/E", "PEG Ratio", "EV/EBITDA", "EV/Revenue"],
+        "Growth": ["Rev Growth (YoY)", "Earnings Growth", "Price CAGR (3Y)", "Price CAGR (5Y)"],
+        "Profitability": ["Gross Margin", "Op Margin", "Net Margin", "ROE", "ROIC", "Free Cash Flow (B)"],
+        "Risk": ["Beta", "Debt/Equity", "52W High", "52W Low"],
+        "Analyst": ["Analyst Target", "Upside to Target"],
+    }
     st.markdown("### Investment Decision Log")
     st.caption("Chronological record of strategy decisions, including the price captured at each decision. Every team edit is marked in the price chart with that member's colour.")
 
@@ -3841,8 +4628,11 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
 
             c3, c4 = st.columns(2)
             with c3:
-                st.caption("**Client Goals — Placeholder** (will be updated with actual 2026 case study goals)")
-                tags = st.multiselect("Client Goals Addressed", ["Growth", "Income", "Risk Tolerance", "Community/Impact"])
+                if goal_names:
+                    st.caption("Goals come from the active Client Mandate in Strategy Lab.")
+                else:
+                    st.caption("Default analytical buckets are shown until the Client Mandate is saved.")
+                tags = st.multiselect("Client Goals Addressed", available_goals)
             with c4:
                 fetch_fundamentals = st.checkbox("Fetch live fundamentals from Yahoo Finance", value=True)
 
@@ -3908,56 +4698,6 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
     if not rows:
         st.info("No decisions logged yet. Use the form above to log your first investment decision.")
         return
-
-    # ── Narrative export ──────────────────────────────────────────────────────
-    st.markdown("#### Strategy Narrative Export")
-
-    _METRIC_GROUPS = {
-        "Valuation":  ["Trailing P/E", "Forward P/E", "PEG Ratio", "EV/EBITDA", "EV/Revenue"],
-        "Growth":     ["Rev Growth (YoY)", "Earnings Growth", "Price CAGR (3Y)", "Price CAGR (5Y)"],
-        "Profitability": ["Gross Margin", "Op Margin", "Net Margin", "ROE", "ROIC", "Free Cash Flow (B)"],
-        "Risk":       ["Beta", "Debt/Equity", "52W High", "52W Low"],
-        "Analyst":    ["Analyst Target", "Upside to Target"],
-    }
-
-    report_lines = ["# Investment Strategy & Decision Narrative\n",
-                    f"> Generated: {_now_iso()}\n"]
-    for r in reversed(rows):
-        report_lines.append(f"## {r['date'][:10]} — {r['action']} {r['ticker']}")
-        report_lines.append(f"**Team Member**: {r['team_member']}  |  **Client Goals**: {r['client_goal_tags'] or '—'}")
-        report_lines.append(f"\n**Investment Thesis**:\n> {r['thesis']}\n")
-        if r['quant_snapshot_json']:
-            try:
-                snap = json.loads(r['quant_snapshot_json'])
-                if '_portfolio' in snap:
-                    p = snap['_portfolio']
-                    report_lines.append('**Portfolio Context at Decision Date:**')
-                    for k, v in p.items():
-                        if v is not None:
-                            try:
-                                report_lines.append(f'- {k}: {float(v):.3f}')
-                            except Exception:
-                                report_lines.append(f'- {k}: {v}')
-                    report_lines.append('')
-                if '_fundamentals' in snap:
-                    for tkr, mets in snap['_fundamentals'].items():
-                        report_lines.append(f'**{tkr} Fundamentals at Decision Date:**')
-                        if '_error' in mets:
-                            report_lines.append(f"- Fetch failed: {mets['_error']['formatted']}")
-                        else:
-                            for group, labels in _METRIC_GROUPS.items():
-                                group_lines = [f"  - {lbl}: {mets[lbl]['formatted']}" for lbl in labels if lbl in mets]
-                                if group_lines:
-                                    report_lines.append(f'  *{group}*')
-                                    report_lines.extend(group_lines)
-                        report_lines.append('')
-            except Exception:
-                pass
-        report_lines.append('---\n')
-
-    report_md = '\n'.join(report_lines)
-    st.download_button('Download Strategy Narrative (Markdown)', data=report_md,
-                       file_name='strategy_narrative.md', mime='text/markdown')
 
     # -- Decision timeline table
     st.markdown('#### Decision Timeline')
@@ -4170,7 +4910,7 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
                     if '_error' in mets:
                         st.warning(f"Could not fetch data: {mets['_error']['formatted']}")
                         continue
-                    for group_name, labels in _METRIC_GROUPS.items():
+                    for group_name, labels in metric_groups.items():
                         group_mets = {lbl: mets[lbl] for lbl in labels if lbl in mets}
                         if not group_mets:
                             continue
@@ -4233,12 +4973,15 @@ def _render_decision_log(profile: dict[str, str | int], result: dict) -> None:
 
     # -- Client-Goal Alignment Matrix
     st.markdown('#### Client-Goal Alignment Matrix')
-    st.caption('Placeholder goals — will be updated with actual 2026 Wharton case study objectives.')
+    st.caption(
+        'Uses the active Client Mandate.' if goal_names
+        else 'Default analytical buckets are used until the Client Mandate is saved.'
+    )
     matrix_data: dict[str, dict] = {}
     for r in rows:
         t = r['ticker']
         if t not in matrix_data:
-            matrix_data[t] = {'Growth': '', 'Income': '', 'Risk Tolerance': '', 'Community/Impact': ''}
+            matrix_data[t] = {goal: '' for goal in available_goals}
         for tag in str(r['client_goal_tags']).split(','):
             tag = tag.strip()
             if tag in matrix_data[t]:
@@ -4370,6 +5113,142 @@ def _competition_live_prices(tickers: list[str]) -> dict[str, float]:
         return {}
 
 
+def _render_wins_reconciliation(
+    positions: list[dict[str, Any]],
+    live_prices: dict[str, float],
+) -> None:
+    """Compare a user-supplied WInS snapshot without mutating tracked positions."""
+    from src.portfolio_tracker.wins_reconciliation import (
+        normalize_wins_rows,
+        reconcile_wins_positions,
+    )
+
+    with st.expander("WInS Reconciliation", expanded=False):
+        st.caption(
+            "Upload a WInS positions snapshot to verify that the analytical tracker matches the "
+            "competition account. The file is analysed in memory and never changes either system."
+        )
+        uploaded = st.file_uploader(
+            "WInS positions snapshot",
+            type=["csv", "xlsx", "xls"],
+            key="wins_reconciliation_upload",
+            help=(
+                "Common headers such as Ticker/Symbol, Quantity/Shares, Cost Basis, Current Price, "
+                "Market Value and Security Type are detected automatically."
+            ),
+        )
+        if uploaded is None:
+            st.info("Upload a CSV or Excel export to run the reconciliation check.")
+            return
+
+        try:
+            if str(uploaded.name).lower().endswith((".xlsx", ".xls")):
+                uploaded_rows = pd.read_excel(uploaded).to_dict(orient="records")
+            else:
+                uploaded_rows = pd.read_csv(uploaded, sep=None, engine="python").to_dict(orient="records")
+        except Exception as exc:
+            st.error(f"The uploaded snapshot could not be read ({type(exc).__name__}).")
+            return
+
+        normalized = normalize_wins_rows(uploaded_rows)
+        if uploaded_rows and not normalized:
+            st.error(
+                "No ticker column was recognised. Include a column named Ticker, Symbol, "
+                "Ticker Symbol or Security Symbol."
+            )
+            return
+
+        tracked_snapshot: list[dict[str, Any]] = []
+        for position in positions:
+            row = dict(position)
+            ticker = str(row.get("ticker") or "").upper()
+            if str(row.get("status") or "open").lower() == "open":
+                market_price = live_prices.get(ticker)
+                if market_price is None:
+                    market_price = row.get("last_price")
+                if market_price in (None, "", 0, 0.0):
+                    market_price = row.get("entry_price")
+                row["current_price"] = market_price
+            tracked_snapshot.append(row)
+
+        result = reconcile_wins_positions(uploaded_rows, tracked_snapshot)
+        summary = result["summary"]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Two-way Coverage", f"{summary['two_way_coverage_pct']:.1f}%")
+        m2.metric("Exact Matches", int(summary["exact_matches"]))
+        m3.metric("Value Differences", int(summary["mismatched_positions"]))
+        m4.metric(
+            "Missing / Extra",
+            f"{int(summary['missing_positions'])} / {int(summary['extra_positions'])}",
+        )
+
+        status = str(result.get("status") or "no_data")
+        if status == "reconciled":
+            st.success("The WInS snapshot and all tracked open positions reconcile within tolerance.")
+        elif status == "partial":
+            st.warning(
+                "All comparable values agree, but at least one required value is missing on one side."
+            )
+        elif status == "differences":
+            st.error(
+                "The snapshot does not fully reconcile. Review the position-level differences below."
+            )
+        else:
+            st.info("Neither source contains an open position to compare.")
+
+        comparison_rows: list[dict[str, Any]] = []
+        for item in result["matched"]:
+            wins = item["wins"]
+            tracked = item["tracked"]
+            comparison_rows.append({
+                "Ticker": item["ticker"],
+                "Result": str(item["status"]).replace("_", " ").title(),
+                "WInS Quantity": wins.get("quantity"),
+                "Tracker Quantity": tracked.get("quantity"),
+                "Quantity Difference": item.get("quantity_difference"),
+                "WInS Cost": wins.get("total_cost"),
+                "Tracker Cost": tracked.get("total_cost"),
+                "Cost Difference": item.get("cost_difference"),
+                "WInS Value": wins.get("current_value"),
+                "Tracker Value": tracked.get("current_value"),
+                "Value Difference": item.get("value_difference"),
+            })
+        for bucket, label in (("missing", "Missing in WInS"), ("extra", "Extra in WInS")):
+            for item in result[bucket]:
+                is_extra = bucket == "extra"
+                comparison_rows.append({
+                    "Ticker": item["ticker"],
+                    "Result": label,
+                    "WInS Quantity": item.get("quantity") if is_extra else None,
+                    "Tracker Quantity": None if is_extra else item.get("quantity"),
+                    "Quantity Difference": item.get("quantity_difference"),
+                    "WInS Cost": item.get("total_cost") if is_extra else None,
+                    "Tracker Cost": None if is_extra else item.get("total_cost"),
+                    "Cost Difference": item.get("cost_difference"),
+                    "WInS Value": item.get("current_value") if is_extra else None,
+                    "Tracker Value": None if is_extra else item.get("current_value"),
+                    "Value Difference": item.get("value_difference"),
+                })
+        if comparison_rows:
+            st.dataframe(
+                pd.DataFrame(comparison_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "WInS Cost": st.column_config.NumberColumn(format="$%.2f"),
+                    "Tracker Cost": st.column_config.NumberColumn(format="$%.2f"),
+                    "Cost Difference": st.column_config.NumberColumn(format="$%.2f"),
+                    "WInS Value": st.column_config.NumberColumn(format="$%.2f"),
+                    "Tracker Value": st.column_config.NumberColumn(format="$%.2f"),
+                    "Value Difference": st.column_config.NumberColumn(format="$%.2f"),
+                },
+            )
+        st.caption(
+            "Differences use WInS minus tracker. Exact matches use a quantity tolerance of 1e-8 "
+            "and a USD tolerance of $0.01."
+        )
+
+
 def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
 
@@ -4418,16 +5297,30 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         f"Initial capital: ${INITIAL_CAPITAL_USD:,.0f} · Uninvested cash before P/L: "
         f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(open_tickers))} tickers."
     )
+    _render_wins_reconciliation(positions, live_prices)
     if not performance["positions"]:
         st.info("No positions have been entered yet.")
         return
 
+    from src.portfolio_tracker.strategy_store import list_holding_theses
+
+    with get_connection() as conn:
+        thesis_records = list_holding_theses(conn)
+    thesis_by_ticker = {
+        str(item.get("ticker") or "").upper(): item
+        for item in thesis_records if item.get("ticker")
+    }
     st.dataframe(pd.DataFrame([{
         "Status": "Open" if row["status"] == "open" else "Closed", "Ticker": row["ticker"],
         "Type": row["security_type"], "Quantity": row["quantity"], "Entry Price": f"${row['entry_price']:,.2f}",
         "Current / Exit Price": f"${row['current_price']:,.2f}", "Position Return": f"{row['return_pct']:+.2f}%",
         "P/L": f"${row['pnl']:+,.2f}", "Opened By": row["opened_by"], "Opening Date": row["entry_date"],
         "Price Source": row["price_source"],
+        "Client Goal": _strategy_payload(thesis_by_ticker.get(str(row["ticker"]).upper(), {})).get("primary_goal") or "Unassigned",
+        "Sector": _strategy_payload(thesis_by_ticker.get(str(row["ticker"]).upper(), {})).get("sector") or "Unassigned",
+        "Thesis Status": str(thesis_by_ticker.get(str(row["ticker"]).upper(), {}).get("status") or "Missing").replace("_", " ").title(),
+        "Conviction": thesis_by_ticker.get(str(row["ticker"]).upper(), {}).get("conviction") or "—",
+        "Next Review": thesis_by_ticker.get(str(row["ticker"]).upper(), {}).get("next_review_at") or "Not scheduled",
     } for row in performance["positions"]]), use_container_width=True, hide_index=True)
 
     st.markdown("#### Manage Open Positions")
@@ -5036,6 +5929,250 @@ def _render_geographic_revenue(snapshot: dict[str, Any], ticker: str, company_na
         _render_macro_region_drilldown(snapshot, ticker)
 
 
+def _render_industry_peer_analysis(
+    profile: dict[str, str | int],
+    selected_ticker: str,
+    valid_results: dict[str, dict[str, Any]],
+) -> None:
+    from src.analytics.industry_analysis import (
+        PORTER_FORCES,
+        build_industry_analysis,
+    )
+    from src.portfolio_tracker.strategy_store import load_company_research, save_company_research
+
+    with get_connection() as conn:
+        research_record = load_company_research(conn, selected_ticker)
+    current = _strategy_payload(research_record)
+    peer_options = [ticker for ticker in valid_results if ticker != selected_ticker]
+    saved_peers = [
+        str(ticker).upper() for ticker in current.get("peer_tickers", [])
+        if str(ticker).upper() in peer_options
+    ]
+    default_peers = saved_peers if "peer_tickers" in current else peer_options
+
+    st.markdown("#### Industry Structure & Peer Comparison")
+    st.caption(
+        "Quantitative comparisons use only the loaded companies. Porter Five Forces and SWOT use only analyst-entered "
+        "ratings and evidence; missing qualitative judgments remain missing."
+    )
+    selected_peers = st.multiselect(
+        "Peer set from loaded companies",
+        peer_options,
+        default=default_peers,
+        key=f"industry_peer_set_{selected_ticker}",
+        help="Load additional tickers in Company Analysis to expand the peer set.",
+    )
+
+    porter_current = current.get("porter", {}) if isinstance(current.get("porter"), dict) else {}
+    porter_frame = pd.DataFrame([{
+        "Force key": key,
+        "Competitive force": label,
+        "Pressure (1–5)": _finite_form_number(
+            porter_current.get(key, {}).get("rating") or 0.0
+            if isinstance(porter_current.get(key), dict) else 0.0,
+            0.0,
+        ),
+        "Evidence / rationale": "\n".join(porter_current.get(key, {}).get("evidence", []))
+        if isinstance(porter_current.get(key), dict) else "",
+    } for key, label, _ in PORTER_FORCES])
+    swot_current = current.get("swot", {}) if isinstance(current.get("swot"), dict) else {}
+    with st.form(f"industry_research_form_{selected_ticker}"):
+        industry_thesis = st.text_area(
+            "Industry thesis",
+            value=str(current.get("industry_thesis") or ""),
+            height=90,
+            help="State the structural reason this industry should or should not create attractive long-term economics.",
+        )
+        st.markdown("##### Porter Five Forces — analyst assessment")
+        edited_porter = st.data_editor(
+            porter_frame,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Force key", "Competitive force"],
+            key=f"porter_editor_{selected_ticker}",
+            column_config={
+                "Force key": None,
+                "Pressure (1–5)": st.column_config.NumberColumn(
+                    "Pressure (1–5)", min_value=0.0, max_value=5.0, step=1.0,
+                    help="0 means not assessed; 1 is low competitive pressure and 5 is high pressure.",
+                ),
+            },
+        )
+        st.markdown("##### SWOT — analyst evidence")
+        s1, s2 = st.columns(2)
+        with s1:
+            strengths = st.text_area("Strengths (one per line)", value="\n".join(swot_current.get("strengths", [])), height=100)
+            opportunities = st.text_area("Opportunities (one per line)", value="\n".join(swot_current.get("opportunities", [])), height=100)
+        with s2:
+            weaknesses = st.text_area("Weaknesses (one per line)", value="\n".join(swot_current.get("weaknesses", [])), height=100)
+            threats = st.text_area("Threats (one per line)", value="\n".join(swot_current.get("threats", [])), height=100)
+        evidence_notes = st.text_area(
+            "Industry evidence and source notes",
+            value=str(current.get("evidence_notes") or ""),
+            height=80,
+        )
+        save_research = st.form_submit_button("Save Industry Research", type="primary", use_container_width=True)
+    if save_research:
+        porter_payload: dict[str, Any] = {}
+        for row in edited_porter.to_dict("records"):
+            rating = _finite_form_number(row.get("Pressure (1–5)"), 0.0)
+            if rating <= 0:
+                continue
+            evidence = [
+                item.strip() for item in str(row.get("Evidence / rationale") or "").splitlines()
+                if item.strip()
+            ]
+            porter_payload[str(row.get("Force key"))] = {"rating": rating, "evidence": evidence}
+        swot_payload = {
+            "strengths": [item.strip() for item in strengths.splitlines() if item.strip()],
+            "weaknesses": [item.strip() for item in weaknesses.splitlines() if item.strip()],
+            "opportunities": [item.strip() for item in opportunities.splitlines() if item.strip()],
+            "threats": [item.strip() for item in threats.splitlines() if item.strip()],
+        }
+        with get_connection() as conn:
+            save_company_research(
+                conn,
+                selected_ticker,
+                {
+                    "peer_tickers": selected_peers,
+                    "industry_thesis": industry_thesis.strip(),
+                    "porter": porter_payload,
+                    "swot": swot_payload,
+                    "evidence_notes": evidence_notes.strip(),
+                },
+                updated_by=str(profile["username"]),
+            )
+        st.success("Industry and peer research saved to the shared database.")
+        st.rerun()
+
+    company_info = valid_results[selected_ticker].get("info", {})
+    peer_metrics = {
+        ticker: valid_results[ticker].get("info", {})
+        for ticker in selected_peers if ticker in valid_results
+    }
+    analysis = build_industry_analysis(
+        company_info,
+        peer_metrics,
+        porter_assessments=porter_current,
+        swot_assessments=swot_current,
+        company_name=selected_ticker,
+        min_peer_count=2,
+    )
+    peers = analysis.get("peer_comparison", {})
+    if peers.get("available"):
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Peer-relative score", f"{float(peers.get('score') or 0):.0f}/100")
+        p2.metric("Assessment", str(peers.get("rating") or "Not rated"))
+        p3.metric("Data coverage", f"{float(peers.get('coverage_pct') or 0):.0f}%")
+        p4.metric("Confidence", str(peers.get("confidence") or "Low"))
+        category_rows = [
+            {
+                "Category": item.get("label"),
+                "Score": item.get("score"),
+                "Raw score": item.get("raw_score"),
+                "Coverage %": item.get("coverage_pct"),
+                "Metrics analyzed": item.get("metrics_analyzed"),
+            }
+            for item in peers.get("categories", {}).values() if isinstance(item, dict)
+        ]
+        st.dataframe(pd.DataFrame(category_rows), use_container_width=True, hide_index=True)
+        metric_rows = [
+            {
+                "Category": str(row.get("category") or "").replace("_", " ").title(),
+                "Metric": row.get("label"),
+                "Company": row.get("company_value"),
+                "Peer median": row.get("peer_median"),
+                "Peer Q1": row.get("peer_q1"),
+                "Peer Q3": row.get("peer_q3"),
+                "Relative difference %": row.get("relative_difference_pct"),
+                "Direction-adjusted percentile": row.get("desirability_percentile"),
+                "Signal": str(row.get("relative_flag") or "").replace("_", " ").title(),
+                "Peer observations": row.get("peer_count"),
+            }
+            for row in peers.get("metrics", []) if isinstance(row, dict)
+        ]
+        st.markdown("##### Metric-by-metric peer evidence")
+        st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True, height=470)
+    else:
+        st.warning(
+            "A robust peer score needs at least two loaded peer companies with comparable metrics. "
+            "The app does not manufacture a peer set."
+        )
+
+    scatter_rows = []
+    for ticker in [selected_ticker, *selected_peers]:
+        info = valid_results.get(ticker, {}).get("info", {})
+        forward_pe = info.get("forwardPE")
+        growth = info.get("revenueGrowth")
+        if forward_pe is None or growth is None:
+            continue
+        try:
+            scatter_rows.append({
+                "Ticker": ticker,
+                "Forward P/E": float(forward_pe),
+                "Revenue growth": float(growth),
+                "Operating margin": float(info.get("operatingMargins") or 0.0),
+                "Selected company": ticker == selected_ticker,
+            })
+        except (TypeError, ValueError):
+            continue
+    if scatter_rows:
+        import plotly.express as px
+
+        scatter_df = pd.DataFrame(scatter_rows)
+        figure = px.scatter(
+            scatter_df,
+            x="Forward P/E",
+            y="Revenue growth",
+            text="Ticker",
+            color="Selected company",
+            size=scatter_df["Operating margin"].abs().clip(lower=0.01),
+            title="Peer valuation versus growth",
+        )
+        figure.update_traces(textposition="top center")
+        figure.update_layout(height=410, yaxis_tickformat=".1%")
+        st.plotly_chart(figure, use_container_width=True)
+
+    porter = analysis.get("porter_five_forces", {})
+    swot = analysis.get("swot", {})
+    st.markdown("##### Industry structure diagnostics")
+    q1, q2, q3 = st.columns(3)
+    q1.metric("Porter coverage", f"{float(porter.get('coverage_pct') or 0):.0f}%")
+    q2.metric(
+        "Industry attractiveness",
+        f"{float(porter.get('industry_attractiveness_score')):.0f}/100"
+        if porter.get("industry_attractiveness_score") is not None else "Not assessed",
+    )
+    q3.metric("SWOT coverage", f"{float(swot.get('coverage_pct') or 0):.0f}%")
+    if porter.get("forces"):
+        st.dataframe(pd.DataFrame([{
+            "Force": row.get("label"),
+            "Pressure": row.get("rating_label"),
+            "Rating": row.get("rating"),
+            "Evidence": "; ".join(row.get("evidence", [])),
+        } for row in porter["forces"]]), use_container_width=True, hide_index=True)
+    if swot.get("available"):
+        swot_cols = st.columns(4)
+        for column, key in zip(swot_cols, ("strengths", "weaknesses", "opportunities", "threats")):
+            quadrant = swot.get("quadrants", {}).get(key, {})
+            with column:
+                st.markdown(f"**{quadrant.get('label', key.title())}**")
+                items = quadrant.get("items", [])
+                if items:
+                    for item in items:
+                        st.write(f"• {item}")
+                else:
+                    st.caption("Not assessed")
+    if current.get("industry_thesis"):
+        st.markdown("##### Saved industry thesis")
+        st.write(current["industry_thesis"])
+    if research_record:
+        st.caption(
+            f"Manual research last updated {research_record.get('updated_at', '—')} "
+            f"by {research_record.get('updated_by') or 'unknown analyst'}."
+        )
+
+
 def _render_company_analysis(profile: dict[str, str | int]) -> None:
     from src.analytics.company_analysis import (
         analyze_moat,
@@ -5124,8 +6261,8 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     st.markdown(f"## {company_name} ({selected_ticker})")
     st.caption(f"Data fetched: {snapshot.get('fetched_at', '—')} · Market-data source: Yahoo Finance")
 
-    overview_tab, regions_tab, financials_tab, management_tab, moat_tab, dcf_tab, metrics_tab = st.tabs([
-        "Overview", "Revenue by Region", "Financial Statements", "Management", "Moat, Track Record & Risks", "DCF", "All Metrics",
+    overview_tab, regions_tab, industry_tab, financials_tab, management_tab, moat_tab, dcf_tab, metrics_tab = st.tabs([
+        "Overview", "Revenue by Region", "Industry & Peers", "Financial Statements", "Management", "Moat, Track Record & Risks", "DCF", "All Metrics",
     ])
 
     with overview_tab:
@@ -5155,6 +6292,9 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
 
     with regions_tab:
         _render_geographic_revenue(snapshot, selected_ticker, str(company_name))
+
+    with industry_tab:
+        _render_industry_peer_analysis(profile, selected_ticker, valid_results)
 
     with financials_tab:
         annual, quarterly = st.tabs(["Annual", "Quarterly"])
@@ -5424,7 +6564,7 @@ def render_wharton_cockpit() -> None:
     with tabs[0]:
         _render_overview_action_center(profile)
     with tabs[1]:
-        _render_decision_log(profile, result)
+        _render_strategy_workspace(profile, result)
     with tabs[2]:
         _render_quant_engine(profile)
     with tabs[3]:

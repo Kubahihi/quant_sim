@@ -238,18 +238,27 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
     assert "Company Analysis" in tab_labels
 
     assignment_tab = next(tab for tab in at.tabs if tab.label == "Assignment & Rules")
+    strategy_tab = next(tab for tab in at.tabs if tab.label == "Strategy & Decisions")
     portfolio_tab = next(tab for tab in at.tabs if tab.label == "Portfolio Tracker")
     company_tab = next(tab for tab in at.tabs if tab.label == "Company Analysis")
 
     assignment_headings = [item.value for item in assignment_tab.markdown]
+    strategy_headings = [item.value for item in strategy_tab.markdown]
     portfolio_headings = [item.value for item in portfolio_tab.markdown]
     company_headings = [item.value for item in company_tab.markdown]
     assert any("Assignment & Rules" in value for value in assignment_headings)
+    assert any("Strategy Lab" in value for value in strategy_headings)
     assert any("Portfolio Tracker" in value for value in portfolio_headings)
     assert any("Company Analysis" in value for value in company_headings)
     assert not any("Company Analysis" in value for value in portfolio_headings)
+    assert any(item.label == "WInS positions snapshot" for item in portfolio_tab.file_uploader)
     region_view = next(item for item in company_tab.radio if item.label == "Regional analysis view")
     assert region_view.options == ["Revenue Exposure", "Macro Drill-down"]
+    nested_tab_labels = [tab.label for tab in at.tabs]
+    assert "Client Mandate" in nested_tab_labels
+    assert "Alignment & Drift" in nested_tab_labels
+    assert "Thesis Monitor" in nested_tab_labels
+    assert "Industry & Peers" in nested_tab_labels
 
     region_view.set_value("Macro Drill-down").run(timeout=60)
     assert len(at.exception) == 0

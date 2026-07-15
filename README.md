@@ -287,3 +287,29 @@ forecasting system. Claiming predictive accuracy requires a frozen strategy,
 nested walk-forward testing of the full ensemble, untouched holdout data and
 comparison with investable benchmarks after costs. See
 `docs/MODEL_VALIDATION.md` for the methodology and interpretation rules.
+
+## 12) Wharton analytical workflow
+
+The Wharton Cockpit contains an analytical Strategy Lab rather than a report
+generator. Its shared SQLite/Turso data model stores:
+
+- a measurable Client Mandate with goal buckets, horizons, liquidity needs,
+  risk tolerance, exclusions and required holding tags;
+- append-only Strategy Rulebook versions with position, sector, cash,
+  diversification, turnover, beta and approved-universe limits;
+- a transparent 0-100 strategy-alignment diagnostic, client-goal and sector
+  drift, HHI, effective holdings, cash weight and holding-level violations;
+- per-holding thesis monitoring with bear/base/bull cases, catalysts, risks,
+  invalidation conditions, conviction and scheduled review dates;
+- a read-only WInS CSV/Excel reconciliation that flags missing or extra
+  positions and quantity, cost-basis and market-value differences without
+  overwriting either source;
+- an analyst-controlled approved-security universe that remains explicitly
+  unofficial until the current Wharton list is loaded;
+- peer-relative company analytics across valuation, growth, profitability and
+  balance-sheet risk, including coverage-adjusted percentiles;
+- user-entered Porter Five Forces and SWOT analysis. Missing qualitative inputs
+  are never inferred or invented by the application.
+
+The 0-100 values are internal process diagnostics, not Wharton scores, credit
+ratings, recommendations or return forecasts.
