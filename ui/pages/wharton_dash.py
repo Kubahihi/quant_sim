@@ -1335,6 +1335,12 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 # ─── Quant Engine ─────────────────────────────────────────────────────────────
 
 def _load_quant_modules() -> dict[str, Any]:
+    import sys
+    if "src.analytics.model_validation" in sys.modules:
+        importlib.reload(sys.modules["src.analytics.model_validation"])
+    if "src.analytics" in sys.modules:
+        importlib.reload(sys.modules["src.analytics"])
+
     return {
         "analytics": importlib.import_module("src.analytics"),
         "optimization": importlib.import_module("src.optimization"),
