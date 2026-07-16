@@ -69,3 +69,4 @@ logs/
 Thumbs.db
 
 .testdeps/
+.codex_pytest_wave2_target/
