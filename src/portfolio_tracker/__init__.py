@@ -8,6 +8,11 @@ from .manager import (
     save_portfolio,
     update_position,
 )
+from .pretrade_analysis import (
+    analyze_pretrade_impact,
+    build_competition_strategy_snapshot,
+    simulate_trade_plan,
+)
 
 __all__ = [
     "load_portfolio",
@@ -18,5 +23,8 @@ __all__ = [
     "compute_live_values",
     "generate_rebalance_suggestions",
     "list_portfolios",
+    "build_competition_strategy_snapshot",
+    "simulate_trade_plan",
+    "analyze_pretrade_impact",
 ]
 
