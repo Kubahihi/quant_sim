@@ -3,8 +3,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 import bcrypt
+import math
 
 from ui.pages import wharton_dash
+
+
+def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
+    assert wharton_dash._finite_form_number(float("nan"), 7.0) == 7.0
+    assert wharton_dash._finite_form_number(float("inf"), 8.0) == 8.0
+    assert wharton_dash._finite_form_number("2.5", 0.0) == 2.5
+    assert wharton_dash._saved_number({"limit": 0.0}, "limit", 0.15) == 0.0
+    assert math.isclose(wharton_dash._saved_number({}, "limit", 0.15), 0.15)
 
 
 def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-team-pass") -> Path:
@@ -37,6 +46,24 @@ def test_init_db_uses_configured_paths_when_cwd_changes(monkeypatch, tmp_path):
         }
     assert "competition_compliance" in tables
     assert "competition_positions" in tables
+    assert "analytical_client_mandate" in tables
+    assert "analytical_strategy_versions" in tables
+    assert "analytical_holding_theses" in tables
+    assert "analytical_approved_securities" in tables
+    assert "analytical_company_research" in tables
+    assert "analytical_research_sources" in tables
+    assert "analytical_catalyst_events" in tables
+    assert "analytical_thesis_reviews" in tables
+    assert "analytical_decision_reviews" in tables
+    with sqlite3.connect(db_path) as connection:
+        decision_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(decision_log)")
+        }
+    assert {
+        "horizon_days", "benchmark_ticker", "expected_return_min",
+        "expected_return_max", "decision_confidence", "target_condition",
+        "invalidation_condition", "planned_weight",
+    }.issubset(decision_columns)
 
 
 def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):

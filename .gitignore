@@ -67,3 +67,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+.testdeps/
+.codex_pytest_wave2_target/
