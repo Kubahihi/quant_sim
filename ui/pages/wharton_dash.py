@@ -17,7 +17,6 @@ import bcrypt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from streamlit_agraph import Config, Edge, Node, agraph
 
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
@@ -40,6 +39,11 @@ MAX_FILE_SIZE_MB = 20
 def _is_development_mode() -> bool:
     """Check if the app is running in development mode."""
     return os.environ.get("QUANT_SIM_ENV") == "development"
+
+
+def _should_sync_seeded_passwords() -> bool:
+    """Avoid expensive bcrypt checks on every production start."""
+    return _is_development_mode() or os.environ.get("QUANT_SIM_SYNC_DEFAULT_PASSWORDS") == "1"
 
 
 def _get_default_password() -> str:
@@ -73,6 +77,7 @@ QUANT_ERROR_KEY = "wharton_quant_error"
 QUANT_STACK_RESULT_KEY = "wharton_quant_stack_result"
 COMPANY_ANALYSIS_KEY = "wharton_company_analysis_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
+HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
 
 TASK_PRIORITIES = ["Critical", "High", "Medium", "Low"]
 TASK_PRIORITY_COLORS = {
@@ -353,6 +358,8 @@ def init_db() -> None:
                     pass
 
             if existing_users.get(user["username"]):
+                if not _should_sync_seeded_passwords():
+                    continue
                 stored_hash = existing_users[user["username"]]
                 if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
                     continue
@@ -799,6 +806,8 @@ def _insert_edge(source: str, target: str) -> bool:
 
 
 def _render_mindmap() -> None:
+    from streamlit_agraph import Config, Edge, Node, agraph
+
     st.markdown("### Strategy Mind Map")
     st.caption("Interactive knowledge graph — nodes, edges, full-screen rendering. Add, connect, delete below.")
 
@@ -7629,77 +7638,48 @@ def render_wharton_cockpit() -> None:
         return
 
     _render_header(profile)
-    tabs = st.tabs([
-        "Overview & Tasks",
-        "Strategy & Decisions",
-        "Quant Engine",
-        "Stock Screener",
-        "Risk Cockpit",
-        "Factor Exposure",
-        "Regime Detection",
-        "Scenario Playground",
-        "Efficient Frontier",
-        "Monte Carlo",
-        "Advanced Monte Carlo",
-        "Advanced Analytics",
-        "Mind Map",
-        "Sub-Projects",
-        "War Room",
-        "File Vault",
-        "Assignment & Rules",
-        "Portfolio Tracker",
-        "Company Analysis",
-    ])
 
-    # Fetch result from state if available
+    # Fetch result from state if available.
     result = st.session_state.get(QUANT_RESULT_KEY, {})
 
-    with tabs[0]:
-        _render_overview_action_center(profile)
-    with tabs[1]:
-        _render_strategy_workspace(profile, result)
-    with tabs[2]:
-        _render_quant_engine(profile)
-    with tabs[3]:
-        _render_stock_screener()
-    with tabs[4]:
-        _render_custom_quant_context(result)
-        _render_risk_cockpit(result)
-    with tabs[5]:
-        _render_custom_quant_context(result)
-        _render_factor_exposure(result)
-    with tabs[6]:
-        _render_custom_quant_context(result)
-        _render_regime_detection(result)
-    with tabs[7]:
-        _render_custom_quant_context(result)
-        _render_scenario_playground(result)
-    with tabs[8]:
-        _render_custom_quant_context(result)
-        _render_efficient_frontier(result)
-    with tabs[9]:
-        _render_custom_quant_context(result)
-        _render_monte_carlo(result)
-    with tabs[10]:
-        _render_custom_quant_context(result)
-        _render_advanced_monte_carlo(result)
-    with tabs[11]:
-        _render_custom_quant_context(result)
-        _render_advanced_analytics(result)
-    with tabs[12]:
-        _render_mindmap()
-    with tabs[13]:
-        _render_subprojects(profile)
-    with tabs[14]:
-        _render_chat(profile)
-    with tabs[15]:
-        _render_file_center(profile)
-    with tabs[16]:
-        _render_competition_rules(profile)
-    with tabs[17]:
-        _render_competition_portfolio(profile)
-    with tabs[18]:
-        _render_company_analysis(profile)
+    def _with_quant_context(renderer):
+        def _render() -> None:
+            _render_custom_quant_context(result)
+            renderer(result)
+
+        return _render
+
+    tab_renderers = [
+        ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
+        ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
+        ("Quant Engine", lambda: _render_quant_engine(profile)),
+        ("Stock Screener", _render_stock_screener),
+        ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),
+        ("Factor Exposure", _with_quant_context(_render_factor_exposure)),
+        ("Regime Detection", _with_quant_context(_render_regime_detection)),
+        ("Scenario Playground", _with_quant_context(_render_scenario_playground)),
+        ("Efficient Frontier", _with_quant_context(_render_efficient_frontier)),
+        ("Monte Carlo", _with_quant_context(_render_monte_carlo)),
+        ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo)),
+        ("Advanced Analytics", _with_quant_context(_render_advanced_analytics)),
+        ("Mind Map", _render_mindmap),
+        ("Sub-Projects", lambda: _render_subprojects(profile)),
+        ("War Room", lambda: _render_chat(profile)),
+        ("File Vault", lambda: _render_file_center(profile)),
+        ("Assignment & Rules", lambda: _render_competition_rules(profile)),
+        ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
+        ("Company Analysis", lambda: _render_company_analysis(profile)),
+    ]
+    visible_tab_renderers = [
+        (label, renderer)
+        for label, renderer in tab_renderers
+        if label not in HIDDEN_COCKPIT_TABS
+    ]
+
+    tabs = st.tabs([label for label, _ in visible_tab_renderers])
+    for tab, (_, renderer) in zip(tabs, visible_tab_renderers, strict=False):
+        with tab:
+            renderer()
 
 
 def main() -> None:

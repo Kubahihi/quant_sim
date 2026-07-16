@@ -14,8 +14,6 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
-import yfinance as yf
 
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT in sys.path:
@@ -76,7 +74,6 @@ from src.analytics.returns import calculate_annualized_return
 import src.data.universe_enrichment as universe_enrichment_module
 import src.data.universe_sources as universe_sources_module
 import src.data.stock_universe as stock_universe_module
-from src.data.fetchers.yahoo_fetcher import YahooFetcher
 from src.optimization import (
     calculate_efficient_frontier,
     optimize_cost_aware_rebalance,
@@ -84,11 +81,6 @@ from src.optimization import (
     optimize_maximum_sharpe,
     optimize_minimum_variance,
     sample_portfolio_cloud,
-)
-from src.reporting import (
-    export_full_report_json,
-    export_portfolio_data_csv,
-    generate_pdf_report,
 )
 import importlib
 import src.simulation.monte_carlo
@@ -289,6 +281,8 @@ def fetch_market_data_cached(
     end_date: date,
 ) -> pd.DataFrame:
     """Fetch close prices with Streamlit cache to reduce repeated API calls."""
+    from src.data.fetchers.yahoo_fetcher import YahooFetcher
+
     fetcher = YahooFetcher()
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
@@ -568,6 +562,13 @@ def _analysis_export_cache_key(result: Dict[str, Any]) -> str:
 
 
 def _prepare_export_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
+    import matplotlib.pyplot as plt
+    from src.reporting import (
+        export_full_report_json,
+        export_portfolio_data_csv,
+        generate_pdf_report,
+    )
+
     cache = st.session_state.setdefault("_prepared_export_artifacts", {})
     cache_key = _analysis_export_cache_key(result)
     if cache_key in cache:
@@ -1059,6 +1060,8 @@ SCREENER_DISPLAY_COLUMNS = [
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _fetch_ticker_history_cached(symbol: str, period: str = "1y") -> pd.DataFrame:
+    import yfinance as yf
+
     history = yf.download(
         tickers=symbol,
         period=period,
