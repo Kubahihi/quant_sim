@@ -276,8 +276,7 @@ with st.sidebar:
 
 st.title("Quant Platform v0.4")
 st.caption(
-    "Portfolio evaluator with deterministic scoring, AI review via Groq, "
-    "and multi-page PDF export."
+    "Portfolio evaluation with deterministic scoring and multi-page PDF export."
 )
 st.markdown("---")
 
@@ -810,8 +809,8 @@ def _compute_analysis(
     ai_review = generate_ai_review(ai_payload, api_key=api_key)
     ai_messages: List[str] = []
     if not ai_review.get("available", False):
-        error_detail = ai_review.get("error", "AI service unavailable.")
-        ai_messages.append(f"AI fallback active: {error_detail}")
+        error_detail = ai_review.get("error", "Supplementary service unavailable.")
+        ai_messages.append(f"Rule-based fallback active: {error_detail}")
         ai_review = {
             **fallback_review,
             "available": False,
@@ -1899,7 +1898,7 @@ def _render_stock_picker_tab() -> None:
 
     screenable_universe_df = _build_screenable_universe(universe_df)
     _render_universe_overview(universe_df, screenable_universe_df, metadata, snapshot_stale)
-    screener_tabs = st.tabs(["Classic Screen", "AI Query"])
+    screener_tabs = st.tabs(["Classic Screen", "Text Query"])
 
     with screener_tabs[0]:
         filter_col, result_col = st.columns([1.15, 1.85])
@@ -2209,7 +2208,7 @@ def _render_stock_picker_tab() -> None:
                 use_container_width=True,
             )
             if analyze_clicked:
-                with st.spinner("Parsing request and applying AI filters..."):
+                with st.spinner("Parsing request and applying filters..."):
                     parsed = parse_ai_query(query)
                     results, explanation = apply_ai_query(query, screenable_universe_df, parsed_query=parsed)
                     st.session_state["stock_picker_ai_parsed"] = parsed
@@ -2227,7 +2226,7 @@ def _render_stock_picker_tab() -> None:
                     st.json(parsed_payload)
 
             ai_results = st.session_state.get("stock_picker_results_ai", pd.DataFrame())
-            st.markdown("### AI Results")
+            st.markdown("### Query Results")
             if not ai_results.empty:
                 a1, a2, a3 = st.columns(3)
                 a1.metric("Matches", f"{len(ai_results):,}")
@@ -2400,13 +2399,13 @@ def _render_swing_tracker_tab() -> None:
     with swing_tabs[0]:
         st.markdown("### Create New Trade Plan")
 
-        with st.expander("External AI Prompt (Copy/Paste)", expanded=False):
+        with st.expander("External Prompt (Copy/Paste)", expanded=False):
             st.caption(
-                "Generate a structured prompt for any external AI tool. "
+                "Generate a structured prompt for an external tool. "
                 "Paste the JSON answer back and the form fields will auto-fill."
             )
             external_context = st.text_area(
-                "What should the external AI consider?",
+                "What should the external tool consider?",
                 key="swing_external_ai_context",
                 height=100,
                 placeholder=(
@@ -2446,13 +2445,13 @@ def _render_swing_tracker_tab() -> None:
                 st.session_state["swing_external_ai_prompt"] = _build_external_swing_prompt(prompt_context)
 
             st.text_area(
-                "Prompt to copy into external AI",
+                "Prompt to copy into an external tool",
                 key="swing_external_ai_prompt",
                 height=330,
             )
 
             pasted_ai_response = st.text_area(
-                "Paste external AI JSON response",
+                "Paste external JSON response",
                 key="swing_external_ai_response",
                 height=220,
                 placeholder='{"ticker":"AAPL","direction":"long",...}',
@@ -2677,9 +2676,9 @@ def _render_swing_tracker_tab() -> None:
                 fixed_risk_percent=fixed_risk_percent,
             )
 
-        with st.expander("Groq AI Helper (Optional)", expanded=False):
+        with st.expander("Optional Groq Helper", expanded=False):
             if not ai_api_key:
-                st.info("GROQ_API_KEY not found. AI helper is disabled; deterministic flow remains active.")
+                st.info("GROQ_API_KEY not found. The optional helper is disabled; deterministic flow remains active.")
 
             ai1, ai2, ai3 = st.columns(3)
             if ai1.button("Summarize Thesis", key="swing_ai_thesis_btn", use_container_width=True):
@@ -2954,7 +2953,7 @@ def _render_swing_tracker_tab() -> None:
             close_notes = st.text_area("Post-Trade Notes", height=120, key="swing_close_notes")
 
             if st.button(
-                "Summarize Review (AI)",
+                "Summarize Review",
                 key="swing_ai_post_review_btn",
                 use_container_width=True,
             ):
@@ -4161,17 +4160,17 @@ def _render_reports_page(analysis_result: Dict[str, Any]) -> None:
     ai_review = analysis_result["ai_review"]
 
     st.subheader("Reports")
-    report_tabs = st.tabs(["AI Commentary", "Export Center"])
+    report_tabs = st.tabs(["Review Summary", "Export Center"])
 
     with report_tabs[0]:
         if ai_review.get("available", False):
-            st.success("Groq AI review generated successfully.")
+            st.success("Supplementary review generated successfully.")
             if ai_review.get("json_mode_error"):
                 st.caption(f"JSON mode fallback used: {ai_review['json_mode_error']}")
         else:
-            st.info("AI review unavailable. Showing deterministic fallback text.")
+            st.info("Supplementary review unavailable. Showing deterministic fallback text.")
             if ai_review.get("source_detail"):
-                st.error(f"AI detail: {ai_review['source_detail']}")
+                st.error(f"Review detail: {ai_review['source_detail']}")
 
         st.markdown(f"**Summary:** {ai_review.get('summary', '-')}")
         st.markdown(f"**Main Risks:** {ai_review.get('risks', '-')}")
@@ -4179,7 +4178,7 @@ def _render_reports_page(analysis_result: Dict[str, Any]) -> None:
         st.markdown(f"**Final Evaluation:** {ai_review.get('verdict', '-')}")
 
         if ai_review.get("available", False) and ai_review.get("raw_response"):
-            with st.expander("AI raw response", expanded=False):
+            with st.expander("Raw response", expanded=False):
                 st.code(ai_review["raw_response"], language="json")
 
     with report_tabs[1]:

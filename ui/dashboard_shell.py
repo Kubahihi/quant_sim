@@ -29,7 +29,7 @@ PAGE_DESCRIPTIONS = {
     "analysis": "Raw data, models, signals, news, and run-to-run comparison.",
     "portfolio_lab": "Performance charts, optimization, simulations, and asset diagnostics.",
     "workspace": "Stock picker plus portfolio and swing-tracking tools in one hub.",
-    "reports": "AI commentary and export actions in a focused reporting space.",
+    "reports": "Review summary and export actions in a focused reporting space.",
 }
 
 PRESET_PAGES = {

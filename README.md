@@ -4,7 +4,7 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - validace tickeru a vah
 - nacitani trznich dat z Yahoo Finance
 - metriky, score, flagy a rizikovy rozbor
-- AI komentare pres Groq API (OpenAI kompatibilni klient)
+- volitelny doplnkovy komentar pres Groq API
 - export vsech vysledku do vice-strankoveho PDF + CSV + JSON
 
 ## 1) Jak projekt spustit lokalne
@@ -31,7 +31,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Nastaveni GROQ_API_KEY
+### Volitelne nastaveni GROQ_API_KEY
 
 Aplikace nacita API klic v tomto poradi:
 1. `st.secrets["GROQ_API_KEY"]`
@@ -79,15 +79,29 @@ streamlit run ui/streamlit_app.py
 
 1. Nahrajte repozitar do GitHubu.
 2. Ve Streamlit Cloud zvolte repo a soubor `ui/streamlit_app.py`.
-3. Do sekce **Secrets** vlozte:
+3. Do sekce **Secrets** vlozte hodnoty podle `.streamlit/secrets.toml.example`. Pro produkci jsou povinne:
 
 ```toml
-GROQ_API_KEY="gsk_..."
+TURSO_DATABASE_URL = "libsql://your-database.turso.io"
+TURSO_AUTH_TOKEN = "your-turso-auth-token"
+
+[wharton_users]
+Jakub = "strong-unique-password"
+"Matěj" = "strong-unique-password"
+
+[storage]
+STORAGE_BACKEND = "r2"
+R2_BUCKET = "your-r2-bucket"
+R2_ENDPOINT_URL = "https://your-account-id.r2.cloudflarestorage.com"
+R2_ACCESS_KEY_ID = "your-r2-access-key-id"
+R2_SECRET_ACCESS_KEY = "your-r2-secret-access-key"
 ```
 
-4. Deploy.
+4. Nastavte hlavni soubor na `ui/streamlit_app.py` a nasadte aplikaci. Po prvnim spusteni se vytvori sdilena databazova struktura a aktualizuji se role zakladnich uzivatelu.
 
-Poznamka: Pokud klic chybi nebo Groq neodpovi, aplikace bezi dal a pouzije deterministic fallback komentar.
+Vsechny realne hodnoty patri pouze do Streamlit Cloud Secrets. Bez Turso by se prihlaseni a sdilena data po redeployi neuchovala; bez R2 by se neuchovaly nahrane soubory.
+
+Poznamka: Pokud klic chybi nebo Groq neodpovi, aplikace bezi dal a pouzije zakladni komentar podle pravidel.
 
 ### Sdilena online databaze
 
@@ -156,15 +170,11 @@ Kazde pravidlo pridava penalizaci. Vysledkem je:
 - numericke score
 - slovni rating
 - seznam flagu
-- fallback text pouzitelny i bez AI
+- fallback text pouzitelny i bez externi sluzby
 
-## 5) Jak funguje Groq AI vrstva
+## 5) Jak funguje volitelny komentar
 
-Implementace je v `src/ai/ai_review.py`:
-- klient: `from openai import OpenAI`
-- base URL: `https://api.groq.com/openai/v1`
-
-Do AI se posila pouze compact JSON summary:
+Do volitelne sluzby se posila pouze compact JSON summary:
 - tickery
 - vahy
 - agregovane metriky
@@ -172,9 +182,9 @@ Do AI se posila pouze compact JSON summary:
 - flagy
 - kontext (risk profile, horizon)
 
-Do AI se neposilaji raw historicka cenova data.
+Do sluzby se neposilaji raw historicka cenova data.
 
-Pokud AI vrstva selze (chybi klic, timeout, API error), aplikace:
+Pokud volitelna sluzba selze (chybi klic, timeout, API error), aplikace:
 - nespadne
 - vrati deterministic fallback komentare
 - zachova vsechny ostatni vypocty a exporty
@@ -183,7 +193,7 @@ Pokud AI vrstva selze (chybi klic, timeout, API error), aplikace:
 
 Export je v `src/reporting/export.py`:
 - vice-strankovy PDF report (`BytesIO`) pres `matplotlib.backends.backend_pdf.PdfPages`
-- obsahuje: shrnuti, vstupy, metriky, score+flagy, korelace, simulace, grafy, AI rozbor, doporuceni
+- obsahuje: shrnuti, vstupy, metriky, score+flagy, korelace, simulace, grafy a doporuceni
 - grafy jsou vkladane jako obrazky (matplotlib figure)
 - robustni error handling: pri chybe exportu zustava app funkcni
 
@@ -197,8 +207,6 @@ Dostupne exporty v UI:
 ```
 config/
 src/
-  ai/
-    ai_review.py
   analytics/
     portfolio_metrics.py
     scoring.py
@@ -218,7 +226,7 @@ requirements.txt
 ## 8) Poznamky k dalsimu doladeni
 
 - Pridat automatizovane testy (unit/integration) pro scoring, validace vstupu a exporty.
-- Volitelne pridat fallback model switch v AI vrstve.
+- Volitelne pridat fallback model switch pro externi komentar.
 - Volitelne rozsirit data export o ZIP bundle (vice CSV souboru).
 
 ## 9) Modular dashboard vrstva (nove)

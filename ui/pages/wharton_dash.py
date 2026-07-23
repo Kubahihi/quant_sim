@@ -98,8 +98,8 @@ QUANT_OPERATOR_USERS = {"Jakub", "Matfyz_Genius"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
 
 DEFAULT_USERS = [
-    {"username": "Jakub", "role": "Captain/Quant", "primary_module": "Quant Engine"},
-    {"username": "Matěj", "role": "Oxford/CIO", "primary_module": "Dashboard & Strategy"},
+    {"username": "Jakub", "role": "Co-Captain / Quant", "primary_module": "Quant Engine"},
+    {"username": "Matěj", "role": "Co-Captain / Strategy", "primary_module": "Dashboard & Strategy"},
     {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
     {"username": "Lukáš", "role": "Geopolitics", "primary_module": "Macro Intelligence"},
     {"username": "Janek", "role": "Intelligence", "primary_module": "War Room"},
@@ -355,14 +355,18 @@ def init_db() -> None:
             if existing_users.get(user["username"]):
                 stored_hash = existing_users[user["username"]]
                 if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
+                    conn.execute(
+                        "UPDATE wharton_users SET role = ?, primary_module = ? WHERE username = ?",
+                        (user["role"], user["primary_module"], user["username"]),
+                    )
                     continue
                 # Password changed, update it
                 password_hash = bcrypt.hashpw(
                     user_pass.encode("utf-8"), bcrypt.gensalt()
                 ).decode("utf-8")
                 conn.execute(
-                    "UPDATE wharton_users SET password_hash = ? WHERE username = ?",
-                    (password_hash, user["username"])
+                    "UPDATE wharton_users SET password_hash = ?, role = ?, primary_module = ? WHERE username = ?",
+                    (password_hash, user["role"], user["primary_module"], user["username"])
                 )
             else:
                 password_hash = bcrypt.hashpw(
@@ -1078,7 +1082,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
     from src.storage.wharton_adapter import get_storage_backend
     is_local_backend = get_storage_backend().backend_name == "local"
     if is_local_backend:
-        st.error("⚠️ **VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
+        st.error("**VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
 
     if is_local_backend and not _is_development_mode():
         st.error("Uploads are disabled in production when running on local storage to prevent data loss.")
@@ -1224,7 +1228,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 
     with st.expander(" Create New Sub-Project", expanded=False):
         with st.form("wharton_create_subproject_form", clear_on_submit=True):
-            sp_name = st.text_input("Project Name", placeholder="e.g. EU AI Act Impact on ASML")
+            sp_name = st.text_input("Project Name", placeholder="e.g. EU regulation impact on ASML")
             sp_desc = st.text_area("Analysis / Description",
                                    placeholder="Describe scope, methodology, what this covers, key findings...",
                                    height=120)
@@ -1632,16 +1636,16 @@ def _fetch_ai_insight_cached(context_data: dict, prompt_type: str) -> dict:
         api_key = resolve_groq_api_key(st.secrets)
         return generate_advisor_insight(context_data, prompt_type, api_key)
     except ImportError:
-        return {"available": False, "error": "AI Advisor module not found."}
+        return {"available": False, "error": "Supplementary analysis module not found."}
 
 
 def _render_ai_advisor_card(context_data: dict, prompt_type: str) -> None:
-    with st.spinner(" AI Advisor is analyzing..."):
+    with st.spinner("Preparing supplementary analysis..."):
         res = _fetch_ai_insight_cached(context_data, prompt_type)
     if res.get("available") and res.get("insight"):
-        st.info(f"** AI Advisor Insight:**\n\n{res['insight']}")
+        st.info(f"**Supplementary insight:**\n\n{res['insight']}")
     elif not res.get("available"):
-        st.caption(f"AI Insight unavailable: {res.get('error', 'Unknown error')}")
+        st.caption(f"Supplementary insight unavailable: {res.get('error', 'Unknown error')}")
 
 
 def _render_benchmark_analytics(result: dict, advanced: bool) -> None:
@@ -2773,7 +2777,7 @@ def _render_factor_exposure(result: dict) -> None:
         }
     except Exception as e:
         is_synthetic = True
-        st.warning(f"⚠️ **Illustrative / Placeholder — do not cite in report** (Real regression failed: {e})")
+        st.warning(f"**Illustrative / Placeholder — do not cite in report** (Real regression failed: {e})")
         # Generate deterministic synthetic factor loadings based on ticker names for demonstration
         for t, w in zip(tickers, weights):
             seed = sum(ord(c) for c in t)
@@ -3495,7 +3499,7 @@ def _render_stock_screener() -> None:
     except ImportError:
         HAS_PLOTLY = False
 
-    st.caption("Screen stocks using fundamental and technical criteria powered by yfinance.")
+    st.caption("Screen stocks using fundamental and technical criteria from yfinance.")
 
     # Screener inputs
     with st.expander(" Screener Configuration", expanded=True):
@@ -5761,7 +5765,7 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
             no_client_contact = st.checkbox("The team has not contacted the competition client", value=bool(current.get("no_client_contact")))
             no_paid_advisor = st.checkbox("No paid advisor, consultant, or prohibited course has been used", value=bool(current.get("no_paid_advisor")))
             student_owned_work = st.checkbox("Students created the strategy and made the decisions", value=bool(current.get("student_owned_work")))
-            ai_cited = st.checkbox("AI-generated content is cited and is not presented as original student work", value=bool(current.get("ai_cited")))
+            ai_cited = st.checkbox("Generated content is cited and is not presented as original student work", value=bool(current.get("ai_cited")))
             sources_cited = st.checkbox("All sources, images, and media are cited", value=bool(current.get("sources_cited")))
             school_permission = st.checkbox("School authorization on official letterhead is ready", value=bool(current.get("school_permission")))
         save_rules = st.form_submit_button("Save and Recalculate Compliance", type="primary", use_container_width=True)
@@ -5796,10 +5800,10 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
     failed = sum(item["status"] == "fail" for item in checks)
     pending = sum(item["status"] == "pending" for item in checks)
     k1, k2, k3 = st.columns(3)
-    k1.metric("✅ Passed", passed)
-    k2.metric("❌ Failed", failed)
-    k3.metric("🟡 Awaiting Wharton", pending)
-    status_map = {"pass": "✅", "fail": "❌", "pending": "🟡"}
+    k1.metric("Passed", passed)
+    k2.metric("Failed", failed)
+    k3.metric("Awaiting Wharton", pending)
+    status_map = {"pass": "Pass", "fail": "Fail", "pending": "Pending"}
     st.dataframe(pd.DataFrame([
         {"Status": status_map[item["status"]], "Rule": item["rule"], "Exact Check Result": item["detail"]}
         for item in checks
@@ -7481,18 +7485,18 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                 "news": news_rows,
                 "deterministic_track_record": analyze_track_record(info, snapshot.get("history")),
             }
-            with st.spinner("Groq is synthesizing only the supplied evidence…"):
+            with st.spinner("Preparing a synthesis from the supplied evidence…"):
                 st.session_state[ai_key] = generate_company_deep_dive(evidence, api_key)
         ai_result = st.session_state.get(ai_key)
         if isinstance(ai_result, dict):
             if ai_result.get("available"):
-                st.markdown("#### AI Management-History Synthesis")
+                st.markdown("#### Management-History Synthesis")
                 st.write(ai_result.get("management_history") or "Insufficient evidence.")
                 st.markdown("**Investment View**")
                 st.write(ai_result.get("investment_view") or "—")
                 st.caption(ai_result.get("evidence_limitations") or "")
             else:
-                st.warning(f"AI synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
+                st.warning(f"Supplementary synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
 
     with moat_tab:
         moat = analyze_moat(info)
@@ -7502,7 +7506,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
         label_col.metric("Result", moat["label"])
         st.caption(moat["warning"])
         st.dataframe(pd.DataFrame([{
-            "Status": "✅" if signal["passed"] else "❌", "Area": signal["name"], "Evidence": signal["evidence"],
+            "Status": "Pass" if signal["passed"] else "Fail", "Area": signal["name"], "Evidence": signal["evidence"],
         } for signal in moat["signals"]]), use_container_width=True, hide_index=True)
         success_col, failure_col = st.columns(2)
         with success_col:

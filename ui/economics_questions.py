@@ -66,7 +66,7 @@ TEXT: Dict[str, Dict[str, str]] = {
         "review_list": "Questions to revisit",
         "start_review_quiz": "Start retry quiz",
         "review_history": "Recent incorrect attempts",
-        "create_caption": "Add manual custom questions (same format as AI questions).",
+        "create_caption": "Add manual custom questions in the same format as generated questions.",
         "topic": "Topic",
         "difficulty": "Difficulty",
         "correct_option": "Correct option",
@@ -84,11 +84,11 @@ TEXT: Dict[str, Dict[str, str]] = {
         "ai_count": "Number of generated questions",
         "ai_focus": "Topic focus hint (optional)",
         "ai_generate": "Generate questions with Groq",
-        "ai_success": "New AI questions were generated and stored.",
+        "ai_success": "New questions were generated and stored.",
         "ai_error": "Groq generation failed",
         "ai_preview": "Generated questions preview",
         "ai_json_fallback": "JSON mode fallback",
-        "ai_raw": "Raw AI response",
+        "ai_raw": "Raw generated response",
         "source_all": "all",
     },
     "cs": {
@@ -135,7 +135,7 @@ TEXT: Dict[str, Dict[str, str]] = {
         "review_list": "Otazky k opakovani",
         "start_review_quiz": "Spustit opakovaci kviz",
         "review_history": "Nedavne chybne pokusy",
-        "create_caption": "Pridani vlastnich otazek se stejnym modelem jako AI.",
+        "create_caption": "Pridani vlastnich otazek ve stejnem formatu jako generovane otazky.",
         "topic": "Tema",
         "difficulty": "Obtiznost",
         "correct_option": "Spravna moznost",
@@ -153,11 +153,11 @@ TEXT: Dict[str, Dict[str, str]] = {
         "ai_count": "Pocet generovanych otazek",
         "ai_focus": "Hint na tematicky fokus (volitelne)",
         "ai_generate": "Generovat otazky pres Groq",
-        "ai_success": "Nove AI otazky byly vygenerovany a ulozeny.",
+        "ai_success": "Nove otazky byly vygenerovany a ulozeny.",
         "ai_error": "Generovani pres Groq selhalo",
         "ai_preview": "Nahled vygenerovanych otazek",
         "ai_json_fallback": "Fallback bez JSON modu",
-        "ai_raw": "Raw AI odpoved",
+        "ai_raw": "Raw generovana odpoved",
         "source_all": "vse",
     },
 }
@@ -313,8 +313,8 @@ def _difficulty_labels(language: str) -> Dict[str, str]:
 
 def _source_labels(language: str) -> Dict[str, str]:
     if language == "cs":
-        return {"all": "vse", "ai": "AI", "custom": "vlastni"}
-    return {"all": "all", "ai": "AI", "custom": "custom"}
+        return {"all": "vse", "ai": "generovane", "custom": "vlastni"}
+    return {"all": "all", "ai": "generated", "custom": "custom"}
 
 
 def _format_option(index: int, option: str) -> str:
