@@ -65,6 +65,19 @@ def test_percentile_paths_validates_shape_and_bounds():
         calculate_percentile_paths(np.ones((2, 3)), percentiles=[101])
 
 
+def test_batched_percentile_paths_match_individual_percentiles_exactly():
+    paths = np.random.default_rng(123).lognormal(size=(31, 257))
+    percentiles = [5, 25, 50, 75, 95]
+
+    result = calculate_percentile_paths(paths, percentiles=percentiles)
+
+    for percentile in percentiles:
+        assert np.array_equal(
+            result[f"p{percentile}"].to_numpy(),
+            np.percentile(paths, percentile, axis=1),
+        )
+
+
 def test_seeded_advanced_monte_carlo_is_reproducible_without_global_rng_side_effects():
     np.random.seed(777)
     expected_global_draw = np.random.random(3)
@@ -102,6 +115,64 @@ def test_seeded_advanced_monte_carlo_is_reproducible_without_global_rng_side_eff
     assert "relative_standard_error_mean" in stats_a
     assert "expected_shortfall_95_loss" in stats_a
     assert stats_a["realized_average_jumps_per_path"] >= 0.0
+
+
+def test_optimized_advanced_paths_match_direct_merton_reference_exactly():
+    current_value = 25_000.0
+    expected_return = 0.06
+    volatility = 0.21
+    time_horizon = 40
+    n_simulations = 300
+    jump_intensity = 2.5
+    jump_mean = -0.03
+    jump_volatility = 0.09
+    random_seed = 818
+
+    rng = np.random.default_rng(random_seed)
+    dt = 1.0 / 252.0
+    jump_compensator = jump_intensity * (
+        np.exp(jump_mean + 0.5 * jump_volatility**2) - 1.0
+    )
+    drift = (expected_return - 0.5 * volatility**2 - jump_compensator) * dt
+    diffusion = volatility * np.sqrt(dt)
+    diffusion_returns = drift + diffusion * rng.standard_normal(
+        (time_horizon, n_simulations)
+    )
+    n_jumps = rng.poisson(
+        jump_intensity * dt,
+        (time_horizon, n_simulations),
+    )
+    jump_returns = np.zeros_like(diffusion_returns)
+    jump_mask = n_jumps > 0
+    jump_returns[jump_mask] = rng.normal(
+        n_jumps[jump_mask] * jump_mean,
+        np.sqrt(n_jumps[jump_mask]) * jump_volatility,
+    )
+    reference_paths = current_value * np.exp(
+        np.vstack(
+            [
+                np.zeros(n_simulations),
+                np.cumsum(diffusion_returns + jump_returns, axis=0),
+            ]
+        )
+    )
+
+    optimized_paths, statistics = run_advanced_monte_carlo_simulation(
+        current_value=current_value,
+        expected_return=expected_return,
+        volatility=volatility,
+        time_horizon=time_horizon,
+        n_simulations=n_simulations,
+        jump_intensity=jump_intensity,
+        jump_mean=jump_mean,
+        jump_volatility=jump_volatility,
+        random_seed=random_seed,
+    )
+
+    assert np.array_equal(optimized_paths, reference_paths)
+    assert statistics["realized_average_jumps_per_path"] == pytest.approx(
+        np.mean(np.sum(n_jumps, axis=0))
+    )
 
 
 @pytest.mark.parametrize(

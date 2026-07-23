@@ -102,6 +102,13 @@ QUANT_MODULES = [
 QUANT_OPERATOR_USERS = {"Jakub", "Matfyz_Genius"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
 
+
+def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str, np.ndarray]:
+    """Calculate all requested path percentiles in one partitioning pass."""
+    values = np.percentile(paths, percentiles, axis=1)
+    return {f"p{percentile}": values[index] for index, percentile in enumerate(percentiles)}
+
+
 DEFAULT_USERS = [
     {"username": "Jakub", "role": "Co-Captain / Quant", "primary_module": "Quant Engine"},
     {"username": "Matěj", "role": "Co-Captain / Strategy", "primary_module": "Dashboard & Strategy"},
@@ -1768,7 +1775,7 @@ def _render_simulation(result: dict, advanced: bool) -> None:
     r[2].metric("5th Percentile", f"${stats['percentile_5']:,.0f}")
     r[3].metric("95th Percentile", f"${stats['percentile_95']:,.0f}")
 
-    pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+    pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
     st.markdown("#### Percentile Paths")
     st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
@@ -2153,7 +2160,7 @@ def _render_monte_carlo(result: dict) -> None:
         # Fan chart with percentile bands
         st.markdown("#### Percentile Fan Chart")
         percentiles = [5, 10, 25, 50, 75, 90, 95]
-        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        pctl_data = _percentile_path_map(paths, percentiles)
         days = list(range(len(pctl_data["p50"])))
 
         fig_fan = go.Figure()
@@ -2242,7 +2249,7 @@ def _render_monte_carlo(result: dict) -> None:
                 showlegend=False,
             ))
         fig_paths.add_trace(go.Scatter(
-            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            x=list(range(paths.shape[0])), y=pctl_data["p50"].tolist(),
             mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
         ))
         fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
@@ -2254,7 +2261,7 @@ def _render_monte_carlo(result: dict) -> None:
         st.plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
-        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
         st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
@@ -2312,7 +2319,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         # Fan chart with percentile bands
         st.markdown("#### Percentile Fan Chart")
         percentiles = [5, 10, 25, 50, 75, 90, 95]
-        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        pctl_data = _percentile_path_map(paths, percentiles)
         days = list(range(len(pctl_data["p50"])))
 
         fig_fan = go.Figure()
@@ -2401,7 +2408,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
                 showlegend=False,
             ))
         fig_paths.add_trace(go.Scatter(
-            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            x=list(range(paths.shape[0])), y=pctl_data["p50"].tolist(),
             mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
         ))
         fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
@@ -2413,7 +2420,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         st.plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
-        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
         st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "

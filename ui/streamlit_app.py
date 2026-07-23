@@ -432,14 +432,13 @@ def _build_ai_payload(
 
 def _create_simulation_percentiles(price_paths: np.ndarray) -> pd.DataFrame:
     days = np.arange(price_paths.shape[0])
-    return pd.DataFrame({
-        "day": days,
-        "p5": np.percentile(price_paths, 5, axis=1),
-        "p25": np.percentile(price_paths, 25, axis=1),
-        "p50": np.percentile(price_paths, 50, axis=1),
-        "p75": np.percentile(price_paths, 75, axis=1),
-        "p95": np.percentile(price_paths, 95, axis=1),
-    })
+    percentile_values = np.percentile(price_paths, (5, 25, 50, 75, 95), axis=1)
+    result = pd.DataFrame(
+        percentile_values.T,
+        columns=["p5", "p25", "p50", "p75", "p95"],
+    )
+    result.insert(0, "day", days)
+    return result
 
 
 def _model_signals_from_outputs(model_outputs: Dict[str, Any]) -> Dict[str, float]:
