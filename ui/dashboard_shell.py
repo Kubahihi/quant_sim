@@ -7,18 +7,18 @@ import streamlit as st
 
 PAGE_ORDER = [
     "overview",
+    "portfolio_lab",
     "cockpit",
     "analysis",
-    "portfolio_lab",
     "workspace",
     "reports",
 ]
 
 PAGE_LABELS = {
     "overview": "01  Overview",
-    "cockpit": "02  Stress testing",
-    "analysis": "03  Research",
-    "portfolio_lab": "04  Portfolio lab",
+    "portfolio_lab": "02  Portfolio lab",
+    "cockpit": "03  Stress testing",
+    "analysis": "04  Research",
     "workspace": "05  Workspace",
     "reports": "06  Reports",
 }
@@ -33,8 +33,8 @@ PAGE_DESCRIPTIONS = {
 }
 
 PRESET_PAGES = {
-    "Focused": ["overview", "reports"],
-    "Research": ["overview", "cockpit", "analysis", "portfolio_lab", "reports"],
+    "Focused": ["overview", "portfolio_lab", "reports"],
+    "Research": ["overview", "portfolio_lab", "cockpit", "analysis", "reports"],
     "Workspace": ["overview", "workspace", "reports"],
     "Full": PAGE_ORDER,
 }
@@ -263,6 +263,47 @@ def inject_dashboard_styles() -> None:
         }
 
         div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+            color: var(--qp-accent);
+            background: var(--qp-accent-soft);
+        }
+
+        .qp-page-nav-header {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 1.15rem 0 0.65rem;
+        }
+
+        .qp-page-nav-header strong {
+            display: block;
+            color: var(--qp-ink);
+            font-size: 1rem;
+        }
+
+        .qp-page-nav-header span {
+            color: var(--qp-muted);
+            font-size: 0.82rem;
+        }
+
+        .st-key-dashboard_active_page [role="radiogroup"] {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            padding: 0.42rem;
+            border: 1px solid var(--qp-line);
+            border-radius: var(--qp-radius);
+            background: rgba(255, 255, 255, 0.86);
+        }
+
+        .st-key-dashboard_active_page [role="radiogroup"] label {
+            min-height: 2.45rem;
+            padding: 0.45rem 0.7rem;
+            border-radius: 9px;
+            transition: background 120ms ease, color 120ms ease;
+        }
+
+        .st-key-dashboard_active_page [role="radiogroup"] label:has(input:checked) {
             color: var(--qp-accent);
             background: var(--qp-accent-soft);
         }

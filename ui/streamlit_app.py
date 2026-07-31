@@ -34,7 +34,9 @@ for module_name, module_obj in list(sys.modules.items()):
 from src.auth.manager import login_user
 from ui.economics_questions import render_economics_questions_section
 from ui.dashboard_shell import (
+    PAGE_DESCRIPTIONS,
     PAGE_LABELS,
+    PAGE_ORDER,
     DashboardPreferences,
     inject_dashboard_styles,
     render_dashboard_preferences,
@@ -4287,23 +4289,44 @@ def _render_modular_dashboard(
     for ai_message in analysis_result.get("ai_messages", []):
         st.info(ai_message)
 
-    page_keys = [key for key in PAGE_LABELS if key in preferences.visible_pages]
-    page_tabs = st.tabs([PAGE_LABELS[key] for key in page_keys])
+    page_keys = [key for key in PAGE_ORDER if key in preferences.visible_pages]
+    active_page_key = "dashboard_active_page"
+    if st.session_state.get(active_page_key) not in page_keys:
+        st.session_state[active_page_key] = page_keys[0]
 
-    for tab, page_key in zip(page_tabs, page_keys, strict=False):
-        with tab:
-            if page_key == "overview":
-                _render_overview_page(analysis_result)
-            elif page_key == "cockpit":
-                _render_decision_cockpit_page(analysis_result)
-            elif page_key == "analysis":
-                _render_analysis_lab_page(analysis_result, preferences.show_raw_tables)
-            elif page_key == "portfolio_lab":
-                _render_portfolio_lab_page(analysis_result)
-            elif page_key == "workspace":
-                _render_workspace_hub(analysis_result)
-            elif page_key == "reports":
-                _render_reports_page(analysis_result)
+    st.markdown(
+        """
+        <div class="qp-page-nav-header">
+            <div>
+                <strong>Analysis workspace</strong>
+                <span>Move from the headline result to the detail you need.</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    page_key = st.radio(
+        "Analysis workspace",
+        options=page_keys,
+        format_func=lambda key: PAGE_LABELS[key],
+        horizontal=True,
+        label_visibility="collapsed",
+        key=active_page_key,
+    )
+    st.caption(PAGE_DESCRIPTIONS[page_key])
+
+    if page_key == "overview":
+        _render_overview_page(analysis_result)
+    elif page_key == "cockpit":
+        _render_decision_cockpit_page(analysis_result)
+    elif page_key == "analysis":
+        _render_analysis_lab_page(analysis_result, preferences.show_raw_tables)
+    elif page_key == "portfolio_lab":
+        _render_portfolio_lab_page(analysis_result)
+    elif page_key == "workspace":
+        _render_workspace_hub(analysis_result)
+    elif page_key == "reports":
+        _render_reports_page(analysis_result)
 
 
 if "analysis_result" not in st.session_state:
@@ -4332,7 +4355,7 @@ with st.sidebar:
             help="Enter one weight per ticker. Leave empty to use equal weights.",
         )
 
-    with st.expander("2  Analysis assumptions", expanded=True):
+    with st.expander("2  Market & risk assumptions", expanded=False):
         start_date = st.date_input(
             "Start date",
             value=(datetime.now() - timedelta(days=365 * 2)).date(),

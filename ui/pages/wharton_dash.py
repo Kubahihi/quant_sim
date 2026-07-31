@@ -79,6 +79,50 @@ COMPANY_ANALYSIS_KEY = "wharton_company_analysis_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
 HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
 
+COCKPIT_AREAS = {
+    "Home": ("Overview & Tasks", "Competition Readiness", "Assignment & Rules"),
+    "Portfolio": ("Strategy & Decisions", "Portfolio Tracker"),
+    "Research": ("Company Analysis", "Stock Screener"),
+    "Risk & Quant": ("Quant Engine", "Risk Cockpit", "Factor Exposure", "Regime Detection"),
+    "Scenarios": (
+        "Scenario Playground",
+        "Efficient Frontier",
+        "Monte Carlo",
+        "Advanced Monte Carlo",
+        "Advanced Analytics",
+    ),
+    "Teamspace": ("Mind Map", "Sub-Projects", "War Room", "File Vault"),
+}
+
+COCKPIT_AREA_DESCRIPTIONS = {
+    "Home": "Daily priorities, responsibilities, rules, and readiness checks.",
+    "Portfolio": "Turn the mandate into positions, decisions, and monitored theses.",
+    "Research": "Move from company evidence and screening to an investable shortlist.",
+    "Risk & Quant": "Run the analytical engine and inspect portfolio risk, factors, and regimes.",
+    "Scenarios": "Explore shocks, portfolio construction, and probabilistic outcomes.",
+    "Teamspace": "Coordinate projects and shared working material.",
+}
+
+COCKPIT_PANEL_DESCRIPTIONS = {
+    "Overview & Tasks": "Start here for the team's current workload and immediate priorities.",
+    "Competition Readiness": "Close strategy, evidence, governance, report, and pitch gaps before submission.",
+    "Assignment & Rules": "Keep competition requirements and team readiness in one place.",
+    "Strategy & Decisions": "Document the mandate, strategy, theses, catalysts, and decisions.",
+    "Portfolio Tracker": "Track positions, performance, ownership, and reconciliation.",
+    "Company Analysis": "Review company evidence, regions, financials, management, moat, and valuation.",
+    "Stock Screener": "Filter and rank the investable universe before deeper research.",
+    "Quant Engine": "Configure and run the shared analytical pipeline.",
+    "Risk Cockpit": "Inspect portfolio-level risk signals and concentrations.",
+    "Factor Exposure": "Understand systematic drivers behind portfolio behavior.",
+    "Regime Detection": "Review the current market-state classification and evidence.",
+    "Scenario Playground": "Apply explicit shocks and compare portfolio responses.",
+    "Efficient Frontier": "Compare the current portfolio with optimized alternatives.",
+    "Monte Carlo": "Review baseline probabilistic portfolio paths and tail outcomes.",
+    "Advanced Monte Carlo": "Add jumps and richer distribution assumptions.",
+    "Advanced Analytics": "Open specialist diagnostics after the core review.",
+    "Sub-Projects": "Organize focused workstreams and their supporting material.",
+}
+
 TASK_PRIORITIES = ["Critical", "High", "Medium", "Low"]
 TASK_PRIORITY_COLORS = {
     "Critical": "#dc2626",
@@ -157,6 +201,7 @@ def init_db() -> None:
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
+        from src.portfolio_tracker.competition_audit import init_competition_audit_tables
         from src.portfolio_tracker.governance_store import init_governance_tables
         from src.portfolio_tracker.strategy_store import init_strategy_tables
 
@@ -165,6 +210,7 @@ def init_db() -> None:
         init_macro_snapshot_table(conn)
         init_strategy_tables(conn)
         init_governance_tables(conn)
+        init_competition_audit_tables(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
@@ -595,6 +641,31 @@ def _inject_cockpit_styles() -> None:
             border:1px solid #e3e8ef; border-radius:14px;
             padding:1rem 1.15rem; background:#fff; margin-bottom:1rem;
             box-shadow:0 4px 16px rgba(27,39,54,0.04);
+        }
+        .wharton-nav-panel {
+            display:flex;
+            align-items:flex-start;
+            justify-content:space-between;
+            gap:1rem;
+            padding:0.95rem 1.1rem;
+            margin:0.2rem 0 1rem;
+            border:1px solid #dce5ec;
+            border-left:4px solid #167d78;
+            border-radius:14px;
+            background:linear-gradient(90deg,#f0faf8 0%,rgba(255,255,255,0.94) 72%);
+        }
+        .wharton-nav-panel strong {
+            display:block;
+            color:#17202e;
+            font-size:1rem;
+            letter-spacing:-0.015em;
+        }
+        .wharton-nav-panel span {
+            display:block;
+            margin-top:0.2rem;
+            color:#64748b;
+            font-size:0.84rem;
+            line-height:1.45;
         }
         .wharton-section-kicker {
             color:#0f766e; text-transform:uppercase; letter-spacing:0.12em;
@@ -2781,8 +2852,8 @@ def _render_risk_cockpit(result: dict) -> None:
 
 
 def _render_factor_exposure(result: dict) -> None:
-    """Tier 1: Factor Exposure Analysis (Fama-French proxies)"""
-    st.markdown("###  Factor Exposure Analysis")
+    """Estimate transparent tradable-ETF proxy exposures with inference."""
+    st.markdown("### Factor Exposure Analysis")
     
     try:
         import plotly.graph_objects as go
@@ -2800,11 +2871,14 @@ def _render_factor_exposure(result: dict) -> None:
         st.warning("No portfolio data found.")
         return
 
-    st.markdown("This analysis maps your portfolio against classical Fama-French and Smart Beta factors.")
+    st.markdown(
+        "This is a **tradable ETF proxy model**, not an academic Fama–French replication. "
+        "Style factors are ETF-minus-market spreads and inference uses HAC standard errors."
+    )
 
     factors = ["Market (Beta)", "Size (SMB)", "Value (HML)", "Momentum (MOM)", "Quality (QAL)", "Low Vol (VOL)"]
-    portfolio_factors = {f: 0.0 for f in factors}
-    is_synthetic = False
+    portfolio_factors: dict[str, float] = {}
+    inference_rows: list[dict[str, Any]] = []
 
     try:
         start_date_str = result.get("inputs", {}).get("start_date")
@@ -2849,46 +2923,43 @@ def _render_factor_exposure(result: dict) -> None:
             raise ValueError(f"Not enough aligned data points for OLS (only {len(aligned)} days).")
 
         import statsmodels.api as sm
-        available_etfs = [s for s in etf_symbols if s in aligned.columns]
-        if not available_etfs:
-            raise ValueError("None of the factor ETFs are present in the aligned dataset.")
-        X = aligned[available_etfs]
+        missing_etfs = [symbol for symbol in etf_symbols if symbol not in aligned.columns]
+        if missing_etfs:
+            raise ValueError(f"Missing proxy series: {', '.join(missing_etfs)}")
+        X = pd.DataFrame({
+            "Market (Beta)": aligned["SPY"],
+            "Size (SMB)": aligned["IWN"] - aligned["SPY"],
+            "Value (HML)": aligned["IWD"] - aligned["SPY"],
+            "Momentum (MOM)": aligned["MTUM"] - aligned["SPY"],
+            "Quality (QAL)": aligned["QUAL"] - aligned["SPY"],
+            "Low Vol (VOL)": aligned["USMV"] - aligned["SPY"],
+        }, index=aligned.index)
         X = sm.add_constant(X)
         y = aligned.iloc[:, 0]
-        model = sm.OLS(y, X).fit()
-
-        portfolio_factors = {
-            "Market (Beta)": float(model.params.get("SPY", 0.0)),
-            "Size (SMB)": float(model.params.get("IWN", 0.0)),
-            "Value (HML)": float(model.params.get("IWD", 0.0)),
-            "Momentum (MOM)": float(model.params.get("MTUM", 0.0)),
-            "Quality (QAL)": float(model.params.get("QUAL", 0.0)),
-            "Low Vol (VOL)": float(model.params.get("USMV", 0.0)),
-        }
+        model = sm.OLS(y, X).fit(cov_type="HAC", cov_kwds={"maxlags": 5})
+        portfolio_factors = {factor: float(model.params[factor]) for factor in factors}
+        confidence = model.conf_int(alpha=0.05)
+        inference_rows = [{
+            "Factor": factor,
+            "Loading": float(model.params[factor]),
+            "HAC p-value": float(model.pvalues[factor]),
+            "95% CI low": float(confidence.loc[factor, 0]),
+            "95% CI high": float(confidence.loc[factor, 1]),
+        } for factor in factors]
+        st.caption(
+            f"Observations: {int(model.nobs)} · adjusted R²: {float(model.rsquared_adj):.3f} · "
+            f"annualized intercept: {float(model.params['const']) * 252:.2%}."
+        )
     except Exception as e:
-        is_synthetic = True
-        st.warning(f"**Illustrative / Placeholder — do not cite in report** (Real regression failed: {e})")
-        # Generate deterministic synthetic factor loadings based on ticker names for demonstration
-        for t, w in zip(tickers, weights):
-            seed = sum(ord(c) for c in t)
-            np.random.seed(seed)
-            if t in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
-                t_factors = [1.1, -0.2, -0.6, 0.8, 0.9, 0.1]
-            elif t in ["BTC", "ETH", "COIN", "MSTR"]:
-                t_factors = [1.5, 0.5, -0.8, 0.9, -0.5, -0.9]
-            elif t in ["BIL", "SHY", "TLT", "IEF"]:
-                t_factors = [0.1, 0.0, 0.5, 0.0, 0.8, 0.9]
-            else:
-                t_factors = np.random.normal(0, 0.5, len(factors))
-                t_factors = np.clip(t_factors, -1, 1.5)
-            for i, f in enumerate(factors):
-                portfolio_factors[f] += t_factors[i] * w
-        np.random.seed(None)
+        st.error(f"Factor regression unavailable: {e}")
+        st.info("No placeholder or synthetic loadings are shown. Re-run when aligned portfolio and proxy data are available.")
+        return
     
     _render_ai_advisor_card(
         context_data={"factor_exposures": portfolio_factors},
         prompt_type="factor_exposure"
     )
+    st.dataframe(pd.DataFrame(inference_rows), hide_index=True, use_container_width=True)
 
     if HAS_PLOTLY:
         c1, c2 = st.columns([2, 1])
@@ -4056,6 +4127,46 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 value=float(current.get("liquidity_need_pct") or 0.0) * 100.0, step=1.0,
             )
             base_currency = st.text_input("Base currency", value=str(current.get("base_currency") or "USD"))
+        policy1, policy2, policy3 = st.columns(3)
+        with policy1:
+            capacity_options = ["Not specified", "Low", "Moderate", "High"]
+            saved_capacity = str(current.get("risk_capacity") or "Not specified")
+            risk_capacity = st.selectbox(
+                "Risk capacity",
+                capacity_options,
+                index=capacity_options.index(saved_capacity) if saved_capacity in capacity_options else 0,
+                help="Financial ability to absorb loss; keep separate from willingness to take risk.",
+            )
+        with policy2:
+            max_tolerated_drawdown = st.number_input(
+                "Maximum tolerated drawdown (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(current.get("max_tolerated_drawdown") or 0.0) * 100.0,
+                step=1.0,
+            )
+        with policy3:
+            policy_benchmark = st.text_input(
+                "Policy benchmark",
+                value=str(current.get("policy_benchmark") or ""),
+                help="Example: 70% ACWI / 30% Bloomberg US Aggregate.",
+            )
+        drawdown_response = st.text_area(
+            "Expected client behavior and portfolio response during a drawdown",
+            value=str(current.get("drawdown_response") or ""),
+            height=75,
+        )
+        total_financial_picture = st.text_area(
+            "Client total financial picture",
+            value=str(current.get("total_financial_picture") or ""),
+            height=75,
+            help="Operating assets, liabilities, income needs, outside investments, and relevant concentrations.",
+        )
+        policy_benchmark_rationale = st.text_area(
+            "Why this benchmark matches the client's goals and constraints",
+            value=str(current.get("policy_benchmark_rationale") or ""),
+            height=75,
+        )
         mandate_summary = st.text_area(
             "Mandate summary and explicit assumptions",
             value=str(current.get("mandate_summary") or ""),
@@ -4121,6 +4232,12 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "client_name": client_name.strip(),
                 "case_status": case_status,
                 "risk_tolerance": risk_tolerance,
+                "risk_capacity": risk_capacity,
+                "max_tolerated_drawdown": float(max_tolerated_drawdown) / 100.0,
+                "drawdown_response": drawdown_response.strip(),
+                "total_financial_picture": total_financial_picture.strip(),
+                "policy_benchmark": policy_benchmark.strip(),
+                "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
                 "horizon_years": float(horizon_years),
                 "liquidity_need_pct": float(liquidity_need_pct) / 100.0,
                 "base_currency": base_currency.strip().upper() or "USD",
@@ -4136,6 +4253,12 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
             payload.update({
                 "case_status": case_status,
                 "risk_tolerance": risk_tolerance,
+                "risk_capacity": risk_capacity,
+                "max_tolerated_drawdown": float(max_tolerated_drawdown) / 100.0,
+                "drawdown_response": drawdown_response.strip(),
+                "total_financial_picture": total_financial_picture.strip(),
+                "policy_benchmark": policy_benchmark.strip(),
+                "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
                 "mandate_summary": mandate_summary.strip(),
                 "values_constraints_text": values_constraints.strip(),
             })
@@ -4487,6 +4610,24 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
                 help="Tags are checked against required tags in the Client Mandate.",
             )
         investment_thesis = st.text_area("Core investment thesis", value=str(current.get("investment_thesis") or ""), height=100)
+        role1, role2 = st.columns(2)
+        with role1:
+            portfolio_role = st.text_input(
+                "Portfolio role",
+                value=str(current.get("portfolio_role") or ""),
+                help="Why this security belongs in the portfolio: compounder, diversifier, income, catalyst, etc.",
+            )
+        with role2:
+            why_now = st.text_input("Why now / timing", value=str(current.get("why_now") or ""))
+        driver1, driver2 = st.columns(2)
+        with driver1:
+            value_drivers = st.text_area(
+                "Value drivers (one per line)", value="\n".join(current.get("value_drivers", [])), height=85,
+            )
+        with driver2:
+            monitoring_kpis = st.text_area(
+                "Monitoring KPIs (one per line)", value="\n".join(current.get("monitoring_kpis", [])), height=85,
+            )
         s1, s2, s3 = st.columns(3)
         with s1:
             bear_case = st.text_area("Bear case", value=str(current.get("bear_case") or ""), height=100)
@@ -4500,6 +4641,25 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
             "Observable thesis-invalidation condition",
             value=str(current.get("invalidation") or ""), height=80,
         )
+        counter_thesis = st.text_area(
+            "Strongest counter-thesis",
+            value=str(current.get("counter_thesis") or ""),
+            height=80,
+            help="State the best evidence-based case against owning the security.",
+        )
+        saved_fair_values = current.get("fair_value_scenarios", {}) if isinstance(current.get("fair_value_scenarios"), dict) else {}
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
+            bear_fair_value = st.number_input("Bear fair value", min_value=0.0, value=float(saved_fair_values.get("bear") or 0.0), step=1.0)
+        with v2:
+            base_fair_value = st.number_input("Base fair value", min_value=0.0, value=float(saved_fair_values.get("base") or 0.0), step=1.0)
+        with v3:
+            bull_fair_value = st.number_input("Bull fair value", min_value=0.0, value=float(saved_fair_values.get("bull") or 0.0), step=1.0)
+        with v4:
+            margin_of_safety = st.number_input(
+                "Margin of safety (%)", min_value=0.0, max_value=100.0,
+                value=float(current.get("margin_of_safety") or 0.0) * 100.0, step=1.0,
+            )
         save_thesis = st.form_submit_button("Save Thesis Monitor", type="primary", use_container_width=True)
     if save_thesis:
         payload = {
@@ -4511,10 +4671,21 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
             "tags": [item.strip().lower() for item in holding_tags.replace(";", ",").split(",") if item.strip()],
             "review_date": review_date.isoformat(),
             "investment_thesis": investment_thesis.strip(),
+            "portfolio_role": portfolio_role.strip(),
+            "why_now": why_now.strip(),
+            "value_drivers": [item.strip() for item in value_drivers.splitlines() if item.strip()],
+            "monitoring_kpis": [item.strip() for item in monitoring_kpis.splitlines() if item.strip()],
             "bear_case": bear_case.strip(), "base_case": base_case.strip(), "bull_case": bull_case.strip(),
             "catalysts": [item.strip() for item in catalysts.splitlines() if item.strip()],
             "risks": [item.strip() for item in risks.splitlines() if item.strip()],
             "invalidation": invalidation.strip(),
+            "counter_thesis": counter_thesis.strip(),
+            "fair_value_scenarios": {
+                "bear": float(bear_fair_value) if bear_fair_value > 0 else None,
+                "base": float(base_fair_value) if base_fair_value > 0 else None,
+                "bull": float(bull_fair_value) if bull_fair_value > 0 else None,
+            },
+            "margin_of_safety": float(margin_of_safety) / 100.0 if margin_of_safety > 0 else None,
             "updated_by": str(profile["username"]),
         }
         with get_connection() as conn:
@@ -4537,7 +4708,11 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
     for ticker in tickers:
         item = thesis_by_ticker.get(ticker, {})
         payload = _strategy_payload(item)
-        required = ["sector", "primary_goal", "investment_thesis", "bear_case", "base_case", "bull_case", "invalidation", "review_date"]
+        required = [
+            "sector", "primary_goal", "portfolio_role", "why_now", "investment_thesis",
+            "value_drivers", "monitoring_kpis", "bear_case", "base_case", "bull_case",
+            "counter_thesis", "invalidation", "fair_value_scenarios", "review_date",
+        ]
         completeness = sum(bool(payload.get(field)) for field in required) / len(required)
         review_text = str(payload.get("review_date") or "")
         try:
@@ -7734,6 +7909,262 @@ def _render_custom_quant_context(result: dict[str, Any]) -> None:
         )
 
 
+def _render_cockpit_navigation(profile: dict[str, Any], visible_labels: list[str]) -> str:
+    """Render compact two-level navigation and return the selected panel."""
+    visible_set = set(visible_labels)
+    available_areas = [
+        area
+        for area, labels in COCKPIT_AREAS.items()
+        if any(label in visible_set for label in labels)
+    ]
+    area_key = "wharton_active_area_v2"
+    panel_key = "wharton_active_panel_v2"
+
+    if st.session_state.get(area_key) not in available_areas:
+        st.session_state[area_key] = available_areas[0]
+
+    area_col, panel_col = st.columns([1.0, 1.55])
+    with area_col:
+        active_area = st.selectbox(
+            "Workspace area",
+            options=available_areas,
+            key=area_key,
+            help="Choose a stage of the team's workflow.",
+        )
+
+    panels = [
+        label
+        for label in COCKPIT_AREAS[active_area]
+        if label in visible_set
+    ]
+    preferred_panel = str(profile.get("primary_module") or "")
+    if st.session_state.get(panel_key) not in panels:
+        st.session_state[panel_key] = (
+            preferred_panel if preferred_panel in panels else panels[0]
+        )
+
+    with panel_col:
+        active_panel = st.selectbox(
+            "Active panel",
+            options=panels,
+            key=panel_key,
+            help="Only the selected panel is loaded, keeping the cockpit focused and fast.",
+        )
+
+    area_description = COCKPIT_AREA_DESCRIPTIONS.get(active_area, "")
+    panel_description = COCKPIT_PANEL_DESCRIPTIONS.get(active_panel, area_description)
+    st.markdown(
+        (
+            '<div class="wharton-nav-panel">'
+            '<div>'
+            f'<div class="wharton-section-kicker">{escape(active_area)}</div>'
+            f'<strong>{escape(active_panel)}</strong>'
+            f'<span>{escape(panel_description)}</span>'
+            '</div>'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+    return active_panel
+
+
+def _render_competition_readiness(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.competition_audit import (
+        append_ai_usage,
+        append_red_team_review,
+        list_ai_usage,
+        list_red_team_reviews,
+    )
+    from src.portfolio_tracker.competition_readiness import (
+        build_competition_readiness,
+        build_pitch_question_bank,
+        generate_competition_brief,
+    )
+    from src.portfolio_tracker.governance_store import (
+        list_catalyst_events,
+        list_decision_reviews,
+        list_research_sources,
+        list_thesis_reviews,
+    )
+
+    data = _load_strategy_workspace_data()
+    with get_connection() as conn:
+        sources = list_research_sources(conn)
+        catalysts = list_catalyst_events(conn)
+        thesis_reviews = list_thesis_reviews(conn)
+        decision_reviews = list_decision_reviews(conn)
+        red_team_reviews = list_red_team_reviews(conn)
+        ai_usage = list_ai_usage(conn)
+        decisions = [dict(row) for row in conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()]
+
+    readiness = build_competition_readiness(
+        mandate=data.get("mandate_record"),
+        strategy=data.get("strategy_record"),
+        theses=data.get("theses", []),
+        sources=sources,
+        catalysts=catalysts,
+        decisions=decisions,
+        thesis_reviews=thesis_reviews,
+        decision_reviews=decision_reviews,
+        red_team_reviews=red_team_reviews,
+        ai_usage=ai_usage,
+    )
+
+    st.markdown("### Competition Readiness")
+    st.caption(
+        "A transparent process score for client fit, security-level evidence, governance, and oral defense. "
+        "Returns do not enter this score. It is a preparation diagnostic, not an official Wharton grade."
+    )
+    top = st.columns(4)
+    top[0].metric("Overall readiness", f"{readiness['overall_score']}/100")
+    top[1].metric("Strategy constitution", f"{readiness['constitution']['score']}/100")
+    top[2].metric("Security dossiers", f"{readiness['dossier_score']}/100")
+    top[3].metric("Governance trail", f"{readiness['governance']['score']}/100")
+    st.progress(float(readiness["overall_score"]) / 100.0, text=str(readiness["status"]))
+
+    gaps_tab, audit_tab, report_tab, quant_tab = st.tabs(
+        ["Priority Gaps", "Red Team & AI Audit", "Report & Pitch", "Quant Standard"]
+    )
+    with gaps_tab:
+        left, right = st.columns(2)
+        with left:
+            st.markdown("#### Strategy constitution")
+            missing = readiness["constitution"]["missing"]
+            if missing:
+                for item in missing:
+                    st.warning(item["label"])
+            else:
+                st.success("All strategy-constitution gates are documented.")
+        with right:
+            st.markdown("#### Governance")
+            missing = readiness["governance"]["missing"]
+            if missing:
+                for item in missing:
+                    st.warning(item["label"])
+            else:
+                st.success("All governance gates are documented.")
+        st.markdown("#### Security dossiers")
+        dossier_rows = [{
+            "Ticker": item["ticker"],
+            "Readiness": item["score"] / 100.0,
+            "Primary sources": item["primary_source_count"],
+            "Catalysts": item["catalyst_count"],
+            "Next gap": item["missing"][0]["label"] if item["missing"] else "Ready",
+        } for item in readiness["dossiers"]]
+        if dossier_rows:
+            st.dataframe(
+                pd.DataFrame(dossier_rows), hide_index=True, use_container_width=True,
+                column_config={"Readiness": st.column_config.ProgressColumn("Readiness", min_value=0.0, max_value=1.0, format="percent")},
+            )
+        else:
+            st.info("Create at least one holding thesis in Strategy & Decisions to start dossier scoring.")
+
+    with audit_tab:
+        st.markdown("#### Independent red-team review")
+        st.caption("Record the strongest case against a thesis before the team commits or doubles down.")
+        with st.form("competition_red_team_form"):
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                red_ticker = st.text_input("Ticker (or use decision ID)").strip().upper()
+            with r2:
+                red_decision_id = st.number_input("Decision ID (optional)", min_value=0, value=0, step=1)
+            with r3:
+                red_verdict = st.selectbox("Verdict", ["Monitor", "Proceed", "Revise", "Reject"])
+            strongest_counterargument = st.text_area("Strongest counterargument", height=85)
+            disconfirming_evidence = st.text_area("Disconfirming evidence to find or already observed", height=75)
+            rejected_alternative = st.text_area("Best rejected alternative and why", height=75)
+            save_red_team = st.form_submit_button("Append Red-Team Review", type="primary", use_container_width=True)
+        if save_red_team:
+            try:
+                with get_connection() as conn:
+                    append_red_team_review(
+                        conn,
+                        ticker=red_ticker or None,
+                        decision_id=int(red_decision_id) or None,
+                        strongest_counterargument=strongest_counterargument,
+                        disconfirming_evidence=disconfirming_evidence,
+                        rejected_alternative=rejected_alternative,
+                        verdict=red_verdict.lower(),
+                        reviewed_by=str(profile["username"]),
+                    )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("Red-team review appended; prior reviews remain unchanged.")
+                st.rerun()
+        if red_team_reviews:
+            st.dataframe(pd.DataFrame(red_team_reviews), hide_index=True, use_container_width=True)
+
+        st.markdown("#### AI usage disclosure")
+        st.caption("Record brainstorming or analytical assistance, what entered the work, and how it was verified.")
+        with st.form("competition_ai_usage_form"):
+            a1, a2 = st.columns(2)
+            with a1:
+                ai_tool = st.text_input("AI tool")
+                ai_purpose = st.text_input("Purpose")
+            with a2:
+                ai_citation = st.text_input("Works Cited / disclosure reference")
+                ai_output_used = st.text_input("What output was used")
+            ai_prompt_summary = st.text_area("Prompt summary", height=75)
+            ai_verification = st.text_area("Human verification and primary evidence checked", height=75)
+            save_ai_usage = st.form_submit_button("Append AI Usage", type="primary", use_container_width=True)
+        if save_ai_usage:
+            try:
+                with get_connection() as conn:
+                    append_ai_usage(
+                        conn, ai_purpose, ai_tool,
+                        prompt_summary=ai_prompt_summary,
+                        output_used=ai_output_used,
+                        verification_notes=ai_verification,
+                        citation=ai_citation,
+                        recorded_by=str(profile["username"]),
+                    )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("AI usage appended to the disclosure trail.")
+                st.rerun()
+        if ai_usage:
+            st.dataframe(pd.DataFrame(ai_usage), hide_index=True, use_container_width=True)
+
+    with report_tab:
+        brief = generate_competition_brief(
+            readiness,
+            mandate=data.get("mandate_record"),
+            strategy=data.get("strategy_record"),
+            sources=sources,
+            ai_usage=ai_usage,
+        )
+        st.markdown("#### Working report brief")
+        st.caption("Use this as an evidence checklist. The team must verify facts and write the final submission in its own voice.")
+        st.download_button(
+            "Download Readiness Brief (.md)",
+            data=brief.encode("utf-8"),
+            file_name="competition_readiness_brief.md",
+            mime="text/markdown",
+            type="primary",
+            use_container_width=True,
+        )
+        with st.expander("Preview brief"):
+            st.markdown(brief)
+        st.markdown("#### Pitch defense question bank")
+        for index, question in enumerate(build_pitch_question_bank(readiness), start=1):
+            st.write(f"{index}. {question}")
+
+    with quant_tab:
+        st.markdown("#### Quantitative evidence standard")
+        st.caption("The analytics library now includes auditable building blocks; each report run still needs frozen inputs and assumptions.")
+        quant_rows = [
+            {"Gate": "Policy benchmark", "Standard": "Explicit components and normalized weights", "Status": "Available"},
+            {"Gate": "Performance attribution", "Standard": "Brinson allocation, selection, interaction with reconciliation", "Status": "Available"},
+            {"Gate": "Out-of-sample process", "Standard": "Point-in-time scores are lagged before returns; costs charged on turnover", "Status": "Available"},
+            {"Gate": "Reproducibility", "Standard": "SHA-256 data snapshot and frozen configuration manifest", "Status": "Available"},
+            {"Gate": "Statistical claims", "Standard": "Confidence intervals, untouched holdout, multiple-testing control", "Status": "Required per research run"},
+        ]
+        st.dataframe(pd.DataFrame(quant_rows), hide_index=True, use_container_width=True)
+        st.info("Do not call a backtest competition-grade until its manifest, point-in-time inputs, costs, holdout, and benchmark comparison are attached.")
+
+
 def render_wharton_cockpit() -> None:
     _inject_cockpit_styles()
     init_db()
@@ -7757,6 +8188,7 @@ def render_wharton_cockpit() -> None:
 
     tab_renderers = [
         ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
+        ("Competition Readiness", lambda: _render_competition_readiness(profile)),
         ("Assignment & Rules", lambda: _render_competition_rules(profile)),
         ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
         ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
@@ -7776,16 +8208,17 @@ def render_wharton_cockpit() -> None:
         ("War Room", lambda: _render_chat(profile)),
         ("File Vault", lambda: _render_file_center(profile)),
     ]
-    visible_tab_renderers = [
+    visible_panel_renderers = [
         (label, renderer)
         for label, renderer in tab_renderers
         if label not in HIDDEN_COCKPIT_TABS
     ]
-
-    tabs = st.tabs([label for label, _ in visible_tab_renderers])
-    for tab, (_, renderer) in zip(tabs, visible_tab_renderers, strict=False):
-        with tab:
-            renderer()
+    renderer_by_label = dict(visible_panel_renderers)
+    active_panel = _render_cockpit_navigation(
+        profile,
+        [label for label, _ in visible_panel_renderers],
+    )
+    renderer_by_label[active_panel]()
 
 
 def main() -> None:
