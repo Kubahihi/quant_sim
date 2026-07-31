@@ -453,29 +453,35 @@ def _logout() -> None:
 
 
 def _render_login() -> None:
-    st.markdown("""
-        <div style="max-width:420px;margin:4rem auto 0;padding:2.5rem;
-            background:linear-gradient(135deg,#0f172a,#1e293b);
-            border-radius:20px;border:1px solid rgba(20,184,166,0.3);
-            box-shadow:0 24px 60px rgba(0,0,0,0.4);">
-          <h2 style="color:#f8fafc;margin:0 0 0.25rem;font-size:1.6rem;">Wharton Cockpit</h2>
-          <p style="color:rgba(248,250,252,0.6);margin:0 0 1.5rem;font-size:0.9rem;">
-            Production workspace · Strategy · Quant · Team
-          </p>
-        </div>
-    """, unsafe_allow_html=True)
-
     users = _fetch_users()
     usernames = [str(u["username"]) for u in users]
     if not usernames:
         st.error("No users found. Restart the app.")
         st.stop()
 
-    with st.form("wharton_login_form", clear_on_submit=False):
-        # duplicate username selectbox removed
-        username = st.selectbox("Username", options=usernames, key="wharton_login_username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Enter Cockpit", type="primary", use_container_width=True)
+    _, center, _ = st.columns([1, 1.15, 1])
+    with center:
+        st.markdown(
+            """
+            <div class="wharton-login-header">
+              <h1>Wharton Cockpit</h1>
+              <p>Sign in to your team workspace.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.form("wharton_login_form", clear_on_submit=False):
+            username = st.selectbox(
+                "Team member",
+                options=usernames,
+                key="wharton_login_username",
+            )
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button(
+                "Enter workspace",
+                type="primary",
+                use_container_width=True,
+            )
 
     # Check if we are in development mode and using the insecure default password
     if _is_development_mode() and submitted and password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD:
@@ -512,24 +518,73 @@ def _inject_cockpit_styles() -> None:
     st.markdown("""
         <style>
         .block-container {
-            max-width: 100% !important;
-            padding-top: 1.2rem !important;
-            padding-left: 2rem !important;
-            padding-right: 2rem !important;
+            max-width: 1480px !important;
+            padding-top: 2rem !important;
+            padding-left: 2.25rem !important;
+            padding-right: 2.25rem !important;
         }
         .wharton-hero {
-            border: 1px solid rgba(15,23,42,0.12);
-            border-radius: 24px;
-            padding: 1.25rem 1.45rem;
-            margin-bottom: 1rem;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 20px;
+            padding: 1.65rem 1.8rem;
+            margin-bottom: 1.25rem;
             background:
-                radial-gradient(circle at 4% 18%, rgba(20,184,166,0.20), transparent 30%),
-                linear-gradient(135deg, rgba(15,23,42,0.97), rgba(30,41,59,0.94));
+                radial-gradient(circle at 88% 10%, rgba(72,193,185,0.24), transparent 20rem),
+                linear-gradient(135deg, #142238 0%, #193450 65%, #175e61 130%);
             color: #f8fafc;
-            box-shadow: 0 18px 50px rgba(15,23,42,0.16);
+            box-shadow: 0 10px 30px rgba(27,39,54,0.07);
         }
-        .wharton-hero h1 { margin:0; font-size:2.05rem; letter-spacing:-0.04em; }
-        .wharton-hero p { margin:0.45rem 0 0; color:rgba(248,250,252,0.78); }
+        .wharton-hero h1 { color:#fff; margin:0; font-size:2.05rem; letter-spacing:-0.04em; }
+        .wharton-hero p { margin:0.45rem 0 0; color:rgba(248,250,252,0.72); }
+        .wharton-login-header {
+            margin:4rem 0 1.25rem;
+            padding:0 0.15rem;
+        }
+        .wharton-login-header h1 {
+            margin:0;
+            color:#17202e;
+            font-size:1.75rem;
+            letter-spacing:-0.035em;
+        }
+        .wharton-login-header p {
+            margin:0.35rem 0 0;
+            color:#64748b;
+        }
+        .wharton-profile-strip {
+            display:flex;
+            align-items:center;
+            gap:0.8rem;
+            padding:0.85rem 1rem;
+            margin-bottom:1.1rem;
+            border:1px solid #e3e8ef;
+            border-radius:14px;
+            background:rgba(255,255,255,0.82);
+            box-shadow:0 3px 14px rgba(27,39,54,0.035);
+        }
+        .wharton-profile-avatar {
+            display:grid;
+            place-items:center;
+            width:2.15rem;
+            height:2.15rem;
+            flex:0 0 2.15rem;
+            border-radius:10px;
+            color:#167d78;
+            background:#eaf7f5;
+            font-size:0.82rem;
+            font-weight:800;
+        }
+        .wharton-profile-copy strong {
+            display:block;
+            color:#17202e;
+            font-size:0.96rem;
+            line-height:1.25;
+        }
+        .wharton-profile-copy span {
+            display:block;
+            margin-top:0.12rem;
+            color:#64748b;
+            font-size:0.8rem;
+        }
         .wharton-badge-row { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.9rem; }
         .wharton-badge {
             border:1px solid rgba(226,232,240,0.22); border-radius:999px;
@@ -537,26 +592,25 @@ def _inject_cockpit_styles() -> None:
             color:#e2e8f0; font-size:0.86rem;
         }
         .wharton-panel {
-            border:1px solid rgba(15,23,42,0.10); border-radius:18px;
-            padding:1rem 1.15rem; background:rgba(248,250,252,0.74); margin-bottom:1rem;
+            border:1px solid #e3e8ef; border-radius:14px;
+            padding:1rem 1.15rem; background:#fff; margin-bottom:1rem;
+            box-shadow:0 4px 16px rgba(27,39,54,0.04);
         }
         .wharton-section-kicker {
             color:#0f766e; text-transform:uppercase; letter-spacing:0.12em;
             font-weight:800; font-size:0.76rem; margin-bottom:0.35rem;
         }
         div[data-testid="stMetric"] {
-            border:1px solid rgba(20,184,166,0.32); border-radius:16px;
-            padding:0.85rem 0.95rem;
-            background:
-                radial-gradient(circle at top left, rgba(45,212,191,0.22), transparent 42%),
-                linear-gradient(135deg, #0f172a, #164e63);
-            box-shadow:0 12px 30px rgba(15,23,42,0.16);
+            border:1px solid #e3e8ef; border-radius:14px;
+            padding:0.9rem 1rem;
+            background:#fff;
+            box-shadow:0 4px 18px rgba(27,39,54,0.045);
         }
         div[data-testid="stMetric"] label,
         div[data-testid="stMetric"] [data-testid="stMetricLabel"],
         div[data-testid="stMetric"] [data-testid="stMetricValue"],
-        div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color:#f8fafc !important; }
-        div[data-testid="stMetric"] svg { fill:#f8fafc !important; }
+        div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color:#17202e !important; }
+        div[data-testid="stMetric"] svg { fill:#64748b !important; }
         .wharton-graph-shell {
             border:1px solid rgba(20,184,166,0.24); border-radius:20px;
             padding:0.75rem 0.75rem 0.25rem;
@@ -574,7 +628,21 @@ def _inject_cockpit_styles() -> None:
             padding:1rem 1.2rem; margin-bottom:0.75rem;
             background:linear-gradient(135deg,rgba(15,23,42,0.04),rgba(20,184,166,0.04));
         }
-        div[data-testid="stTabs"] button { font-weight:700; }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            overflow-x:auto;
+            gap:0.25rem;
+            border-bottom:1px solid #e3e8ef;
+        }
+        div[data-testid="stTabs"] button {
+            white-space:nowrap;
+            font-weight:650;
+        }
+        @media (max-width:900px) {
+            .block-container {
+                padding:1.15rem 1rem 3rem !important;
+            }
+            .wharton-hero { padding:1.35rem 1.2rem; border-radius:16px; }
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -7619,19 +7687,40 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
 def _render_header(profile: dict[str, str | int]) -> None:
     username = escape(str(profile["username"]))
     role = escape(str(profile["role"]))
-    pm = escape(str(profile["primary_module"]))
-    st.markdown(f"""
-        <div class="wharton-hero">
-          <h1>Wharton Cockpit</h1>
-          <p>Production command center · Strategy · Quant · Research · Team</p>
-          <div class="wharton-badge-row">
-            <span class="wharton-badge"> {username}</span>
-            <span class="wharton-badge"> {role}</span>
-            <span class="wharton-badge"> {pm}</span>
-          </div>
-        </div>
-    """, unsafe_allow_html=True)
-    if st.sidebar.button(" Logout", use_container_width=True):
+    initial = username[:1].upper()
+    visibility_key = "wharton_show_profile_header"
+    if visibility_key not in st.session_state:
+        st.session_state[visibility_key] = True
+
+    show_profile = bool(st.session_state[visibility_key])
+    if show_profile:
+        profile_col, hide_col = st.columns([8.5, 1.5])
+        with profile_col:
+            st.markdown(f"""
+                <div class="wharton-profile-strip">
+                  <div class="wharton-profile-avatar">{initial}</div>
+                  <div class="wharton-profile-copy">
+                    <strong>{username}</strong>
+                    <span>{role}</span>
+                  </div>
+                </div>
+            """, unsafe_allow_html=True)
+        with hide_col:
+            if st.button("Hide profile", key="wharton_hide_profile", use_container_width=True):
+                st.session_state[visibility_key] = False
+                st.rerun()
+    else:
+        with st.sidebar:
+            st.caption("PROFILE")
+            if st.button(
+                "Show profile",
+                key="wharton_restore_profile",
+                use_container_width=True,
+            ):
+                st.session_state[visibility_key] = True
+                st.rerun()
+
+    if st.sidebar.button("Sign out", use_container_width=True):
         _logout()
 
 
@@ -7668,9 +7757,12 @@ def render_wharton_cockpit() -> None:
 
     tab_renderers = [
         ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
+        ("Assignment & Rules", lambda: _render_competition_rules(profile)),
         ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
-        ("Quant Engine", lambda: _render_quant_engine(profile)),
+        ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
+        ("Company Analysis", lambda: _render_company_analysis(profile)),
         ("Stock Screener", _render_stock_screener),
+        ("Quant Engine", lambda: _render_quant_engine(profile)),
         ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),
         ("Factor Exposure", _with_quant_context(_render_factor_exposure)),
         ("Regime Detection", _with_quant_context(_render_regime_detection)),
@@ -7683,9 +7775,6 @@ def render_wharton_cockpit() -> None:
         ("Sub-Projects", lambda: _render_subprojects(profile)),
         ("War Room", lambda: _render_chat(profile)),
         ("File Vault", lambda: _render_file_center(profile)),
-        ("Assignment & Rules", lambda: _render_competition_rules(profile)),
-        ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
-        ("Company Analysis", lambda: _render_company_analysis(profile)),
     ]
     visible_tab_renderers = [
         (label, renderer)

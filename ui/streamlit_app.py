@@ -155,15 +155,84 @@ DEFAULT_TICKERS = [
 ]
 
 
-st.set_page_config(page_title="Quant Platform", layout="wide", page_icon=":bar_chart:")
+st.set_page_config(
+    page_title="Quant Workspace",
+    layout="wide",
+    page_icon=":bar_chart:",
+    initial_sidebar_state="expanded",
+)
 inject_dashboard_styles()
 
+SIDEBAR_HIDDEN_KEY = "quant_workspace_sidebar_hidden"
+if SIDEBAR_HIDDEN_KEY not in st.session_state:
+    st.session_state[SIDEBAR_HIDDEN_KEY] = False
+
+
+def _set_sidebar_hidden(hidden: bool) -> None:
+    st.session_state[SIDEBAR_HIDDEN_KEY] = hidden
+
+
+if st.session_state[SIDEBAR_HIDDEN_KEY]:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] {
+            display: none !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            max-width: 0 !important;
+        }
+        [data-testid="stMain"] {
+            width: 100vw !important;
+            max-width: 100vw !important;
+            margin-left: 0 !important;
+        }
+        [data-testid="stMainBlockContainer"],
+        .main .block-container {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    restore_col, _ = st.columns([0.45, 9.55])
+    with restore_col:
+        st.button(
+            "»",
+            key="quant_show_sidebar",
+            help="Open navigation",
+            use_container_width=True,
+            on_click=_set_sidebar_hidden,
+            args=(False,),
+        )
+
 with st.sidebar:
-    st.header("Navigation")
+    st.markdown(
+        """
+        <div class="qp-brand">
+            <div class="qp-brand-mark">QS</div>
+            <div class="qp-brand-copy">
+                <strong>Quant Workspace</strong>
+                <span>Portfolio intelligence</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="qp-eyebrow">Workspace</div>', unsafe_allow_html=True)
     app_route = st.radio(
-        "Workspace",
+        "Choose workspace",
         options=["Quant Platform", "Wharton Cockpit"],
         key="quant_sim_workspace_route",
+        label_visibility="collapsed",
+    )
+    st.button(
+        "Hide navigation",
+        key="quant_hide_sidebar",
+        use_container_width=True,
+        on_click=_set_sidebar_hidden,
+        args=(True,),
     )
     st.markdown("---")
 
@@ -265,12 +334,6 @@ with st.sidebar:
     render_user_info()
     render_logout_button()
     st.markdown("---")
-
-st.title("Quant Platform v0.4")
-st.caption(
-    "Portfolio evaluation with deterministic scoring and multi-page PDF export."
-)
-st.markdown("---")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -3133,25 +3196,41 @@ def _render_empty_dashboard_state(preferences: DashboardPreferences) -> None:
     st.markdown(
         """
         <div class="dashboard-hero">
-            <div class="dashboard-kicker">Modular dashboard</div>
-            <h2>Run portfolio analysis only when you need it.</h2>
+            <div class="dashboard-kicker">Portfolio intelligence workspace</div>
+            <h2>Turn a portfolio into a clear decision.</h2>
             <p>
-                Keep the workspace available for screening, portfolio tracking,
-                and swing-trade workflows even before the first analysis run.
+                Configure the holdings once, run the analysis, then move naturally from
+                the executive view to stress tests, research, optimization, and reporting.
             </p>
+        </div>
+        <div class="qp-workflow">
+            <div class="qp-workflow-card">
+                <span>01</span>
+                <strong>Configure</strong>
+                <p>Add holdings and assumptions in the left panel. Advanced controls stay tucked away until needed.</p>
+            </div>
+            <div class="qp-workflow-card">
+                <span>02</span>
+                <strong>Evaluate</strong>
+                <p>Run one consistent analysis across performance, risk, scenarios, and portfolio construction.</p>
+            </div>
+            <div class="qp-workflow-card">
+                <span>03</span>
+                <strong>Decide</strong>
+                <p>Start with the key answer, investigate exceptions, then export a decision-ready report.</p>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     _render_dashboard_note(
-        "How the new layout works",
-        "Portfolio inputs stay in the sidebar, while the page itself is split into dedicated"
-        " workspaces for overview, analytics, portfolio lab, tools, and reporting.",
+        "Ready when you are",
+        "The default portfolio is already loaded. Review it in the left panel and select Evaluate Portfolio.",
     )
     if preferences.show_workspace_when_empty:
         _render_workspace_hub(None)
     else:
-        st.info("Turn on 'Keep workspace visible before first run' in the sidebar to open the tool hub here.")
+        st.info("Enable tools before first analysis in View settings to open the workspace hub here.")
 
 
 def _render_dashboard_hero(analysis_result: Dict[str, Any], preferences: DashboardPreferences) -> None:
@@ -3167,24 +3246,24 @@ def _render_dashboard_hero(analysis_result: Dict[str, Any], preferences: Dashboa
     run_record = analysis_result.get("run_record")
     run_id = getattr(run_record, "run_id", "-")
 
-    hero_title = f"{analysis_result.get('risk_profile', 'balanced').title()} portfolio cockpit"
+    hero_title = f"{analysis_result.get('risk_profile', 'balanced').title()} portfolio overview"
     hero_body = (
         f"Tracking {len(tickers)} assets across {int(analysis_result.get('horizon_days', 252))} days. "
-        f"Use the {preferences.preset} preset or hide sections from the sidebar when you want a lighter view."
+        "Start with the decision summary, then open only the level of detail you need."
     )
 
     st.markdown(
         (
             "<div class='dashboard-hero'>"
-            "<div class='dashboard-kicker'>Quant Platform</div>"
+            "<div class='dashboard-kicker'>Analysis complete</div>"
             f"<h2>{escape(hero_title)}</h2>"
             f"<p>{escape(hero_body)}</p>"
             "<div class='dashboard-badge-row'>"
-            f"<span class='dashboard-badge'>Run: {escape(str(run_id))}</span>"
-            f"<span class='dashboard-badge'>Regime: {escape(regime_label)}</span>"
-            f"<span class='dashboard-badge'>Confidence: {confidence:.2f}</span>"
-            f"<span class='dashboard-badge'>Composite: {composite_score:.2f}</span>"
-            f"<span class='dashboard-badge'>Assets: {len(tickers)}</span>"
+            f"<span class='dashboard-badge'>Run {escape(str(run_id))}</span>"
+            f"<span class='dashboard-badge'>{escape(regime_label.title())} regime</span>"
+            f"<span class='dashboard-badge'>{confidence:.0%} confidence</span>"
+            f"<span class='dashboard-badge'>{composite_score:.2f} composite</span>"
+            f"<span class='dashboard-badge'>{len(tickers)} assets</span>"
             "</div>"
             "</div>"
         ),
@@ -3193,12 +3272,12 @@ def _render_dashboard_hero(analysis_result: Dict[str, Any], preferences: Dashboa
 
     meta_col, universe_col = st.columns([1.05, 1.35])
     with meta_col:
-        st.caption("Current run")
-        st.write(f"**Date range:** {analysis_result['start_date']} to {analysis_result['end_date']}")
-        st.write(f"**Risk-free rate:** {analysis_result['risk_free_rate']:.3f}")
-        st.write(f"**Visible sections:** {', '.join(PAGE_LABELS[key] for key in preferences.visible_pages)}")
+        st.caption("ANALYSIS SCOPE")
+        st.write(f"**Period**  {analysis_result['start_date']} — {analysis_result['end_date']}")
+        st.write(f"**Risk-free rate**  {analysis_result['risk_free_rate']:.2%}")
+        st.write(f"**View**  {preferences.preset}")
     with universe_col:
-        st.caption("Tracked universe")
+        st.caption("TRACKED UNIVERSE")
         st.write(ticker_preview or "No tickers loaded.")
 
     _render_export_actions(
@@ -4236,85 +4315,85 @@ if "current_portfolio" not in st.session_state:
 
 
 with st.sidebar:
-    st.header("Portfolio configuration")
+    st.markdown('<div class="qp-eyebrow">New analysis</div>', unsafe_allow_html=True)
 
-    tickers_input = st.text_area(
-        "Tickers (one per line)",
-        value="\n".join(DEFAULT_TICKERS),
-        height=140,
-    )
+    with st.expander("1  Holdings", expanded=True):
+        tickers_input = st.text_area(
+            "Tickers",
+            value="\n".join(DEFAULT_TICKERS),
+            height=132,
+            help="Enter one ticker per line.",
+        )
+        weights_input = st.text_area(
+            "Weights (%)",
+            value="",
+            height=112,
+            placeholder="Optional — equal weights by default",
+            help="Enter one weight per ticker. Leave empty to use equal weights.",
+        )
 
-    weights_input = st.text_area(
-        "Weights in % (one per line, optional)",
-        value="",
-        height=140,
-        help="If empty, equal weights are used automatically.",
-    )
+    with st.expander("2  Analysis assumptions", expanded=True):
+        start_date = st.date_input(
+            "Start date",
+            value=(datetime.now() - timedelta(days=365 * 2)).date(),
+        )
+        end_date = st.date_input("End date", value=datetime.now().date())
+        risk_profile = st.selectbox(
+            "Risk profile",
+            options=["conservative", "balanced", "aggressive"],
+            index=1,
+        )
+        benchmark_ticker = st.text_input(
+            "Benchmark",
+            value="SPY",
+            help="Used for tracking error, beta, and information ratio.",
+        ).strip().upper()
+        horizon_days = st.slider(
+            "Investment horizon (days)",
+            min_value=30,
+            max_value=252 * 5,
+            value=252,
+            step=30,
+        )
+        risk_free_rate = st.slider(
+            "Risk-free rate",
+            min_value=0.0,
+            max_value=0.10,
+            value=0.03,
+            step=0.005,
+            format="%.3f",
+        )
 
-    st.subheader("Data range")
-    end_date = st.date_input("End date", value=datetime.now().date())
-    start_date = st.date_input(
-        "Start date",
-        value=(datetime.now() - timedelta(days=365 * 2)).date(),
-    )
-
-    risk_free_rate = st.slider(
-        "Risk-free rate",
-        min_value=0.0,
-        max_value=0.10,
-        value=0.03,
-        step=0.005,
-        format="%.3f",
-    )
-
-    risk_profile = st.selectbox(
-        "Risk profile",
-        options=["conservative", "balanced", "aggressive"],
-        index=1,
-    )
-    benchmark_ticker = st.text_input(
-        "Benchmark ticker",
-        value="SPY",
-        help="Used for active risk metrics such as tracking error and information ratio.",
-    ).strip().upper()
-
-    horizon_days = st.slider(
-        "Investment horizon (days)",
-        min_value=30,
-        max_value=252 * 5,
-        value=252,
-        step=30,
-    )
-
-    n_simulations = st.slider(
-        "Monte Carlo simulations",
+    simulation_panel = st.expander("3  Simulation settings", expanded=False)
+    n_simulations = simulation_panel.slider(
+        "Monte Carlo paths",
         min_value=200,
         max_value=15000,
         value=1200,
         step=100,
     )
-    st.markdown("#### Jump Diffusion (Advanced MC)")
-    jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
-    jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
-    jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
+    simulation_panel.caption("JUMP DIFFUSION")
+    jump_intensity = simulation_panel.slider("Jump intensity (λ)", 0.0, 5.0, 1.5, 0.1)
+    jump_mean = simulation_panel.slider("Mean jump size (μJ)", -0.5, 0.0, -0.05, 0.01)
+    jump_volatility = simulation_panel.slider("Jump volatility (σJ)", 0.0, 0.3, 0.08, 0.01)
 
-    portfolio_samples = st.slider(
-        "3D sampled portfolios",
+    portfolio_samples = simulation_panel.slider(
+        "Sampled portfolios",
         min_value=500,
         max_value=6000,
         value=2500,
         step=250,
     )
 
-    st.subheader("Cost-aware rebalance")
-    rebalance_max_weight = st.slider(
-        "Max weight per asset",
+    rebalance_panel = st.expander("4  Rebalancing constraints", expanded=False)
+    rebalance_max_weight = rebalance_panel.slider(
+        "Maximum asset weight",
         min_value=0.10,
         max_value=1.00,
         value=0.35,
         step=0.01,
     )
-    rebalance_turnover_limit = st.slider(
+    rebalance_turnover_limit = rebalance_panel.slider(
         "Turnover limit",
         min_value=0.05,
         max_value=2.00,
@@ -4322,14 +4401,14 @@ with st.sidebar:
         step=0.05,
         help="Turnover = sum(abs(new_weight - current_weight)).",
     )
-    rebalance_cost_bps = st.slider(
+    rebalance_cost_bps = rebalance_panel.slider(
         "Transaction cost (bps)",
         min_value=0.0,
         max_value=100.0,
         value=10.0,
         step=1.0,
     )
-    rebalance_risk_aversion = st.slider(
+    rebalance_risk_aversion = rebalance_panel.slider(
         "Risk aversion",
         min_value=0.5,
         max_value=10.0,
@@ -4339,6 +4418,7 @@ with st.sidebar:
     )
 
     run_clicked = st.button("Evaluate Portfolio", type="primary", use_container_width=True)
+    st.caption("Uses the holdings and assumptions above. Results remain available while you work.")
     _render_sidebar_portfolio_summary()
     dashboard_preferences = render_dashboard_preferences(
         has_analysis=st.session_state.get("analysis_result") is not None

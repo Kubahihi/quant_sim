@@ -6,6 +6,8 @@ Provides login, registration, and session management UI components.
 
 from __future__ import annotations
 
+from html import escape
+
 import streamlit as st
 
 from src.auth import (
@@ -34,43 +36,66 @@ def _init_auth_system():
 
 def render_login_form() -> None:
     """Render the login form."""
-    st.title("Quant Platform - Login")
-    st.markdown("Sign in to access your portfolio analytics and tracking tools.")
-    
-    with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Username", placeholder="Enter your username", key="login_username")
-        password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_password")
-        
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            login_clicked = st.form_submit_button("Sign In", type="primary", use_container_width=True)
-        with col2:
-            show_register = st.form_submit_button("Create Account", use_container_width=True)
-        
-        if login_clicked:
-            token, user, errors = login_user(username, password)
-            if errors:
-                for error in errors:
-                    st.error(error)
-            elif token and user:
-                st.session_state[AUTH_TOKEN_KEY] = token
-                st.session_state[AUTH_USER_KEY] = user
-                st.success(f"Welcome back, {user['username']}!")
+    _, center, _ = st.columns([1, 1.15, 1])
+    with center:
+        st.markdown(
+            """
+            <div class="dashboard-hero" style="margin-top:3rem;">
+                <div class="dashboard-kicker">Secure workspace</div>
+                <h2>Welcome back.</h2>
+                <p>Sign in to continue to portfolio analytics, decision tools, and reporting.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input(
+                "Username",
+                placeholder="Enter your username",
+                key="login_username",
+            )
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Enter your password",
+                key="login_password",
+            )
+
+            login_clicked = st.form_submit_button(
+                "Sign in",
+                type="primary",
+                use_container_width=True,
+            )
+            show_register = st.form_submit_button(
+                "Create an account",
+                use_container_width=True,
+            )
+
+            if login_clicked:
+                token, user, errors = login_user(username, password)
+                if errors:
+                    for error in errors:
+                        st.error(error)
+                elif token and user:
+                    st.session_state[AUTH_TOKEN_KEY] = token
+                    st.session_state[AUTH_USER_KEY] = user
+                    st.success(f"Welcome back, {user['username']}!")
+                    st.rerun()
+
+            if show_register:
+                st.session_state["show_register"] = True
                 st.rerun()
-        
-        if show_register:
-            st.session_state["show_register"] = True
-            st.rerun()
-    
-    # Show registration form if requested
-    if st.session_state.get("show_register"):
-        render_register_form()
+
+        if st.session_state.get("show_register"):
+            render_register_form()
 
 
 def render_register_form() -> None:
     """Render the registration form."""
     st.markdown("---")
-    st.subheader("Create New Account")
+    st.subheader("Create your account")
+    st.caption("Use a unique username and a password with at least eight characters.")
     
     with st.form("register_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
@@ -83,9 +108,9 @@ def render_register_form() -> None:
         
         col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
-            register_clicked = st.form_submit_button("Create Account", type="primary", use_container_width=True)
+            register_clicked = st.form_submit_button("Create account", type="primary", use_container_width=True)
         with col2:
-            back_to_login = st.form_submit_button("Back to Login", use_container_width=True)
+            back_to_login = st.form_submit_button("Back to sign in", use_container_width=True)
         
         if register_clicked:
             user, errors = register_user(reg_username, email, password, confirm_password)
@@ -108,7 +133,7 @@ def render_logout_button() -> bool:
     
     Returns True if logout was clicked.
     """
-    if st.sidebar.button("Logout", use_container_width=True):
+    if st.sidebar.button("Sign out", use_container_width=True):
         token = st.session_state.get(AUTH_TOKEN_KEY)
         if token:
             logout_user(token)
@@ -124,9 +149,20 @@ def render_user_info() -> None:
     """Render current user info in the sidebar."""
     user = st.session_state.get(AUTH_USER_KEY)
     if user:
-        st.sidebar.markdown("---")
-        st.sidebar.markdown(f" **{user.get('username', 'User')}**")
-        st.sidebar.caption(f"User ID: {user.get('id', 'N/A')}")
+        username = escape(str(user.get("username", "User")))
+        initial = username[:1].upper()
+        st.sidebar.markdown(
+            f"""
+            <div class="qp-brand" style="padding:0.1rem 0;">
+                <div class="qp-brand-mark" style="width:2rem;height:2rem;">{initial}</div>
+                <div class="qp-brand-copy">
+                    <strong>{username}</strong>
+                    <span>Authenticated session</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def check_auth() -> bool:
