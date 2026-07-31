@@ -42,6 +42,16 @@ from .modular import (
     run_quant_stack,
     run_signal_bundle,
 )
+from .dcf import (
+    DCF_SCHEMA_VERSION,
+    build_dcf_sensitivity,
+    build_multistage_dcf_scenarios,
+    calculate_multistage_dcf,
+    calculate_wacc,
+    default_multistage_dcf_assumptions,
+    prepare_dcf_inputs,
+    solve_reverse_dcf,
+)
 
 __all__ = [
     "calculate_returns",
@@ -80,4 +90,12 @@ __all__ = [
     "list_run_records",
     "load_run_record",
     "compare_runs",
+    "DCF_SCHEMA_VERSION",
+    "calculate_wacc",
+    "prepare_dcf_inputs",
+    "default_multistage_dcf_assumptions",
+    "calculate_multistage_dcf",
+    "build_multistage_dcf_scenarios",
+    "build_dcf_sensitivity",
+    "solve_reverse_dcf",
 ]

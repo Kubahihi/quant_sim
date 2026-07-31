@@ -113,7 +113,45 @@ def test_streamlit_app_shows_workspace_by_default():
     assert any(item.value == "Workspace Hub" for item in at.subheader)
 
 
-def test_wharton_cockpit_groups_and_lazily_renders_panels():
+def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
+    from ui.pages import wharton_dash
+
+    automatic_peer_info = {
+        "ORCL": {
+            "shortName": "Oracle",
+            "sector": "Technology",
+            "industry": "Software - Infrastructure",
+            "marketCap": 450_000_000_000,
+            "operatingMargins": 0.30,
+            "revenueGrowth": 0.08,
+            "forwardPE": 24.0,
+        },
+        "CRM": {
+            "shortName": "Salesforce",
+            "sector": "Technology",
+            "industry": "Software - Application",
+            "marketCap": 300_000_000_000,
+            "operatingMargins": 0.20,
+            "revenueGrowth": 0.11,
+            "forwardPE": 26.0,
+        },
+    }
+    monkeypatch.setattr(
+        wharton_dash,
+        "_discover_automatic_peers_cached",
+        lambda ticker, target_info, max_peers=6: {
+            "available": True,
+            "source": "Smoke-test fundamentals",
+            "peers": [],
+            "info": automatic_peer_info,
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_fetch_ai_dcf_assumptions_cached",
+        lambda ticker, evidence: {"available": False, "source": "smoke_test"},
+    )
     at = AppTest.from_file(str(APP_PATH))
     at.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
     at.session_state["wharton_user_profile_v2"] = {
@@ -132,6 +170,9 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels():
                 "currentPrice": 100.0,
                 "marketCap": 1_000_000_000_000,
                 "freeCashflow": 10_000_000_000,
+                "sector": "Technology",
+                "industry": "Software - Infrastructure",
+                "beta": 1.0,
                 "sharesOutstanding": 1_000_000_000,
                 "totalCash": 5_000_000_000,
                 "totalDebt": 1_000_000_000,
@@ -275,7 +316,19 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels():
     assert region_view.options == ["Revenue Exposure", "Macro Drill-down"]
     nested_tab_labels = [tab.label for tab in at.tabs]
     assert "Industry & Peers" in nested_tab_labels
+    assert any(item.label == "Normalized FCFF (billions)" for item in at.number_input)
+    assert any(item.label == "Initial FCFF Growth (%)" for item in at.number_input)
+    assert any(item.label == "Competitive Fade (years)" for item in at.number_input)
+    assert any(item.label == "Comparable companies" for item in at.multiselect)
+    assert any("What Must Be True?" in item.value for item in at.markdown)
+    assert any("Automatically selected competitors" in item.value for item in at.markdown)
 
+    growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
+    growth_input.set_value(17.0).run(timeout=60)
+    growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
+    assert growth_input.value == 17.0
+
+    region_view = next(item for item in at.radio if item.label == "Regional analysis view")
     region_view.set_value("Macro Drill-down").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Regional Macro Drill-down" in item.value for item in at.markdown)

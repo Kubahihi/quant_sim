@@ -4358,7 +4358,7 @@ with st.sidebar:
     with st.expander("2  Market & risk assumptions", expanded=False):
         start_date = st.date_input(
             "Start date",
-            value=(datetime.now() - timedelta(days=365 * 2)).date(),
+            value=date(2014, 1, 1),
         )
         end_date = st.date_input("End date", value=datetime.now().date())
         risk_profile = st.selectbox(
@@ -4392,7 +4392,7 @@ with st.sidebar:
         "Monte Carlo paths",
         min_value=200,
         max_value=15000,
-        value=1200,
+        value=10000,
         step=100,
     )
     simulation_panel.caption("JUMP DIFFUSION")

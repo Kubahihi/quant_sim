@@ -17,7 +17,7 @@ optimization:
   tolerance: 1e-8
 
 simulation:
-  n_simulations: 1000
+  n_simulations: 10000
   trading_days_per_year: 252
 
 storage:

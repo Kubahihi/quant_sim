@@ -81,7 +81,7 @@ def run_monte_carlo_simulation(
     expected_return: float,
     volatility: float,
     time_horizon: int = 252,
-    n_simulations: int = 1000,
+    n_simulations: int = 10_000,
     random_seed: Optional[int] = None,
 ) -> Tuple[np.ndarray, dict]:
     """Simulate portfolio values with geometric Brownian motion.
@@ -175,7 +175,7 @@ def run_advanced_monte_carlo_simulation(
     expected_return: float,
     volatility: float,
     time_horizon: int = 252,
-    n_simulations: int = 1000,
+    n_simulations: int = 10_000,
     jump_intensity: float = 1.5,
     jump_mean: float = -0.05,
     jump_volatility: float = 0.08,

@@ -2,7 +2,7 @@
 """
 Example usage of Quant Platform
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 
 from src.data.fetchers.yahoo_fetcher import YahooFetcher
@@ -18,7 +18,7 @@ def main():
     
     symbols = ["AAPL", "ELIL", "GLD", "AMZN", "VTI", "QQQ", "ASML", "NEE", "JNJ", "KO", "BRK-B", "IEI", "BND", "VEA", "SHY", "BIL", "TIP", "PG", "TSM", "V", "NVDA", "MSFT", "BTC"]
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365 * 2)
+    start_date = datetime(2014, 1, 1)
     
     print(f"Fetching data for {symbols}")
     print(f"Period: {start_date.date()} to {end_date.date()}\n")
@@ -77,7 +77,7 @@ def main():
         expected_return=ann_return,
         volatility=ann_vol,
         time_horizon=252,
-        n_simulations=1000,
+        n_simulations=10_000,
     )
     
     print(f"Initial Value: $100,000")

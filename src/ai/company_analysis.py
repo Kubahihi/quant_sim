@@ -7,9 +7,117 @@ import time
 from typing import Any, Mapping, Optional
 
 import openai
+import numpy as np
 from openai import OpenAI
 
 from .ai_review import DEFAULT_GROQ_MODEL, _extract_json_payload, _extract_message_text
+
+
+def _normalize_dcf_rate(value: Any, fallback: float, lower: float, upper: float) -> float:
+    """Normalize an AI-proposed decimal rate and keep it inside audit-safe bounds."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        result = float(fallback)
+    if not np.isfinite(result):
+        result = float(fallback)
+    # Accept a model returning 10 for 10%, while storing all rates as decimals.
+    if 1.0 < abs(result) <= 100.0:
+        result /= 100.0
+    return min(max(result, lower), upper)
+
+
+def generate_dcf_assumptions(
+    evidence: Mapping[str, Any],
+    api_key: Optional[str],
+    model: str = DEFAULT_GROQ_MODEL,
+) -> dict[str, Any]:
+    """Generate bounded lifecycle judgments for the multi-stage DCF.
+
+    Only forecast judgments are delegated to the model. Reported FCFF, cash,
+    debt, shares, and price always continue to come from deterministic inputs.
+    Legacy aliases remain in the result for older callers.
+    """
+    if not api_key:
+        return {"available": False, "source": "ai_unavailable", "error": "GROQ_API_KEY was not provided."}
+
+    from src.analytics.dcf import default_multistage_dcf_assumptions, prepare_dcf_inputs
+
+    fallback = default_multistage_dcf_assumptions(prepare_dcf_inputs(evidence))
+    system_prompt = (
+        "You are an equity valuation analyst selecting company-specific multi-stage FCFF DCF judgments. "
+        "Use only the supplied metrics and never reverse-engineer assumptions merely to match the market price. "
+        "Distinguish a short near-term growth stage from a competitive fade; do not return generic 10% WACC, "
+        "2.5% terminal growth and five years unless the evidence specifically supports all three. Return strict JSON "
+        "with exactly: lifecycle (high_growth, transition, mature, contracting), initial_growth_rate (decimal -0.20 "
+        "to 0.60), near_term_years (integer 2 to 5), fade_years (integer 2 to 10), discount_rate (decimal WACC "
+        "0.05 to 0.25), terminal_growth_rate (decimal -0.02 to 0.04), confidence (0 to 1), rationale (one concise "
+        "sentence), and warnings (array of strings). WACC must exceed terminal growth by at least 0.02. "
+        "When evidence is sparse, stay close to the supplied deterministic anchors."
+    )
+    try:
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        completion = client.chat.completions.create(
+            model=model,
+            temperature=0.0,
+            max_tokens=350,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"COMPANY_METRICS_JSON:\n{json.dumps(dict(evidence), ensure_ascii=False, default=str)}"},
+            ],
+        )
+        content = _extract_message_text(completion.choices[0].message) if completion.choices else ""
+        parsed = _extract_json_payload(content)
+        growth_rate = _normalize_dcf_rate(
+            parsed.get("initial_growth_rate", parsed.get("growth_rate")),
+            float(fallback["initial_growth_rate"]),
+            -0.20,
+            0.60,
+        )
+        discount_rate = _normalize_dcf_rate(parsed.get("discount_rate"), float(fallback["discount_rate"]), 0.05, 0.25)
+        terminal_growth_rate = _normalize_dcf_rate(
+            parsed.get("terminal_growth_rate"),
+            float(fallback["terminal_growth_rate"]),
+            -0.02,
+            0.04,
+        )
+        if discount_rate - terminal_growth_rate < 0.025:
+            terminal_growth_rate = max(-0.02, discount_rate - 0.025)
+        def bounded_years(key: str, fallback_value: int, lower: int, upper: int) -> int:
+            try:
+                value = int(round(float(parsed.get(key, fallback_value))))
+            except (TypeError, ValueError):
+                value = int(fallback_value)
+            return min(max(value, lower), upper)
+
+        near_term_years = bounded_years("near_term_years", int(fallback["near_term_years"]), 2, 5)
+        fade_years = bounded_years("fade_years", int(fallback["fade_years"]), 2, 10)
+        legacy_years = bounded_years("years", near_term_years + fade_years, 3, 10)
+        lifecycle = str(parsed.get("lifecycle") or fallback["lifecycle"]).strip().lower()
+        if lifecycle not in {"high_growth", "transition", "mature", "contracting"}:
+            lifecycle = str(fallback["lifecycle"])
+        assumptions = {
+            "schema_version": 2,
+            "lifecycle": lifecycle,
+            "initial_growth_rate": growth_rate,
+            "growth_rate": growth_rate,
+            "near_term_years": near_term_years,
+            "fade_years": fade_years,
+            "discount_rate": discount_rate,
+            "terminal_growth_rate": terminal_growth_rate,
+            "years": legacy_years,
+        }
+        return {
+            "available": True,
+            "source": "groq",
+            "assumptions": assumptions,
+            "rationale": str(parsed.get("rationale") or "AI proposal based on the supplied company metrics.").strip(),
+            "confidence": _normalize_dcf_rate(parsed.get("confidence"), 0.5, 0.0, 1.0),
+            "warnings": [str(item) for item in parsed.get("warnings", []) if str(item).strip()],
+        }
+    except Exception as exc:
+        return {"available": False, "source": "ai_error", "error": str(exc)}
 
 
 def generate_company_deep_dive(

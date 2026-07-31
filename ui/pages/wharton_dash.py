@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from copy import deepcopy
 from html import escape
+import hashlib
 import importlib
 import json
 import os
@@ -1723,7 +1724,7 @@ def _compute_quant_run(
 
 def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
-    default_start = default_end - timedelta(days=365 * 2)
+    default_start = date(2014, 1, 1)
 
     with st.expander(" Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
         with st.form("wharton_quant_config_form"):
@@ -1742,7 +1743,7 @@ def _render_quant_configuration() -> None:
                 transaction_cost_bps = st.slider("Transaction Cost (bps)", 0.0, 100.0, 10.0, 1.0)
                 risk_aversion = st.slider("Risk Aversion", 0.5, 10.0, 3.0, 0.5)
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
-                n_simulations = st.slider("Simulation Count", 200, 15000, 1200, 100)
+                n_simulations = st.slider("Simulation Count", 200, 15000, 10000, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
                 st.markdown("#### Jump Diffusion (Advanced MC)")
                 jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
@@ -6563,6 +6564,149 @@ def _fetch_company_analysis_cached(ticker: str) -> dict[str, Any]:
     return fetch_company_data(ticker)
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_lightweight_company_info_cached(ticker: str) -> dict[str, Any]:
+    """Fetch only comparable-company fundamentals, without heavy research data."""
+    return _fetch_lightweight_company_info(ticker)
+
+
+def _fetch_lightweight_company_info(ticker: str) -> dict[str, Any]:
+    """Uncached worker used by the parallel automatic-peer discovery pass."""
+    import yfinance as yf
+
+    symbol = str(ticker or "").strip().upper()
+    if not symbol:
+        return {}
+    company = yf.Ticker(symbol)
+    try:
+        info = company.get_info()
+    except Exception:
+        try:
+            info = company.info
+        except Exception:
+            info = {}
+    return dict(info) if isinstance(info, dict) else {}
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _discover_automatic_peers_cached(
+    ticker: str,
+    target_info: dict[str, Any],
+    max_peers: int = 6,
+) -> dict[str, Any]:
+    """Discover same-industry candidates, enrich them lightly, then rank them."""
+    from src.analytics.industry_analysis import select_similar_peers
+    from src.data.sector_mapper import EXTENDED_SECTOR_MAP, KNOWN_SECTOR_MAP
+
+    symbol = str(ticker or "").strip().upper()
+    candidate_profiles: dict[str, dict[str, Any]] = {}
+    for source in (KNOWN_SECTOR_MAP, EXTENDED_SECTOR_MAP):
+        for candidate, classification in source.items():
+            candidate_symbol = str(candidate).strip().upper()
+            if not candidate_symbol or candidate_symbol == symbol or candidate_symbol in candidate_profiles:
+                continue
+            sector, industry = classification
+            candidate_profiles[candidate_symbol] = {
+                "symbol": candidate_symbol,
+                "sector": sector,
+                "industry": industry,
+            }
+    shortlist = select_similar_peers(
+        target_info,
+        candidate_profiles,
+        target_ticker=symbol,
+        max_peers=max(12, int(max_peers) * 2),
+    )
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    enriched: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    shortlist_symbols = [
+        str(candidate.get("ticker") or "").upper()
+        for candidate in shortlist
+        if str(candidate.get("ticker") or "").strip()
+    ]
+    if shortlist_symbols:
+        with ThreadPoolExecutor(max_workers=min(6, len(shortlist_symbols))) as executor:
+            future_symbols = {
+                executor.submit(_fetch_lightweight_company_info, candidate_symbol): candidate_symbol
+                for candidate_symbol in shortlist_symbols
+            }
+            for future in as_completed(future_symbols):
+                candidate_symbol = future_symbols[future]
+                try:
+                    info = future.result()
+                except Exception:
+                    info = {}
+                if info:
+                    enriched[candidate_symbol] = info
+                else:
+                    enriched[candidate_symbol] = candidate_profiles[candidate_symbol]
+                    failures.append(candidate_symbol)
+    ranked = select_similar_peers(
+        target_info,
+        enriched,
+        target_ticker=symbol,
+        max_peers=int(max_peers),
+    )
+    return {
+        "available": bool(ranked),
+        "source": "Static GICS classifications + Yahoo Finance fundamentals",
+        "peers": ranked,
+        "info": {row["ticker"]: enriched.get(row["ticker"], {}) for row in ranked},
+        "failures": sorted(failures),
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_ai_dcf_provider_cached(
+    ticker: str,
+    evidence: dict[str, Any],
+    credential_fingerprint: str,
+    _api_key: str,
+) -> dict[str, Any]:
+    """Cache successful provider attempts without using the secret as a cache key."""
+    module = importlib.import_module("src.ai.company_analysis")
+    if not hasattr(module, "generate_dcf_assumptions"):
+        module = importlib.reload(module)
+
+    return module.generate_dcf_assumptions({"ticker": ticker, **evidence}, _api_key)
+
+
+def _fetch_ai_dcf_assumptions_cached(ticker: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return a stable AI proposal while allowing newly configured credentials."""
+    from src.ai.ai_review import resolve_groq_api_key
+
+    api_key = resolve_groq_api_key(st.secrets)
+    if not api_key:
+        return {"available": False, "source": "ai_unavailable", "error": "GROQ_API_KEY was not provided."}
+    fingerprint = hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:12]
+    return _fetch_ai_dcf_provider_cached(ticker, evidence, fingerprint, str(api_key))
+
+
+def _dcf_widget_values(ticker: str, defaults: dict[str, Any]) -> dict[str, float | int | bool]:
+    """Translate model assumptions into the units displayed by DCF widgets."""
+    return {
+        f"dcf_fcf_{ticker}": float(defaults["starting_fcff"]) / 1e9,
+        f"dcf_growth_{ticker}": float(defaults["initial_growth_rate"]) * 100,
+        f"dcf_near_{ticker}": int(defaults["near_term_years"]),
+        f"dcf_fade_{ticker}": int(defaults["fade_years"]),
+        f"dcf_wacc_{ticker}": float(defaults["discount_rate"]) * 100,
+        f"dcf_terminal_{ticker}": float(defaults["terminal_growth_rate"]) * 100,
+        f"dcf_shares_{ticker}": float(defaults["shares_outstanding"]) / 1e6,
+        f"dcf_cash_{ticker}": float(defaults["cash"]) / 1e9,
+        f"dcf_debt_{ticker}": float(defaults["debt"]) / 1e9,
+        f"dcf_midyear_{ticker}": bool(defaults.get("midyear_convention", True)),
+    }
+
+
+def _dcf_widget_keys(ticker: str) -> tuple[str, ...]:
+    return tuple(
+        f"dcf_{field}_{ticker}"
+        for field in ("fcf", "growth", "near", "fade", "wacc", "terminal", "shares", "cash", "debt", "midyear")
+    )
+
+
 def _load_company_analysis_module(*required_names: str, minimum_macro_schema: int = 0) -> Any:
     """Reload the analytics module when Streamlit retained a pre-feature version."""
     module = importlib.import_module("src.analytics.company_analysis")
@@ -7133,31 +7277,76 @@ def _render_industry_peer_analysis(
     from src.analytics.industry_analysis import (
         PORTER_FORCES,
         build_industry_analysis,
+        select_similar_peers,
     )
     from src.portfolio_tracker.strategy_store import load_company_research, save_company_research
 
     with get_connection() as conn:
         research_record = load_company_research(conn, selected_ticker)
     current = _strategy_payload(research_record)
-    peer_options = [ticker for ticker in valid_results if ticker != selected_ticker]
-    saved_peers = [
-        str(ticker).upper() for ticker in current.get("peer_tickers", [])
-        if str(ticker).upper() in peer_options
-    ]
-    default_peers = saved_peers if "peer_tickers" in current else peer_options
+    company_info = valid_results[selected_ticker].get("info", {})
+    with st.spinner("Finding comparable companies in the same industry…"):
+        automatic_peer_payload = _discover_automatic_peers_cached(selected_ticker, dict(company_info), 6)
+    automatic_info = dict(automatic_peer_payload.get("info", {}))
+    loaded_info = {
+        ticker: snapshot.get("info", {})
+        for ticker, snapshot in valid_results.items() if ticker != selected_ticker
+    }
+    saved_peer_tickers = [str(ticker).strip().upper() for ticker in current.get("peer_tickers", []) if str(ticker).strip()]
+    for saved_ticker in saved_peer_tickers:
+        if saved_ticker != selected_ticker and saved_ticker not in automatic_info and saved_ticker not in loaded_info:
+            saved_info = _fetch_lightweight_company_info_cached(saved_ticker)
+            if saved_info:
+                automatic_info[saved_ticker] = saved_info
+    peer_universe_info = {**automatic_info, **loaded_info}
+    automatic_ranking = select_similar_peers(
+        company_info,
+        peer_universe_info,
+        target_ticker=selected_ticker,
+        max_peers=6,
+    )
+    automatic_peers = [row["ticker"] for row in automatic_ranking]
+    peer_options = list(dict.fromkeys([
+        *automatic_peers,
+        *saved_peer_tickers,
+        *(ticker for ticker in valid_results if ticker != selected_ticker),
+    ]))
+    saved_peers = [ticker for ticker in saved_peer_tickers if ticker in peer_options]
+    has_saved_peer_set = "peer_tickers" in current
+    default_peers = saved_peers if has_saved_peer_set else automatic_peers
+    if not default_peers and not has_saved_peer_set:
+        default_peers = [ticker for ticker in valid_results if ticker != selected_ticker]
+    peer_widget_key = f"industry_peer_set_{selected_ticker}"
+    if peer_widget_key in st.session_state:
+        current_peer_selection = st.session_state.get(peer_widget_key, [])
+        st.session_state[peer_widget_key] = [
+            ticker for ticker in current_peer_selection if ticker in peer_options
+        ]
 
     st.markdown("#### Industry Structure & Peer Comparison")
     st.caption(
-        "Quantitative comparisons use only the loaded companies. Porter Five Forces and SWOT use only analyst-entered "
-        "ratings and evidence; missing qualitative judgments remain missing."
+        "Comparable companies are discovered automatically from the same industry and ranked by classification, "
+        "market cap, profitability, and growth. You can still edit and save the peer set manually. Porter Five Forces "
+        "and SWOT use only analyst-entered ratings and evidence."
     )
+    peer_default = {} if peer_widget_key in st.session_state else {"default": default_peers}
     selected_peers = st.multiselect(
-        "Peer set from loaded companies",
+        "Comparable companies",
         peer_options,
-        default=default_peers,
-        key=f"industry_peer_set_{selected_ticker}",
-        help="Load additional tickers in Company Analysis to expand the peer set.",
+        key=peer_widget_key,
+        help="Automatically suggested peers can be added or removed manually.",
+        **peer_default,
     )
+    if automatic_ranking:
+        st.markdown("##### Automatically selected competitors")
+        st.dataframe(pd.DataFrame([{
+            "Ticker": row.get("ticker"),
+            "Company": row.get("name"),
+            "Match": str(row.get("classification_match") or "").replace("_", " ").title(),
+            "Industry": row.get("industry"),
+            "Similarity": row.get("score"),
+            "Financial coverage %": row.get("financial_coverage_pct"),
+        } for row in automatic_ranking]), use_container_width=True, hide_index=True)
 
     porter_current = current.get("porter", {}) if isinstance(current.get("porter"), dict) else {}
     porter_frame = pd.DataFrame([{
@@ -7241,10 +7430,9 @@ def _render_industry_peer_analysis(
         st.success("Industry and peer research saved to the shared database.")
         st.rerun()
 
-    company_info = valid_results[selected_ticker].get("info", {})
     peer_metrics = {
-        ticker: valid_results[ticker].get("info", {})
-        for ticker in selected_peers if ticker in valid_results
+        ticker: peer_universe_info.get(ticker, {})
+        for ticker in selected_peers if ticker in peer_universe_info
     }
     analysis = build_industry_analysis(
         company_info,
@@ -7291,13 +7479,13 @@ def _render_industry_peer_analysis(
         st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True, height=470)
     else:
         st.warning(
-            "A robust peer score needs at least two loaded peer companies with comparable metrics. "
-            "The app does not manufacture a peer set."
+            "A robust peer score needs at least two selected companies with sufficient comparable metrics. "
+            "Keep the automatic suggestions or add another peer manually."
         )
 
     scatter_rows = []
     for ticker in [selected_ticker, *selected_peers]:
-        info = valid_results.get(ticker, {}).get("info", {})
+        info = company_info if ticker == selected_ticker else peer_universe_info.get(ticker, {})
         forward_pe = info.get("forwardPE")
         growth = info.get("revenueGrowth")
         if forward_pe is None or growth is None:
@@ -7526,8 +7714,14 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     from src.analytics.company_analysis import (
         analyze_moat,
         analyze_track_record,
-        build_dcf_scenarios,
-        default_dcf_assumptions,
+    )
+    from src.analytics.dcf import (
+        build_dcf_sensitivity,
+        build_multistage_dcf_scenarios,
+        calculate_multistage_dcf,
+        default_multistage_dcf_assumptions,
+        prepare_dcf_inputs,
+        solve_reverse_dcf,
     )
 
     st.markdown("### Company Analysis")
@@ -7564,6 +7758,15 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                 progress.progress(index / len(tickers), text=f"Loaded {index}/{len(tickers)}: {ticker}")
             progress.empty()
             st.session_state[COMPANY_ANALYSIS_KEY] = results
+            # A deliberate new analysis should load a fresh model proposal.
+            # Ordinary reruns retain any manual edits made after initialization.
+            for ticker in tickers:
+                st.session_state.pop(f"dcf_defaults_loaded_{ticker}", None)
+                st.session_state.pop(f"dcf_v2_defaults_loaded_{ticker}", None)
+                st.session_state.pop(f"dcf_years_{ticker}", None)
+                st.session_state.pop(f"industry_peer_set_{ticker}", None)
+                for widget_key in _dcf_widget_keys(ticker):
+                    st.session_state.pop(widget_key, None)
 
     results = st.session_state.get(COMPANY_ANALYSIS_KEY, {})
     if not isinstance(results, dict) or not results:
@@ -7582,7 +7785,8 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     for ticker, snapshot in valid_results.items():
         info = snapshot.get("info", {})
         moat = analyze_moat(info)
-        base_dcf = build_dcf_scenarios(info).get("Base", {})
+        dcf_inputs = prepare_dcf_inputs(snapshot)
+        base_dcf = calculate_multistage_dcf(dcf_inputs, default_multistage_dcf_assumptions(dcf_inputs))
         geographic_analysis = snapshot.get("geographic_revenue", {}).get("analysis", {})
         comparison_rows.append({
             "Ticker": ticker,
@@ -7599,7 +7803,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                 if geographic_analysis.get("available")
                 else "Not disclosed"
             ),
-            "Base DCF / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
+            "Baseline DCF v2 / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
         })
     st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
 
@@ -7800,48 +8004,191 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                     st.error(item)
 
     with dcf_tab:
-        defaults = default_dcf_assumptions(info)
-        st.markdown("#### Custom DCF Assumptions")
+        dcf_inputs = prepare_dcf_inputs(snapshot)
+        defaults = default_multistage_dcf_assumptions(dcf_inputs)
+        dcf_evidence = {key: info.get(key) for key in [
+            "shortName", "sector", "industry", "marketCap", "beta", "freeCashflow",
+            "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth", "grossMargins",
+            "operatingMargins", "profitMargins", "returnOnEquity", "totalCash", "totalDebt",
+            "sharesOutstanding", "currentPrice", "regularMarketPrice",
+        ]}
+        dcf_evidence.update({
+            "normalizedFcff": dcf_inputs.get("normalized", {}).get("fcff"),
+            "cashFlowBasis": dcf_inputs.get("normalized", {}).get("cash_flow_basis"),
+            "calculatedWacc": dcf_inputs.get("wacc", {}).get("wacc"),
+            "statementPeriods": dcf_inputs.get("quality", {}).get("statement_periods"),
+        })
+        with st.spinner("Preparing AI-informed multi-stage DCF assumptions…"):
+            ai_dcf = _fetch_ai_dcf_assumptions_cached(selected_ticker, dcf_evidence)
+        if ai_dcf.get("available") and isinstance(ai_dcf.get("assumptions"), dict):
+            ai_assumptions = ai_dcf["assumptions"]
+            ai_forecast_assumptions = {
+                key: ai_assumptions[key] for key in (
+                    "initial_growth_rate", "near_term_years", "fade_years",
+                    "terminal_growth_rate", "lifecycle",
+                ) if key in ai_assumptions
+            }
+            if "terminal_growth_rate" in ai_forecast_assumptions:
+                ai_forecast_assumptions["terminal_growth_rate"] = min(
+                    max(float(ai_forecast_assumptions["terminal_growth_rate"]), -0.02),
+                    float(defaults["discount_rate"]) - 0.025,
+                )
+            defaults = {
+                **defaults,
+                **ai_forecast_assumptions,
+            }
+            st.success(
+                f"AI-informed {str(defaults.get('lifecycle') or 'company-specific').replace('_', ' ')} starting point loaded automatically."
+            )
+            st.caption(
+                f"{ai_dcf.get('rationale', 'Based on the available company metrics.')} "
+                f"Confidence: {float(ai_dcf.get('confidence') or 0.5):.0%}. Forecast judgments remain editable; "
+                "WACC stays tied to the transparent beta and capital-structure calculation."
+            )
+        else:
+            st.info(
+                "AI proposal is unavailable. A lifecycle-aware deterministic model was loaded automatically from statements, "
+                "growth, beta, and capital structure; no assumption is randomized."
+            )
+
+        normalized = dcf_inputs.get("normalized", {})
+        wacc_detail = dcf_inputs.get("wacc", {})
+        quality = dcf_inputs.get("quality", {})
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Normalized FCFF", f"${float(normalized.get('fcff') or 0) / 1e9:,.2f}B")
+        summary_cols[1].metric("Cash-flow basis", str(normalized.get("cash_flow_basis") or "Unavailable").replace("_", " ").title())
+        summary_cols[2].metric("Calculated WACC", f"{float(wacc_detail.get('wacc') or 0):.2%}")
+        summary_cols[3].metric("Lifecycle", str(defaults.get("lifecycle") or "Unknown").replace("_", " ").title())
+        st.caption(
+            "DCF v2 separates reported data, normalized FCFF, calculated WACC, AI forecast judgments, and manual overrides. "
+            "Growth fades smoothly into the terminal rate instead of dropping abruptly."
+        )
+
+        st.markdown("#### Editable Multi-Stage Assumptions")
+        reset_values = _dcf_widget_values(selected_ticker, defaults)
+        initialization_key = f"dcf_v2_defaults_loaded_{selected_ticker}"
+        if not st.session_state.get(initialization_key):
+            st.session_state.update(reset_values)
+            st.session_state[initialization_key] = True
+        if st.button("Reset all fields to current suggested values", key=f"dcf_reset_{selected_ticker}"):
+            st.session_state.update(reset_values)
         with st.form(f"dcf_form_{selected_ticker}"):
             d1, d2, d3, d4 = st.columns(4)
             with d1:
-                fcf_b = st.number_input("Normalized FCF (billions)", value=float(defaults["free_cash_flow"]) / 1e9, step=0.1, key=f"dcf_fcf_{selected_ticker}")
-                growth_pct = st.number_input("FCF Growth (%)", value=float(defaults["growth_rate"]) * 100, step=0.5, key=f"dcf_growth_{selected_ticker}")
+                fcf_b = st.number_input("Normalized FCFF (billions)", step=0.1, key=f"dcf_fcf_{selected_ticker}")
+                growth_pct = st.number_input("Initial FCFF Growth (%)", min_value=-99.0, max_value=100.0, step=0.5, key=f"dcf_growth_{selected_ticker}")
             with d2:
-                discount_pct = st.number_input("Discount Rate / WACC (%)", value=float(defaults["discount_rate"]) * 100, step=0.5, key=f"dcf_wacc_{selected_ticker}")
-                terminal_pct = st.number_input("Terminal Growth (%)", value=float(defaults["terminal_growth_rate"]) * 100, step=0.25, key=f"dcf_terminal_{selected_ticker}")
+                near_years = st.number_input("Near-Term Stage (years)", min_value=1, max_value=10, step=1, key=f"dcf_near_{selected_ticker}")
+                fade_years = st.number_input("Competitive Fade (years)", min_value=1, max_value=15, step=1, key=f"dcf_fade_{selected_ticker}")
             with d3:
-                years = st.number_input("Explicit Forecast Years", 1, 20, int(defaults["years"]), key=f"dcf_years_{selected_ticker}")
-                shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, value=float(defaults["shares_outstanding"]) / 1e6, step=1.0, key=f"dcf_shares_{selected_ticker}")
+                discount_pct = st.number_input("Discount Rate / WACC (%)", step=0.5, key=f"dcf_wacc_{selected_ticker}")
+                terminal_pct = st.number_input("Terminal Growth (%)", step=0.25, key=f"dcf_terminal_{selected_ticker}")
             with d4:
-                cash_b = st.number_input("Cash (billions)", value=float(defaults["cash"]) / 1e9, step=0.1, key=f"dcf_cash_{selected_ticker}")
-                debt_b = st.number_input("Debt (billions)", value=float(defaults["debt"]) / 1e9, step=0.1, key=f"dcf_debt_{selected_ticker}")
-            st.form_submit_button("Recalculate DCF", type="primary", use_container_width=True)
+                shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, step=1.0, key=f"dcf_shares_{selected_ticker}")
+                cash_b = st.number_input("Cash (billions)", step=0.1, key=f"dcf_cash_{selected_ticker}")
+                debt_b = st.number_input("Debt (billions)", step=0.1, key=f"dcf_debt_{selected_ticker}")
+            midyear = st.checkbox(
+                "Mid-year discounting convention",
+                key=f"dcf_midyear_{selected_ticker}",
+                help="Assumes cash flows arrive through the year instead of only on the final day.",
+            )
+            st.form_submit_button("Recalculate Multi-Stage DCF", type="primary", use_container_width=True)
         assumptions = {
-            "free_cash_flow": float(fcf_b) * 1e9, "growth_rate": float(growth_pct) / 100,
-            "discount_rate": float(discount_pct) / 100, "terminal_growth_rate": float(terminal_pct) / 100,
-            "years": int(years), "cash": float(cash_b) * 1e9, "debt": float(debt_b) * 1e9,
-            "shares_outstanding": float(shares_m) * 1e6, "current_price": float(defaults["current_price"]),
+            **defaults,
+            "starting_fcff": float(fcf_b) * 1e9,
+            "initial_growth_rate": float(growth_pct) / 100,
+            "near_term_years": int(near_years),
+            "fade_years": int(fade_years),
+            "discount_rate": float(discount_pct) / 100,
+            "terminal_growth_rate": float(terminal_pct) / 100,
+            "cash": float(cash_b) * 1e9,
+            "debt": float(debt_b) * 1e9,
+            "shares_outstanding": float(shares_m) * 1e6,
+            "current_price": float(defaults["current_price"]),
+            "midyear_convention": bool(midyear),
         }
-        scenarios = build_dcf_scenarios(info, assumptions)
+        scenarios = build_multistage_dcf_scenarios(dcf_inputs, assumptions)
         scenario_columns = st.columns(3)
         for column, (name, result) in zip(scenario_columns, scenarios.items()):
             with column:
                 st.markdown(f"#### {name}")
                 if result.get("available"):
                     st.metric("Fair Value / Share", f"${result['fair_value_per_share']:,.2f}", f"{result['upside_pct']:+.1%}" if result.get("upside_pct") is not None else None)
-                    st.caption(f"Terminal value: {result['terminal_value_share']:.1%} EV")
+                    st.caption(
+                        f"Terminal value: {result['terminal_value_share']:.1%} EV · "
+                        f"Explicit forecast: {len(result.get('projected', []))} years"
+                    )
                 else:
                     st.error(result.get("error", "DCF cannot be calculated."))
         base_result = scenarios.get("Base", {})
         if base_result.get("available"):
-            st.markdown("#### Base-Case Projection")
+            st.markdown("#### Base-Case Growth Fade")
             st.dataframe(pd.DataFrame([{
-                "Year": row["year"], "FCF": f"${row['free_cash_flow'] / 1e9:,.2f}B", "Present Value": f"${row['present_value'] / 1e9:,.2f}B",
+                "Year": row["year"],
+                "Phase": str(row.get("phase") or "").replace("_", " ").title(),
+                "FCFF Growth": row.get("growth_rate"),
+                "FCFF ($B)": row["free_cash_flow"] / 1e9,
+                "Discount Factor": row.get("discount_factor"),
+                "Present Value ($B)": row["present_value"] / 1e9,
             } for row in base_result["projected"]]), use_container_width=True, hide_index=True)
-            if base_result["terminal_value_share"] > 0.75:
-                st.warning("More than 75% of enterprise value comes from terminal value; the result is highly sensitive to WACC and terminal growth.")
-        st.caption("DCF is a scenario model, not a price target or investment recommendation.")
+
+            bridge = base_result.get("bridge", {})
+            st.markdown("#### Enterprise-to-Equity Bridge")
+            bridge_cols = st.columns(5)
+            bridge_cols[0].metric("Explicit PV", f"${float(base_result.get('pv_explicit') or 0) / 1e9:,.2f}B")
+            bridge_cols[1].metric("Terminal PV", f"${float(base_result.get('terminal_present_value') or 0) / 1e9:,.2f}B")
+            bridge_cols[2].metric("Enterprise Value", f"${float(bridge.get('enterprise_value') or 0) / 1e9:,.2f}B")
+            bridge_cols[3].metric("Net Cash / (Debt)", f"${(float(bridge.get('cash') or 0) - float(bridge.get('debt') or 0)) / 1e9:,.2f}B")
+            bridge_cols[4].metric("Equity Value", f"${float(bridge.get('equity_value') or 0) / 1e9:,.2f}B")
+
+            reverse = solve_reverse_dcf(dcf_inputs, assumptions)
+            st.markdown("#### What Must Be True? — Reverse DCF")
+            if reverse.get("available"):
+                reverse_cols = st.columns(3)
+                reverse_cols[0].metric("Current Market Price", f"${float(reverse['target_price']):,.2f}")
+                reverse_cols[1].metric("Base Initial Growth", f"{float(reverse['base_initial_growth_rate']):.1%}")
+                reverse_cols[2].metric(
+                    "Growth Implied by Market",
+                    f"{float(reverse['implied_initial_growth_rate']):.1%}",
+                    f"{float(reverse['growth_gap']):+.1%} vs base",
+                )
+                st.caption(
+                    "This is not a forecast. It solves the initial FCFF growth required for the model to equal the current share price, "
+                    "holding the remaining assumptions constant."
+                )
+            else:
+                st.warning(reverse.get("error", "Reverse DCF is unavailable."))
+
+            sensitivity = build_dcf_sensitivity(dcf_inputs, assumptions)
+            sensitivity_frame = pd.DataFrame(
+                sensitivity["values"],
+                index=[f"Terminal g {value:.2%}" for value in sensitivity["terminal_growth_values"]],
+                columns=[f"WACC {value:.2%}" for value in sensitivity["wacc_values"]],
+            )
+            st.markdown("#### Fair Value Sensitivity ($ / share)")
+            st.dataframe(sensitivity_frame.round(2), use_container_width=True)
+
+            with st.expander("WACC calculation and data-quality audit", expanded=False):
+                st.dataframe(pd.DataFrame([{
+                    "Risk-free rate": wacc_detail.get("risk_free_rate"),
+                    "Raw beta": wacc_detail.get("raw_beta"),
+                    "Adjusted beta": wacc_detail.get("adjusted_beta"),
+                    "Equity risk premium": wacc_detail.get("equity_risk_premium"),
+                    "Cost of equity": wacc_detail.get("cost_of_equity"),
+                    "Pre-tax cost of debt": wacc_detail.get("pre_tax_cost_of_debt"),
+                    "Tax rate": wacc_detail.get("tax_rate"),
+                    "Equity weight": wacc_detail.get("equity_weight"),
+                    "Debt weight": wacc_detail.get("debt_weight"),
+                    "Calculated WACC": wacc_detail.get("wacc"),
+                }]), use_container_width=True, hide_index=True)
+                st.write(f"FCFF normalization method: `{normalized.get('method', 'unavailable')}`")
+                st.write(f"Historical statement periods used: {quality.get('statement_periods', 0)}")
+
+            for warning in base_result.get("diagnostics", {}).get("warnings", []):
+                st.warning(str(warning))
+        else:
+            st.error(base_result.get("error", "Base DCF cannot be calculated from the available data."))
+        st.caption("DCF v2 is an auditable scenario model, not a price target or investment recommendation.")
 
     with metrics_tab:
         st.markdown(f"#### All Available Scalar Metrics ({len(snapshot.get('metrics', {}))})")
