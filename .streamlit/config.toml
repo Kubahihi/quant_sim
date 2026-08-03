@@ -12,7 +12,4 @@ toolbarMode = "minimal"
 
 [theme]
 primaryColor = "#167d78"
-backgroundColor = "#f7f8fa"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#17202e"
 font = "sans serif"

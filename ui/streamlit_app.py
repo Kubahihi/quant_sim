@@ -237,6 +237,53 @@ with st.sidebar:
         args=(True,),
     )
     st.markdown("---")
+    
+    is_dark = st.toggle("Dark Mode", key="quant_manual_dark_mode")
+    if is_dark:
+        st.markdown(
+            """
+            <style>
+            [data-testid="stAppViewContainer"], [data-testid="stSidebar"], :root {
+                --background-color: #0f172a !important;
+                --text-color: #e2e8f0 !important;
+                --secondary-background-color: #1e293b !important;
+                --qp-ink: #f8fafc !important;
+                --qp-line: #334155 !important;
+                --qp-card: #1e293b !important;
+                --qp-muted: #94a3b8 !important;
+                --qp-soft: #334155 !important;
+                --qp-navy: #020617 !important;
+                --qp-accent: #0f766e !important;
+                --qp-accent-text: #2dd4bf !important;
+                --qp-accent-soft: rgba(45, 212, 191, 0.15) !important;
+                --qp-shadow: 0 10px 30px rgba(0, 0, 0, 0.4) !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <style>
+            [data-testid="stAppViewContainer"], [data-testid="stSidebar"], :root {
+                --background-color: #f8fafc !important;
+                --text-color: #334155 !important;
+                --secondary-background-color: #ffffff !important;
+                --qp-ink: #1e293b !important;
+                --qp-line: #e2e8f0 !important;
+                --qp-card: #ffffff !important;
+                --qp-muted: #64748b !important;
+                --qp-soft: #f1f5f9 !important;
+                --qp-navy: #0f172a !important;
+                --qp-accent-soft: #eaf7f5 !important;
+                --qp-shadow: 0 10px 30px rgba(15, 23, 42, 0.05) !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("---")
 
 if app_route == "Wharton Cockpit":
     from ui.pages.wharton_dash import render_wharton_cockpit

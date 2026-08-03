@@ -56,16 +56,32 @@ def inject_dashboard_styles() -> None:
         """
         <style>
         :root {
-            --qp-ink: #17202e;
-            --qp-muted: #64748b;
-            --qp-line: #e3e8ef;
-            --qp-soft: #f5f7fa;
-            --qp-card: #ffffff;
-            --qp-navy: #142238;
-            --qp-accent: #167d78;
-            --qp-accent-soft: #eaf7f5;
+            --qp-ink: var(--text-color);
+            --qp-line: var(--secondary-background-color);
+            --qp-card: var(--background-color);
+            --qp-accent: var(--primary-color);
+            --qp-accent-text: var(--primary-color);
             --qp-radius: 14px;
-            --qp-shadow: 0 10px 30px rgba(27, 39, 54, 0.07);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --qp-muted: #94a3b8;
+                --qp-soft: #1e293b;
+                --qp-navy: #0f172a;
+                --qp-accent-soft: rgba(22, 125, 120, 0.25);
+                --qp-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            }
+        }
+        
+        @media (prefers-color-scheme: light) {
+            :root {
+                --qp-muted: #64748b;
+                --qp-soft: #f5f7fa;
+                --qp-navy: #142238;
+                --qp-accent-soft: #eaf7f5;
+                --qp-shadow: 0 10px 30px rgba(27, 39, 54, 0.07);
+            }
         }
 
         html, body, [class*="css"] {
@@ -73,14 +89,14 @@ def inject_dashboard_styles() -> None:
         }
 
         [data-testid="stAppViewContainer"] {
-            background: #f7f8fa;
+            background: var(--background-color);
             color: var(--qp-ink);
         }
 
         [data-testid="stAppViewContainer"] > .main {
             background:
                 radial-gradient(circle at 92% 0%, rgba(22, 125, 120, 0.055), transparent 24rem),
-                #f7f8fa;
+                var(--background-color);
         }
 
         .main .block-container {
@@ -91,7 +107,7 @@ def inject_dashboard_styles() -> None:
         [data-testid="stSidebar"][aria-expanded="true"] {
             min-width: 320px;
             max-width: 320px;
-            background: #ffffff;
+            background: var(--secondary-background-color);
             border-right: 1px solid var(--qp-line);
         }
 
@@ -119,8 +135,9 @@ def inject_dashboard_styles() -> None:
         }
 
         [data-testid="stSidebar"] h2,
-        [data-testid="stSidebar"] h3 {
-            color: var(--qp-ink);
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] h1 {
+            color: var(--qp-ink) !important;
             letter-spacing: -0.02em;
         }
 
@@ -153,12 +170,12 @@ def inject_dashboard_styles() -> None:
         }
 
         .qp-brand-copy span {
-            color: var(--qp-muted);
+            color: var(--qp-muted) !important;
             font-size: 0.75rem;
         }
 
         .qp-eyebrow {
-            color: var(--qp-accent);
+            color: var(--qp-accent-text) !important;
             text-transform: uppercase;
             letter-spacing: 0.13em;
             font-size: 0.7rem;
@@ -166,8 +183,8 @@ def inject_dashboard_styles() -> None:
             margin-bottom: 0.5rem;
         }
 
-        h1, h2, h3 {
-            color: var(--qp-ink);
+        h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+            color: var(--qp-ink) !important;
             letter-spacing: -0.035em;
         }
 
@@ -176,7 +193,7 @@ def inject_dashboard_styles() -> None:
         h3 { font-size: 1.12rem !important; }
 
         p, label, [data-testid="stCaptionContainer"] {
-            color: var(--qp-muted);
+            color: var(--qp-muted) !important;
         }
 
         hr {
@@ -191,7 +208,7 @@ def inject_dashboard_styles() -> None:
         div[data-testid="stVegaLiteChart"] {
             border-color: var(--qp-line) !important;
             border-radius: var(--qp-radius) !important;
-            background: rgba(255, 255, 255, 0.9);
+            background: var(--qp-card);
         }
 
         div[data-testid="stExpander"] {
@@ -223,7 +240,9 @@ def inject_dashboard_styles() -> None:
         button[kind="secondary"] {
             min-height: 2.65rem;
             border-radius: 10px;
-            border-color: #d5dde7;
+            background-color: var(--qp-card) !important;
+            color: var(--qp-ink) !important;
+            border-color: var(--qp-line) !important;
             font-weight: 650;
             transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
         }
@@ -237,13 +256,29 @@ def inject_dashboard_styles() -> None:
 
         .stButton > button[kind="primary"],
         button[kind="primaryFormSubmit"] {
-            color: #ffffff;
-            background: var(--qp-accent);
-            border-color: var(--qp-accent);
+            color: #ffffff !important;
+            background: var(--qp-accent) !important;
+            border-color: var(--qp-accent) !important;
         }
 
-        input, textarea, [data-baseweb="select"] > div {
+        .stTextInput > div > div > div, 
+        .stSelectbox > div > div > div,
+        .stTextArea > div > div > div,
+        .stNumberInput > div > div > div {
             border-radius: 10px !important;
+            background-color: var(--qp-card) !important;
+            border-color: var(--qp-line) !important;
+        }
+
+        .stTextInput input, .stTextArea textarea, .stSelectbox span, .stNumberInput input {
+            color: var(--qp-ink) !important;
+        }
+        
+        /* Fallback for other inputs */
+        input, textarea, [data-baseweb="select"] > div, [data-baseweb="base-input"], [data-baseweb="input"] {
+            background-color: var(--qp-card) !important;
+            color: var(--qp-ink) !important;
+            border-color: var(--qp-line) !important;
         }
 
         div[data-testid="stTabs"] [data-baseweb="tab-list"] {
@@ -293,7 +328,7 @@ def inject_dashboard_styles() -> None:
             padding: 0.42rem;
             border: 1px solid var(--qp-line);
             border-radius: var(--qp-radius);
-            background: rgba(255, 255, 255, 0.86);
+            background: var(--qp-card);
         }
 
         .st-key-dashboard_active_page [role="radiogroup"] label {
