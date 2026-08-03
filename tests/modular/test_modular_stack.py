@@ -423,6 +423,7 @@ def test_run_quant_stack_preserves_portfolio_metrics_and_namespaces_backtest(tmp
         returns_df=returns_df,
         config={
             "tickers": ["AAA", "BBB", "CCC"],
+            "news_tickers": ["AAA"],
             "weights": [1 / 3, 1 / 3, 1 / 3],
             "start_date": portfolio_returns.index.min().date(),
             "end_date": portfolio_returns.index.max().date(),
@@ -447,3 +448,4 @@ def test_run_quant_stack_preserves_portfolio_metrics_and_namespaces_backtest(tmp
     assert "backtest_max_drawdown" in saved["metrics"]
     assert "backtest_sharpe" in saved["metrics"]
     assert seen_context["news_api_key"] == "news-key-from-config"
+    assert seen_context["tickers"] == ["AAA"]

@@ -15,6 +15,7 @@ underweight while still checking liquidity constraints against the portfolio.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 import math
 import re
 from typing import Any
@@ -276,6 +277,8 @@ def normalize_client_mandate(mandate: Mapping[str, Any] | None) -> dict[str, Any
         "required_tags": _string_list(constraints.get("required_tags"), lower=True),
         "notes": notes,
     }
+    behavioral_raw = raw.get("behavioral_profile", {})
+    behavioral_profile = deepcopy(dict(behavioral_raw)) if isinstance(behavioral_raw, Mapping) else {}
 
     return {
         "client_name": _display_name(raw.get("client_name"), "Client"),
@@ -286,6 +289,7 @@ def normalize_client_mandate(mandate: Mapping[str, Any] | None) -> dict[str, Any
         "base_currency": str(raw.get("base_currency") or "USD").strip().upper(),
         "values_constraints": values_constraints,
         "goals": goals,
+        "behavioral_profile": behavioral_profile,
         "normalization_warnings": warnings,
     }
 

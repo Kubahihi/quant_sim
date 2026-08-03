@@ -13,6 +13,7 @@ from src.analytics.company_analysis import (
     build_dcf_scenarios,
     calculate_dcf,
     classify_biography_sections,
+    default_dcf_assumptions,
     fetch_imf_current_account_balance,
     fetch_imf_general_government_debt,
     fetch_macro_snapshot,
@@ -106,6 +107,20 @@ def test_scenarios_order_bear_base_bull_fair_values():
     assert list(scenarios) == ["Bear", "Base", "Bull"]
     assert scenarios["Bear"]["fair_value_per_share"] < scenarios["Base"]["fair_value_per_share"]
     assert scenarios["Base"]["fair_value_per_share"] < scenarios["Bull"]["fair_value_per_share"]
+
+
+def test_default_dcf_assumptions_are_company_specific_and_deterministic():
+    low_risk = {**_sample_info(), "beta": 0.7, "totalDebt": 1_000_000_000}
+    high_risk = {**_sample_info(), "beta": 1.8, "totalDebt": 250_000_000_000}
+
+    first = default_dcf_assumptions(low_risk)
+    repeated = default_dcf_assumptions(low_risk)
+    risky = default_dcf_assumptions(high_risk)
+
+    assert first == repeated
+    assert first["discount_rate"] < risky["discount_rate"]
+    assert first["discount_rate"] - first["terminal_growth_rate"] >= 0.025
+    assert first["years"] == 7
 
 
 def test_moat_and_track_record_are_evidence_based():

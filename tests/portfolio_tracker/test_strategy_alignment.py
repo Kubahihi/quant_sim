@@ -20,6 +20,7 @@ def _mandate() -> dict:
         "horizon_years": 12,
         "liquidity_need_pct": 5,
         "base_currency": "usd",
+        "behavioral_profile": {"answers": {"loss_1": 4}, "source_status": "Client interview"},
         "values_constraints": {
             "excluded_sectors": ["Tobacco"],
             "excluded_tickers": ["BAD"],
@@ -62,6 +63,7 @@ def test_normalizers_accept_editable_payloads_and_apply_client_floor():
     assert mandate["liquidity_need_pct"] == pytest.approx(0.05)
     assert [goal["target_weight"] for goal in mandate["goals"]] == pytest.approx([0.7, 0.3])
     assert mandate["values_constraints"]["excluded_tickers"] == ["BAD"]
+    assert mandate["behavioral_profile"]["answers"] == {"loss_1": 4}
     assert strategy["min_cash_weight"] == pytest.approx(0.05)
     assert strategy["max_position_weight"] == pytest.approx(0.50)
     assert strategy["target_holdings"] == 3

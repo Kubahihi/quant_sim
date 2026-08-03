@@ -121,21 +121,77 @@ def calculate_efficient_frontier(
     n_points: int = 50,
     allow_short: bool = False,
 ) -> List[Dict]:
-    """Calculate efficient frontier points"""
-    n_assets = returns.shape[1]
-    mean_returns = returns.mean().values * TRADING_DAYS
-    cov_matrix = returns.cov().values * TRADING_DAYS
-    symbols = returns.columns.tolist()
+    """Calculate efficient frontier points.
+
+    The frontier consists of a sequence of closely related quadratic
+    programs.  Supplying the exact objective/constraint gradients and using
+    each solution to initialize the next target avoids the repeated finite-
+    difference work of solving every point from equal weights.
+    """
+    if not isinstance(n_points, (int, np.integer)) or n_points < 2:
+        raise ValueError("n_points must be an integer of at least 2.")
+
+    clean_returns = (
+        pd.DataFrame(returns)
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(how="any")
+    )
+    if clean_returns.empty or clean_returns.shape[1] == 0:
+        raise ValueError(
+            "returns must contain finite observations for at least one asset."
+        )
+    if clean_returns.shape[0] < 2:
+        raise ValueError("returns must contain at least two observations.")
+
+    clean_returns = clean_returns.astype(float)
+    n_assets = clean_returns.shape[1]
+    mean_returns = clean_returns.mean().to_numpy(dtype=float) * TRADING_DAYS
+    cov_matrix = clean_returns.cov().to_numpy(dtype=float) * TRADING_DAYS
+    # Numerical noise can make a sample covariance microscopically
+    # asymmetric.  A symmetric matrix keeps the analytic gradient exact.
+    cov_matrix = (cov_matrix + cov_matrix.T) * 0.5
+    symbols = clean_returns.columns.tolist()
     
     def portfolio_metrics(weights):
-        ret = weights @ mean_returns
-        vol = np.sqrt(weights.T @ cov_matrix @ weights)
+        ret = float(weights @ mean_returns)
+        variance = float(weights @ cov_matrix @ weights)
+        vol = float(np.sqrt(max(variance, 0.0)))
         return ret, vol
+
+    if n_assets == 1:
+        weights = np.ones(1, dtype=float)
+        ret, vol = portfolio_metrics(weights)
+        metrics = calculate_portfolio_statistics(
+            weights=weights,
+            mean_returns=mean_returns,
+            cov_matrix=cov_matrix,
+            risk_free_rate=0.0,
+            symbols=symbols,
+        )
+        logger.info("Calculated the single feasible portfolio for one asset")
+        return [{
+            "weights": weights,
+            "return": ret,
+            "volatility": vol,
+            "sharpe_ratio": metrics["sharpe_ratio"],
+            "diversification_score": metrics["diversification_score"],
+            "effective_holdings": metrics["effective_holdings"],
+            "max_weight": metrics["max_weight"],
+            "top_holdings": metrics["top_holdings"],
+        }]
     
-    def portfolio_volatility(weights):
-        return np.sqrt(weights.T @ cov_matrix @ weights)
-    
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+    def portfolio_variance(weights: np.ndarray) -> float:
+        return float(weights @ cov_matrix @ weights)
+
+    def portfolio_variance_gradient(weights: np.ndarray) -> np.ndarray:
+        return 2.0 * (cov_matrix @ weights)
+
+    ones = np.ones(n_assets, dtype=float)
+    fully_invested_constraint = {
+        "type": "eq",
+        "fun": lambda weights: float(np.sum(weights) - 1.0),
+        "jac": lambda _weights: ones,
+    }
     
     if allow_short:
         bounds = [(-1.0, 1.0) for _ in range(n_assets)]
@@ -147,23 +203,31 @@ def calculate_efficient_frontier(
     target_returns = np.linspace(min_ret, max_ret, n_points)
     
     frontier_points = []
+    initial_weights = np.full(n_assets, 1.0 / n_assets, dtype=float)
     
     for target_return in target_returns:
-        target_constraints = constraints + [
-            {"type": "eq", "fun": lambda w: w @ mean_returns - target_return}
-        ]
+        target_constraint = {
+            "type": "eq",
+            "fun": lambda weights, target=target_return: float(
+                weights @ mean_returns - target
+            ),
+            "jac": lambda _weights: mean_returns,
+        }
         
         result = minimize(
-            portfolio_volatility,
-            np.array([1.0 / n_assets] * n_assets),
+            portfolio_variance,
+            initial_weights,
+            jac=portfolio_variance_gradient,
             method="SLSQP",
             bounds=bounds,
-            constraints=target_constraints,
+            constraints=(fully_invested_constraint, target_constraint),
             options={"maxiter": 1000, "disp": False},
         )
         
         if result.success:
-            weights = result.x
+            weights = np.asarray(result.x, dtype=float)
+            # Adjacent target-return problems have adjacent solutions.
+            initial_weights = weights
             ret, vol = portfolio_metrics(weights)
             metrics = calculate_portfolio_statistics(
                 weights=weights,

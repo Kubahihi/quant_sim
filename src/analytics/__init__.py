@@ -42,6 +42,35 @@ from .modular import (
     run_quant_stack,
     run_signal_bundle,
 )
+from .dcf import (
+    DCF_SCHEMA_VERSION,
+    build_dcf_sensitivity,
+    build_multistage_dcf_scenarios,
+    calculate_multistage_dcf,
+    calculate_wacc,
+    default_multistage_dcf_assumptions,
+    prepare_dcf_inputs,
+    solve_reverse_dcf,
+)
+from .commodity_analysis import (
+    COMMODITY_CATALOG,
+    COMMODITY_SYMBOLS,
+    build_cumulative_index,
+    build_price_shock_table,
+    build_return_correlation,
+    calculate_commodity_metrics,
+    commodity_catalog_frame,
+)
+from .currency_risk import (
+    FX_USD_QUOTES,
+    SUPPORTED_CURRENCIES,
+    aggregate_currency_exposure,
+    build_fx_rate_history,
+    build_fx_stress_table,
+    calculate_fx_risk,
+    optimize_currency_hedges,
+    required_fx_symbols,
+)
 
 __all__ = [
     "calculate_returns",
@@ -80,4 +109,27 @@ __all__ = [
     "list_run_records",
     "load_run_record",
     "compare_runs",
+    "DCF_SCHEMA_VERSION",
+    "calculate_wacc",
+    "prepare_dcf_inputs",
+    "default_multistage_dcf_assumptions",
+    "calculate_multistage_dcf",
+    "build_multistage_dcf_scenarios",
+    "build_dcf_sensitivity",
+    "solve_reverse_dcf",
+    "COMMODITY_CATALOG",
+    "COMMODITY_SYMBOLS",
+    "commodity_catalog_frame",
+    "calculate_commodity_metrics",
+    "build_cumulative_index",
+    "build_return_correlation",
+    "build_price_shock_table",
+    "FX_USD_QUOTES",
+    "SUPPORTED_CURRENCIES",
+    "required_fx_symbols",
+    "build_fx_rate_history",
+    "aggregate_currency_exposure",
+    "calculate_fx_risk",
+    "optimize_currency_hedges",
+    "build_fx_stress_table",
 ]

@@ -7,6 +7,7 @@ from src.analytics.industry_analysis import (
     analyze_peer_comparison,
     build_industry_analysis,
     compare_company_to_peers,
+    select_similar_peers,
     synthesize_porter_five_forces,
     synthesize_swot,
 )
@@ -14,6 +15,148 @@ from src.analytics.industry_analysis import (
 
 def _metric(result: dict, key: str) -> dict:
     return next(row for row in result["metrics"] if row["key"] == key)
+
+
+def test_similar_peer_selection_prioritises_industry_then_sector_and_filters_others():
+    target = {
+        "info": {
+            "symbol": "NVDA",
+            "sector": "Technology",
+            "industry": "Semiconductors",
+            "marketCap": 3_000_000_000_000,
+            "operatingMargins": 0.55,
+            "revenueGrowth": 0.70,
+        }
+    }
+    candidates = {
+        "NVDA": target,
+        "AMD": {
+            "info": {
+                "sector": "Technology",
+                "industry": "Semiconductors",
+                "marketCap": 300_000_000_000,
+                "operatingMargins": 0.20,
+                "revenueGrowth": 0.15,
+            }
+        },
+        # Numerically identical, but only a sector match: it must not outrank AMD.
+        "MSFT": {
+            "sector": "Information Technology",
+            "industry": "Software - Infrastructure",
+            "market_cap": 3_000_000_000_000,
+            "operating_margin": 0.55,
+            "revenue_growth": 0.70,
+        },
+        "XOM": {
+            "sector": "Energy",
+            "industry": "Oil & Gas Integrated",
+            "marketCap": 3_000_000_000_000,
+            "operatingMargins": 0.55,
+            "revenueGrowth": 0.70,
+        },
+    }
+
+    result = select_similar_peers(target, candidates, max_peers=None)
+
+    assert [row["ticker"] for row in result] == ["AMD", "MSFT"]
+    assert result[0]["classification_match"] == "same_industry"
+    assert result[1]["classification_match"] == "same_sector"
+    assert result[0]["score"] > result[1]["score"]
+    assert result[1]["financial_similarity"] == pytest.approx(100.0)
+
+
+def test_similar_peer_selection_uses_size_profitability_and_growth_within_a_tier():
+    target = {
+        "ticker": "TARGET",
+        "sector": "Industrials",
+        "industry": "Specialty Industrial Machinery",
+        "market_cap": 100_000_000_000,
+        "operating_margin": "20%",
+        "return_on_assets": "10%",
+        "revenue_growth": "12%",
+        "earnings_growth": "15%",
+    }
+    candidates = [
+        {
+            "ticker": "FAR",
+            "sector": "Industrials",
+            "industry": "Specialty Industrial Machinery",
+            "market_cap": 5_000_000_000,
+            "operating_margin": "5%",
+            "return_on_assets": "2%",
+            "revenue_growth": "1%",
+            "earnings_growth": "0%",
+        },
+        {
+            "ticker": "CLOSE",
+            "sector": "Industrials",
+            "industry": "Specialty Industrial Machinery",
+            "market_cap": 90_000_000_000,
+            "operating_margin": "19%",
+            "return_on_assets": "9%",
+            "revenue_growth": "11%",
+            "earnings_growth": "14%",
+        },
+    ]
+
+    result = select_similar_peers(target, candidates)
+
+    assert [row["ticker"] for row in result] == ["CLOSE", "FAR"]
+    assert result[0]["financial_coverage_pct"] == 100.0
+    assert result[0]["market_cap_similarity"] > result[1]["market_cap_similarity"]
+    assert result[0]["profitability_similarity"] > result[1]["profitability_similarity"]
+    assert result[0]["growth_similarity"] > result[1]["growth_similarity"]
+    assert result[0]["matched_profitability_metrics"] == [
+        "operating_margin",
+        "return_on_assets",
+    ]
+
+
+def test_similar_peer_selection_is_stable_and_missing_metrics_are_not_imputed():
+    target = {
+        "symbol": "TGT",
+        "sector": "Financial Services",
+        "marketCap": 50_000_000_000,
+        "profitMargins": 0.20,
+        "revenueGrowth": 0.08,
+    }
+    candidates = {
+        "BBB": {"sector": "Financials"},
+        "AAA": {"sector": "Financials"},
+        "OUT": {"sector": "Healthcare"},
+    }
+
+    result = select_similar_peers(target, candidates, max_peers=2)
+
+    assert [row["ticker"] for row in result] == ["AAA", "BBB"]
+    assert all(row["classification_match"] == "same_sector" for row in result)
+    assert all(row["financial_similarity"] == 50.0 for row in result)
+    assert all(row["financial_coverage_pct"] == 0.0 for row in result)
+    assert all(row["market_cap_similarity"] is None for row in result)
+
+
+def test_similar_peer_selection_can_expose_out_of_sector_fallbacks_explicitly():
+    target = {"ticker": "TGT", "sector": "Energy", "market_cap": 10_000_000_000}
+    candidates = {
+        "UNKNOWN": {"market_cap": 9_000_000_000},
+        "HEALTH": {"sector": "Healthcare", "market_cap": 10_000_000_000},
+    }
+
+    assert select_similar_peers(target, candidates) == []
+    result = select_similar_peers(target, candidates, include_out_of_sector=True)
+
+    assert [row["ticker"] for row in result] == ["UNKNOWN", "HEALTH"]
+    assert [row["classification_match"] for row in result] == [
+        "classification_missing",
+        "different_sector",
+    ]
+
+
+def test_similar_peer_selection_requires_a_target_basis_and_valid_limit():
+    assert select_similar_peers({}, {"A": {"market_cap": 1_000_000}}) == []
+    assert select_similar_peers({"market_cap": 1_000_000}, {}, max_peers=0) == []
+    with pytest.raises(ValueError, match="max_peers"):
+        select_similar_peers({"sector": "Technology"}, {}, max_peers=-1)
 
 
 def test_peer_comparison_covers_all_four_categories_and_respects_direction():

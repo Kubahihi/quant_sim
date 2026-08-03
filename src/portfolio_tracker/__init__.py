@@ -13,6 +13,7 @@ from .pretrade_analysis import (
     build_competition_strategy_snapshot,
     simulate_trade_plan,
 )
+from .client_behavior import assess_behavioral_profile
 
 __all__ = [
     "load_portfolio",
@@ -26,5 +27,6 @@ __all__ = [
     "build_competition_strategy_snapshot",
     "simulate_trade_plan",
     "analyze_pretrade_impact",
+    "assess_behavioral_profile",
 ]
 

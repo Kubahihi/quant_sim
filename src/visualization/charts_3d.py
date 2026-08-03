@@ -187,14 +187,12 @@ def plot_monte_carlo_percentile_surface(
     """Render a 3D percentile surface to show how uncertainty widens through time."""
     percentiles = np.arange(percentile_step, 100, percentile_step)
     days = np.arange(price_paths.shape[0])
-    surface = np.array([
-        np.percentile(price_paths, percentile, axis=1)
-        for percentile in percentiles
-    ])
-
-    median_path = np.percentile(price_paths, 50, axis=1)
-    band_5 = np.percentile(price_paths, 5, axis=1)
-    band_95 = np.percentile(price_paths, 95, axis=1)
+    requested_percentiles = np.unique(np.append(percentiles, (5, 50, 95)))
+    percentile_paths = np.percentile(price_paths, requested_percentiles, axis=1)
+    surface = percentile_paths[np.searchsorted(requested_percentiles, percentiles)]
+    band_5, median_path, band_95 = percentile_paths[
+        np.searchsorted(requested_percentiles, (5, 50, 95))
+    ]
 
     fig = go.Figure()
     fig.add_trace(

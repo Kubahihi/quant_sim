@@ -113,7 +113,45 @@ def test_streamlit_app_shows_workspace_by_default():
     assert any(item.value == "Workspace Hub" for item in at.subheader)
 
 
-def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
+def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
+    from ui.pages import wharton_dash
+
+    automatic_peer_info = {
+        "ORCL": {
+            "shortName": "Oracle",
+            "sector": "Technology",
+            "industry": "Software - Infrastructure",
+            "marketCap": 450_000_000_000,
+            "operatingMargins": 0.30,
+            "revenueGrowth": 0.08,
+            "forwardPE": 24.0,
+        },
+        "CRM": {
+            "shortName": "Salesforce",
+            "sector": "Technology",
+            "industry": "Software - Application",
+            "marketCap": 300_000_000_000,
+            "operatingMargins": 0.20,
+            "revenueGrowth": 0.11,
+            "forwardPE": 26.0,
+        },
+    }
+    monkeypatch.setattr(
+        wharton_dash,
+        "_discover_automatic_peers_cached",
+        lambda ticker, target_info, max_peers=6: {
+            "available": True,
+            "source": "Smoke-test fundamentals",
+            "peers": [],
+            "info": automatic_peer_info,
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_fetch_ai_dcf_assumptions_cached",
+        lambda ticker, evidence: {"available": False, "source": "smoke_test"},
+    )
     at = AppTest.from_file(str(APP_PATH))
     at.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
     at.session_state["wharton_user_profile_v2"] = {
@@ -132,6 +170,9 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
                 "currentPrice": 100.0,
                 "marketCap": 1_000_000_000_000,
                 "freeCashflow": 10_000_000_000,
+                "sector": "Technology",
+                "industry": "Software - Infrastructure",
+                "beta": 1.0,
                 "sharesOutstanding": 1_000_000_000,
                 "totalCash": 5_000_000_000,
                 "totalDebt": 1_000_000_000,
@@ -232,40 +273,84 @@ def test_wharton_cockpit_exposes_rules_and_portfolio_tabs():
     at.run(timeout=60)
 
     assert len(at.exception) == 0
-    tab_labels = [tab.label for tab in at.tabs]
-    assert "Assignment & Rules" in tab_labels
-    assert "Portfolio Tracker" in tab_labels
-    assert "Company Analysis" in tab_labels
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    assert area_selector.options == [
+        "Home", "Portfolio", "Research", "Risk & Quant", "Scenarios", "Teamspace"
+    ]
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == ["Overview & Tasks", "Competition Readiness", "Assignment & Rules"]
 
-    assignment_tab = next(tab for tab in at.tabs if tab.label == "Assignment & Rules")
-    strategy_tab = next(tab for tab in at.tabs if tab.label == "Strategy & Decisions")
-    portfolio_tab = next(tab for tab in at.tabs if tab.label == "Portfolio Tracker")
-    company_tab = next(tab for tab in at.tabs if tab.label == "Company Analysis")
+    panel_selector.set_value("Competition Readiness").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Competition Readiness" in item.value for item in at.markdown)
+    readiness_tabs = [tab.label for tab in at.tabs]
+    assert "Red Team & AI Audit" in readiness_tabs
+    assert "Report & Pitch" in readiness_tabs
 
-    assignment_headings = [item.value for item in assignment_tab.markdown]
-    strategy_headings = [item.value for item in strategy_tab.markdown]
-    portfolio_headings = [item.value for item in portfolio_tab.markdown]
-    company_headings = [item.value for item in company_tab.markdown]
-    assert any("Assignment & Rules" in value for value in assignment_headings)
-    assert any("Strategy Lab" in value for value in strategy_headings)
-    assert any("Portfolio Tracker" in value for value in portfolio_headings)
-    assert any("Company Analysis" in value for value in company_headings)
-    assert not any("Company Analysis" in value for value in portfolio_headings)
-    assert any(item.label == "WInS positions snapshot" for item in portfolio_tab.file_uploader)
-    region_view = next(item for item in company_tab.radio if item.label == "Regional analysis view")
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    panel_selector.set_value("Assignment & Rules").run(timeout=60)
+    assert any("Assignment & Rules" in item.value for item in at.markdown)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Portfolio").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == ["Strategy & Decisions", "Portfolio Tracker"]
+    assert any("Strategy Lab" in item.value for item in at.markdown)
+    strategy_tab_labels = [tab.label for tab in at.tabs]
+    assert "Client Mandate" in strategy_tab_labels
+    assert "Behavioral Profile" in strategy_tab_labels
+    assert "Alignment & Drift" in strategy_tab_labels
+    assert "Thesis Monitor" in strategy_tab_labels
+
+    panel_selector.set_value("Portfolio Tracker").run(timeout=60)
+    assert any("Portfolio Tracker" in item.value for item in at.markdown)
+    assert not any("Company Analysis" in item.value for item in at.markdown)
+    assert any(item.label == "WInS positions snapshot" for item in at.file_uploader)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Research").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == [
+        "Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"
+    ]
+    assert any("Company Analysis" in item.value for item in at.markdown)
+
+    region_view = next(item for item in at.radio if item.label == "Regional analysis view")
     assert region_view.options == ["Revenue Exposure", "Macro Drill-down"]
     nested_tab_labels = [tab.label for tab in at.tabs]
-    assert "Client Mandate" in nested_tab_labels
-    assert "Alignment & Drift" in nested_tab_labels
-    assert "Thesis Monitor" in nested_tab_labels
     assert "Industry & Peers" in nested_tab_labels
+    assert any(item.label == "Normalized FCFF (billions)" for item in at.number_input)
+    assert any(item.label == "Initial FCFF Growth (%)" for item in at.number_input)
+    assert any(item.label == "Competitive Fade (years)" for item in at.number_input)
+    assert any(item.label == "Comparable companies" for item in at.multiselect)
+    assert any("What Must Be True?" in item.value for item in at.markdown)
+    assert any("Automatically selected competitors" in item.value for item in at.markdown)
 
+    growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
+    growth_input.set_value(17.0).run(timeout=60)
+    growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
+    assert growth_input.value == 17.0
+
+    region_view = next(item for item in at.radio if item.label == "Regional analysis view")
     region_view.set_value("Macro Drill-down").run(timeout=60)
     assert len(at.exception) == 0
-    company_tab = next(tab for tab in at.tabs if tab.label == "Company Analysis")
-    company_headings = [item.value for item in company_tab.markdown]
-    assert any("Regional Macro Drill-down" in value for value in company_headings)
-    assert any(item.label == "Macro resilience (2024)" for item in company_tab.metric)
+    assert any("Regional Macro Drill-down" in item.value for item in at.markdown)
+    assert any(item.label == "Macro resilience (2024)" for item in at.metric)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Risk & Quant").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == [
+        "Quant Engine",
+        "Risk Cockpit",
+        "Currency Risk & Hedging",
+        "Factor Exposure",
+        "Regime Detection",
+    ]
+    panel_selector.set_value("Currency Risk & Hedging").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Currency Risk & Hedging" in item.value for item in at.markdown)
+    assert any(item.label == "Reporting currency" for item in at.selectbox)
 
 
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):
@@ -351,6 +436,12 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, t
     assert len(at.exception) == 0
     markdown_values = [item.value for item in at.markdown]
     assert "### Quick Exports" in markdown_values
-    assert "### Export Center" in markdown_values
     warning_values = [item.value for item in at.warning]
     assert warning_values.count("Signals are weak: composite score is close to neutral.") == 1
+
+    page_selector = next(item for item in at.radio if item.label == "Analysis workspace")
+    page_selector.set_value("reports").run(timeout=60)
+    assert len(at.exception) == 0
+    markdown_values = [item.value for item in at.markdown]
+    assert "### Quick Exports" in markdown_values
+    assert "### Export Center" in markdown_values

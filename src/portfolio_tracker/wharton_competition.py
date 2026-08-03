@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from .bond_analytics import is_individual_bond, position_cost_usd, value_position
+
 
 INITIAL_CAPITAL_USD = 500_000.0
 OFFICIAL_RULES_URL = (
@@ -94,7 +96,7 @@ def evaluate_compliance(
         add(_confirmed(values.get(key)), rule, "Confirmed by the team.", failure)
 
     invested = sum(
-        float(row.get("quantity") or 0) * float(row.get("entry_price") or 0)
+        position_cost_usd(row)
         for row in positions
         if str(row.get("status") or "open") == "open"
     )
@@ -114,6 +116,38 @@ def evaluate_compliance(
         "Every tracked position has valid size, entry price, and author",
         "All tracked positions contain the required audit fields.",
         "At least one position is missing its author or has a non-positive quantity/entry price.",
+    )
+    individual_bonds = [row for row in positions if is_individual_bond(row)]
+    incomplete_bonds = [
+        str(row.get("ticker") or row.get("isin") or "unknown")
+        for row in individual_bonds
+        if not str(row.get("isin") or "").strip()
+        or float(row.get("face_value") or 0) <= 0
+        or not str(row.get("maturity_date") or "").strip()
+        or not str(row.get("currency") or "").strip()
+        or float(row.get("fx_rate_to_usd") or 0) <= 0
+        or int(row.get("coupon_frequency") or 0) not in {1, 2, 4, 12}
+        or (
+            row.get("last_price") not in (None, "")
+            and not str(row.get("valuation_source") or "").strip()
+        )
+        or (
+            str(row.get("callable") or "").strip().casefold() in {"1", "true", "yes", "y", "callable"}
+            and (
+                not str(row.get("call_date") or "").strip()
+                or float(row.get("call_price") or 0) <= 0
+            )
+        )
+    ]
+    add(
+        not incomplete_bonds,
+        "Every individual bond has complete valuation terms",
+        (
+            f"All {len(individual_bonds)} individual bond(s) have complete terms and sourced manual valuations."
+            if individual_bonds
+            else "No individual bonds require term validation."
+        ),
+        "Incomplete individual-bond terms for: " + ", ".join(incomplete_bonds) + ".",
     )
     checks.append(
         {
@@ -142,6 +176,7 @@ def calculate_portfolio_performance(
     rows: list[dict[str, Any]] = []
     realized_pnl = 0.0
     unrealized_pnl = 0.0
+    open_cash_income = 0.0
     open_cost = 0.0
 
     for item in positions:
@@ -150,19 +185,23 @@ def calculate_portfolio_performance(
         quantity = float(row.get("quantity") or 0)
         entry_price = float(row.get("entry_price") or 0)
         status = str(row.get("status") or "open")
-        cost = quantity * entry_price
+        cost = position_cost_usd(row)
 
         if status == "closed":
             current_price = float(row.get("exit_price") or entry_price)
             price_source = "exit"
-            pnl = quantity * (current_price - entry_price)
+            valuation = value_position(row, current_price, closed=True)
+            pnl = valuation["pnl"]
             realized_pnl += pnl
         else:
             stored_price = float(row.get("last_price") or 0)
             current_price = prices.get(ticker) or stored_price or entry_price
             price_source = "live" if ticker in prices else "manual" if stored_price else "entry fallback"
-            pnl = quantity * (current_price - entry_price)
-            unrealized_pnl += pnl
+            valuation = value_position(row, current_price)
+            pnl = valuation["pnl"]
+            price_pnl = valuation["current_value"] - cost
+            unrealized_pnl += price_pnl
+            open_cash_income += valuation["coupon_income"]
             open_cost += cost
 
         rows.append(
@@ -171,19 +210,26 @@ def calculate_portfolio_performance(
                 "ticker": ticker,
                 "cost": cost,
                 "current_price": current_price,
-                "current_value": quantity * current_price,
+                "current_value": valuation["current_value"],
+                "coupon_income": valuation["coupon_income"],
+                "price_pnl": (
+                    valuation["current_value"] - cost
+                    if status != "closed"
+                    else valuation["pnl"] - valuation["coupon_income"]
+                ),
                 "pnl": pnl,
-                "return_pct": (pnl / cost * 100.0) if cost else 0.0,
+                "return_pct": valuation["return_pct"],
                 "price_source": price_source,
             }
         )
 
-    total_pnl = realized_pnl + unrealized_pnl
+    total_pnl = realized_pnl + unrealized_pnl + open_cash_income
     equity = initial_capital + total_pnl
     return {
         "initial_capital": initial_capital,
         "equity": equity,
         "cash_before_pnl": initial_capital - open_cost,
+        "open_cash_income": open_cash_income,
         "realized_pnl": realized_pnl,
         "unrealized_pnl": unrealized_pnl,
         "total_pnl": total_pnl,

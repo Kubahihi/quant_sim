@@ -7,20 +7,20 @@ import streamlit as st
 
 PAGE_ORDER = [
     "overview",
+    "portfolio_lab",
     "cockpit",
     "analysis",
-    "portfolio_lab",
     "workspace",
     "reports",
 ]
 
 PAGE_LABELS = {
-    "overview": "Overview",
-    "cockpit": "Decision Cockpit",
-    "analysis": "Analysis Lab",
-    "portfolio_lab": "Portfolio Lab",
-    "workspace": "Workspace",
-    "reports": "Reports",
+    "overview": "01  Overview",
+    "portfolio_lab": "02  Portfolio lab",
+    "cockpit": "03  Stress testing",
+    "analysis": "04  Research",
+    "workspace": "05  Workspace",
+    "reports": "06  Reports",
 }
 
 PAGE_DESCRIPTIONS = {
@@ -29,12 +29,12 @@ PAGE_DESCRIPTIONS = {
     "analysis": "Raw data, models, signals, news, and run-to-run comparison.",
     "portfolio_lab": "Performance charts, optimization, simulations, and asset diagnostics.",
     "workspace": "Stock picker plus portfolio and swing-tracking tools in one hub.",
-    "reports": "AI commentary and export actions in a focused reporting space.",
+    "reports": "Review summary and export actions in a focused reporting space.",
 }
 
 PRESET_PAGES = {
-    "Focused": ["overview", "reports"],
-    "Research": ["overview", "cockpit", "analysis", "portfolio_lab", "reports"],
+    "Focused": ["overview", "portfolio_lab", "reports"],
+    "Research": ["overview", "portfolio_lab", "cockpit", "analysis", "reports"],
     "Workspace": ["overview", "workspace", "reports"],
     "Full": PAGE_ORDER,
 }
@@ -55,32 +55,378 @@ def inject_dashboard_styles() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --qp-ink: var(--text-color);
+            --qp-line: var(--secondary-background-color);
+            --qp-card: var(--background-color);
+            --qp-accent: var(--primary-color);
+            --qp-accent-text: var(--primary-color);
+            --qp-radius: 14px;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --qp-muted: #94a3b8;
+                --qp-soft: #1e293b;
+                --qp-navy: #0f172a;
+                --qp-accent-soft: rgba(22, 125, 120, 0.25);
+                --qp-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            }
+        }
+        
+        @media (prefers-color-scheme: light) {
+            :root {
+                --qp-muted: #64748b;
+                --qp-soft: #f5f7fa;
+                --qp-navy: #142238;
+                --qp-accent-soft: #eaf7f5;
+                --qp-shadow: 0 10px 30px rgba(27, 39, 54, 0.07);
+            }
+        }
+
+        html, body, [class*="css"] {
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background: var(--background-color);
+            color: var(--qp-ink);
+        }
+
+        [data-testid="stAppViewContainer"] > .main {
+            background:
+                radial-gradient(circle at 92% 0%, rgba(22, 125, 120, 0.055), transparent 24rem),
+                var(--background-color);
+        }
+
+        .main .block-container {
+            max-width: 1480px;
+            padding: 2rem 2.25rem 4rem;
+        }
+
+        [data-testid="stSidebar"][aria-expanded="true"] {
+            min-width: 320px;
+            max-width: 320px;
+            background: var(--secondary-background-color);
+            border-right: 1px solid var(--qp-line);
+        }
+
+        [data-testid="stSidebar"][aria-expanded="false"] {
+            width: 0 !important;
+            min-width: 0 !important;
+            max-width: 0 !important;
+            flex-basis: 0 !important;
+            border-right: 0;
+        }
+
+        [data-testid="stSidebar"][aria-expanded="false"] ~ [data-testid="stMain"],
+        [data-testid="stAppViewContainer"]:has([data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stMain"] {
+            width: 100% !important;
+            max-width: 100% !important;
+            margin-left: 0 !important;
+        }
+
+        [data-testid="stSidebarNav"] {
+            display: none;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+            gap: 0.72rem;
+        }
+
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] h1 {
+            color: var(--qp-ink) !important;
+            letter-spacing: -0.02em;
+        }
+
+        .qp-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.35rem 0 0.7rem;
+        }
+
+        .qp-brand-mark {
+            display: grid;
+            place-items: center;
+            width: 2.35rem;
+            height: 2.35rem;
+            border-radius: 11px;
+            color: #ffffff;
+            background: linear-gradient(145deg, #18304d, #167d78);
+            box-shadow: 0 7px 18px rgba(22, 125, 120, 0.2);
+            font-size: 0.85rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+
+        .qp-brand-copy strong {
+            display: block;
+            color: var(--qp-ink);
+            font-size: 0.98rem;
+            line-height: 1.2;
+        }
+
+        .qp-brand-copy span {
+            color: var(--qp-muted) !important;
+            font-size: 0.75rem;
+        }
+
+        .qp-eyebrow {
+            color: var(--qp-accent-text) !important;
+            text-transform: uppercase;
+            letter-spacing: 0.13em;
+            font-size: 0.7rem;
+            font-weight: 750;
+            margin-bottom: 0.5rem;
+        }
+
+        h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+            color: var(--qp-ink) !important;
+            letter-spacing: -0.035em;
+        }
+
+        h1 { font-size: 2.05rem !important; }
+        h2 { font-size: 1.55rem !important; }
+        h3 { font-size: 1.12rem !important; }
+
+        p, label, [data-testid="stCaptionContainer"] {
+            color: var(--qp-muted) !important;
+        }
+
+        hr {
+            border-color: var(--qp-line) !important;
+            margin: 0.7rem 0 !important;
+        }
+
+        div[data-testid="stForm"],
+        div[data-testid="stExpander"],
+        div[data-testid="stDataFrame"],
+        div[data-testid="stPlotlyChart"],
+        div[data-testid="stVegaLiteChart"] {
+            border-color: var(--qp-line) !important;
+            border-radius: var(--qp-radius) !important;
+            background: var(--qp-card);
+        }
+
+        div[data-testid="stExpander"] {
+            overflow: hidden;
+            box-shadow: none;
+        }
+
+        div[data-testid="stMetric"] {
+            min-height: 112px;
+            padding: 1rem 1.05rem;
+            border: 1px solid var(--qp-line);
+            border-radius: var(--qp-radius);
+            background: var(--qp-card);
+            box-shadow: 0 4px 18px rgba(27, 39, 54, 0.045);
+        }
+
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            color: var(--qp-ink);
+            font-size: 1.62rem;
+            letter-spacing: -0.04em;
+        }
+
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+            color: var(--qp-muted);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        .stFormSubmitButton > button,
+        .stLinkButton > a,
+        button[kind="secondary"] {
+            min-height: 2.65rem;
+            border-radius: 10px;
+            background-color: var(--qp-card) !important;
+            color: var(--qp-ink) !important;
+            border-color: var(--qp-line) !important;
+            font-weight: 650;
+            transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+
+        /* Streamlit renders the label in nested text elements. Keep those from
+           inheriting the global muted paragraph colour. */
+        .stButton > button :is(p, span),
+        .stDownloadButton > button :is(p, span),
+        .stFormSubmitButton > button :is(p, span),
+        .stLinkButton > a :is(p, span) {
+            color: inherit !important;
+        }
+
+        .stButton > button svg,
+        .stDownloadButton > button svg,
+        .stFormSubmitButton > button svg,
+        .stLinkButton > a svg {
+            color: inherit !important;
+            fill: currentColor;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        .stFormSubmitButton > button:hover,
+        .stLinkButton > a:hover {
+            border-color: var(--qp-accent);
+            color: #0f625e !important;
+            background: var(--qp-accent-soft);
+            transform: translateY(-1px);
+            box-shadow: 0 7px 16px rgba(22, 125, 120, 0.12);
+        }
+
+        .stButton > button[kind="primary"],
+        .stFormSubmitButton > button[kind="primaryFormSubmit"],
+        button[kind="primaryFormSubmit"] {
+            color: #ffffff !important;
+            background: var(--qp-accent) !important;
+            border-color: var(--qp-accent) !important;
+            box-shadow: 0 5px 14px rgba(22, 125, 120, 0.2);
+        }
+
+        .stButton > button[kind="primary"]:hover,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover,
+        button[kind="primaryFormSubmit"]:hover {
+            color: #ffffff !important;
+            background: #106b67;
+            border-color: #106b67;
+            box-shadow: 0 8px 18px rgba(16, 107, 103, 0.26);
+        }
+
+        .stButton > button:focus-visible,
+        .stDownloadButton > button:focus-visible,
+        .stFormSubmitButton > button:focus-visible,
+        .stLinkButton > a:focus-visible {
+            outline: 3px solid rgba(22, 125, 120, 0.3);
+            outline-offset: 2px;
+        }
+
+        .stTextInput > div > div > div, 
+        .stSelectbox > div > div > div,
+        .stTextArea > div > div > div,
+        .stNumberInput > div > div > div {
+            border-radius: 10px !important;
+            background-color: var(--qp-card) !important;
+            border-color: var(--qp-line) !important;
+        }
+
+        .stTextInput input, .stTextArea textarea, .stSelectbox span, .stNumberInput input {
+            color: var(--qp-ink) !important;
+        }
+        
+        /* Fallback for other inputs */
+        input, textarea, [data-baseweb="select"] > div, [data-baseweb="base-input"], [data-baseweb="input"] {
+            background-color: var(--qp-card) !important;
+            color: var(--qp-ink) !important;
+            border-color: var(--qp-line) !important;
+        }
+
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 0.25rem;
+            overflow-x: auto;
+            border-bottom: 1px solid var(--qp-line);
+        }
+
+        div[data-testid="stTabs"] button[data-baseweb="tab"] {
+            height: 3rem;
+            border-radius: 8px 8px 0 0;
+            padding: 0 0.85rem;
+            color: var(--qp-muted);
+            font-size: 0.88rem;
+            font-weight: 650;
+            white-space: nowrap;
+        }
+
+        div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+            color: var(--qp-accent);
+            background: var(--qp-accent-soft);
+        }
+
+        .qp-page-nav-header {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 1.15rem 0 0.65rem;
+        }
+
+        .qp-page-nav-header strong {
+            display: block;
+            color: var(--qp-ink);
+            font-size: 1rem;
+        }
+
+        .qp-page-nav-header span {
+            color: var(--qp-muted);
+            font-size: 0.82rem;
+        }
+
+        .st-key-dashboard_active_page [role="radiogroup"] {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            padding: 0.42rem;
+            border: 1px solid var(--qp-line);
+            border-radius: var(--qp-radius);
+            background: var(--qp-card);
+        }
+
+        .st-key-dashboard_active_page [role="radiogroup"] label {
+            min-height: 2.45rem;
+            padding: 0.45rem 0.7rem;
+            border-radius: 9px;
+            transition: background 120ms ease, color 120ms ease;
+        }
+
+        .st-key-dashboard_active_page [role="radiogroup"] label:has(input:checked) {
+            color: var(--qp-accent);
+            background: var(--qp-accent-soft);
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 12px;
+            border-width: 1px;
+        }
+
         .dashboard-hero {
-            background: transparent;
-            border: 1px solid rgba(128, 128, 128, 0.18);
-            border-radius: 22px;
-            padding: 1.1rem 1.25rem;
-            margin-bottom: 1rem;
+            position: relative;
+            overflow: hidden;
+            color: #f8fafc;
+            background:
+                radial-gradient(circle at 88% 10%, rgba(72, 193, 185, 0.24), transparent 20rem),
+                linear-gradient(135deg, #142238 0%, #193450 65%, #175e61 130%);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 20px;
+            padding: 1.75rem 1.9rem;
+            margin-bottom: 1.25rem;
+            box-shadow: var(--qp-shadow);
         }
 
         .dashboard-kicker {
             text-transform: uppercase;
             letter-spacing: 0.12em;
             font-size: 0.72rem;
-            opacity: 0.62;
+            color: #80ded4;
+            opacity: 1;
+            font-weight: 750;
             margin-bottom: 0.45rem;
         }
 
         .dashboard-hero h2 {
             margin: 0 0 0.55rem 0;
-            font-size: 2rem;
+            color: #ffffff;
+            font-size: 2.1rem;
             line-height: 1.15;
         }
 
         .dashboard-hero p {
             margin: 0;
             font-size: 0.98rem;
-            opacity: 0.86;
+            color: rgba(241, 245, 249, 0.76);
+            opacity: 1;
+            max-width: 820px;
         }
 
         .dashboard-badge-row {
@@ -95,28 +441,75 @@ def inject_dashboard_styles() -> None:
             align-items: center;
             padding: 0.32rem 0.62rem;
             border-radius: 999px;
-            background: transparent;
-            border: 1px solid rgba(128, 128, 128, 0.18);
+            color: #e8fffc;
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid rgba(255, 255, 255, 0.15);
             font-size: 0.83rem;
         }
 
         .dashboard-note {
-            background: transparent;
-            border: 1px solid rgba(128, 128, 128, 0.18);
-            border-radius: 14px;
+            color: #3e4c5e;
+            background: linear-gradient(90deg, var(--qp-accent-soft), rgba(255, 255, 255, 0.86));
+            border: 1px solid #d5ebe8;
+            border-left: 4px solid var(--qp-accent);
+            border-radius: 12px;
             padding: 1rem 1.1rem;
             margin: 0.6rem 0 1rem 0;
         }
 
         .dashboard-note strong {
+            color: var(--qp-ink);
             display: block;
             margin-bottom: 0.25rem;
         }
 
-        div[data-testid="stTabs"] button[data-baseweb="tab"] {
-            border-radius: 999px;
-            padding-left: 0.9rem;
-            padding-right: 0.9rem;
+        .qp-workflow {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.8rem;
+            margin: 0 0 1.25rem;
+        }
+
+        .qp-workflow-card {
+            min-height: 120px;
+            padding: 1rem 1.05rem;
+            border: 1px solid var(--qp-line);
+            border-radius: var(--qp-radius);
+            background: #ffffff;
+            box-shadow: 0 4px 16px rgba(27, 39, 54, 0.04);
+        }
+
+        .qp-workflow-card span {
+            display: grid;
+            place-items: center;
+            width: 1.7rem;
+            height: 1.7rem;
+            margin-bottom: 0.65rem;
+            border-radius: 8px;
+            color: var(--qp-accent);
+            background: var(--qp-accent-soft);
+            font-size: 0.76rem;
+            font-weight: 800;
+        }
+
+        .qp-workflow-card strong {
+            display: block;
+            margin-bottom: 0.25rem;
+            color: var(--qp-ink);
+        }
+
+        .qp-workflow-card p {
+            margin: 0;
+            font-size: 0.86rem;
+            line-height: 1.45;
+        }
+
+        @media (max-width: 900px) {
+            .main .block-container { padding: 1.15rem 1rem 3rem; }
+            .dashboard-hero { padding: 1.35rem 1.2rem; border-radius: 16px; }
+            .dashboard-hero h2 { font-size: 1.65rem; }
+            .qp-workflow { grid-template-columns: 1fr; }
+            div[data-testid="stMetric"] { min-height: 96px; }
         }
         </style>
         """,
@@ -150,9 +543,9 @@ def render_dashboard_preferences(has_analysis: bool) -> DashboardPreferences:
     if workspace_key not in st.session_state:
         st.session_state[workspace_key] = True
 
-    with st.expander("Dashboard Layout", expanded=False):
+    with st.expander("View settings", expanded=False):
         preset = st.selectbox(
-            "View preset",
+            "Workspace preset",
             options=preset_options,
             key=preset_key,
             help="Choose a simpler default layout and fine-tune visible sections below.",
@@ -167,7 +560,7 @@ def render_dashboard_preferences(has_analysis: bool) -> DashboardPreferences:
             st.session_state[applied_key] = preset
 
         visible_pages = st.multiselect(
-            "Visible sections",
+            "Visible pages",
             options=PAGE_ORDER,
             format_func=lambda key: PAGE_LABELS.get(key, key),
             key=visible_pages_key,
@@ -182,12 +575,12 @@ def render_dashboard_preferences(has_analysis: bool) -> DashboardPreferences:
         )
 
         show_raw_tables = st.checkbox(
-            "Show detailed data tables",
+            "Show detailed tables",
             key=raw_tables_key,
             help="Keep raw prices, returns, and comparison tables visible inside analytical pages.",
         )
         show_workspace_when_empty = st.checkbox(
-            "Keep workspace visible before first run",
+            "Show tools before first analysis",
             key=workspace_key,
             help="Useful when you want stock screening or trade tracking without running a portfolio analysis first.",
         )

@@ -14,6 +14,13 @@ def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
     assert wharton_dash._finite_form_number("2.5", 0.0) == 2.5
     assert wharton_dash._saved_number({"limit": 0.0}, "limit", 0.15) == 0.0
     assert math.isclose(wharton_dash._saved_number({}, "limit", 0.15), 0.15)
+    assert "Bond Analysis" in wharton_dash.COCKPIT_AREAS["Research"]
+    assert "Bond Analysis" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert "Commodity Analysis" in wharton_dash.COCKPIT_AREAS["Research"]
+    assert "Commodity Analysis" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_AREAS["Risk & Quant"]
+    assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert wharton_dash._parse_tickers("", allow_empty=True) == []
 
 
 def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-team-pass") -> Path:
@@ -59,11 +66,26 @@ def test_init_db_uses_configured_paths_when_cwd_changes(monkeypatch, tmp_path):
         decision_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(decision_log)")
         }
+        position_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(competition_positions)")
+        }
     assert {
         "horizon_days", "benchmark_ticker", "expected_return_min",
         "expected_return_max", "decision_confidence", "target_condition",
         "invalidation_condition", "planned_weight",
     }.issubset(decision_columns)
+    assert {
+        "bond_instrument_type", "bond_category", "isin", "issuer", "currency",
+        "face_value", "coupon_rate", "maturity_date", "coupon_frequency",
+        "next_coupon_date", "entry_accrued_interest", "accrued_interest",
+        "entry_fx_rate_to_usd", "fx_rate_to_usd", "exit_accrued_interest",
+        "exit_fx_rate_to_usd", "coupon_income", "yield_to_maturity",
+        "modified_duration", "convexity", "credit_rating", "seniority",
+        "valuation_source", "source_url", "price_observed_at",
+        "callable", "call_date", "call_price", "benchmark_name",
+        "benchmark_yield", "income_yield", "default_probability", "recovery_rate",
+        "competition_eligibility_status", "eligibility_source", "eligibility_checked_at",
+    }.issubset(position_columns)
 
 
 def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):

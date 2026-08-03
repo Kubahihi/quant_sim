@@ -90,7 +90,7 @@ def generate_pdf_report(
     report_payload: Dict[str, Any],
     figures: Mapping[str, Any],
 ) -> BytesIO:
-    """Generate a multi-page PDF report with metrics, charts, simulations and AI review."""
+    """Generate a multi-page PDF report with metrics, charts, simulations and a review summary."""
     output = BytesIO()
 
     with PdfPages(output) as pdf:
@@ -145,16 +145,16 @@ def generate_pdf_report(
             "Flags:",
             *([f"- {flag}" for flag in flags] if flags else ["- No critical flags."]),
             "",
-            "AI review summary:",
-            ai_review.get("summary", "AI review unavailable."),
-            "AI risks:",
+            "Review summary:",
+            ai_review.get("summary", "Review unavailable."),
+            "Review risks:",
             ai_review.get("risks", "-"),
-            "AI improvements:",
+            "Suggested improvements:",
             ai_review.get("improvements", "-"),
-            "AI verdict:",
+            "Review conclusion:",
             ai_review.get("verdict", "-"),
         ]
-        _add_text_page(pdf, "Metrics, Flags, and AI Review", metrics_lines)
+        _add_text_page(pdf, "Metrics, Flags, and Review", metrics_lines)
 
         allocation_rows = [
             {"Ticker": ticker, "Weight (%)": weight}

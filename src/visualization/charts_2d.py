@@ -154,9 +154,9 @@ def plot_monte_carlo_fan(
     
     colors = ["#d62728", "#ff7f0e", "#2ca02c", "#ff7f0e", "#d62728"]
     alphas = [0.2, 0.3, 0.5, 0.3, 0.2]
-    
-    for i, p in enumerate(percentiles):
-        percentile_path = np.percentile(price_paths, p, axis=1)
+
+    percentile_paths = np.percentile(price_paths, percentiles, axis=1)
+    for i, (p, percentile_path) in enumerate(zip(percentiles, percentile_paths)):
         ax.plot(
             time_steps,
             percentile_path,
@@ -167,8 +167,8 @@ def plot_monte_carlo_fan(
         )
     
     for i in range(len(percentiles) - 1):
-        lower = np.percentile(price_paths, percentiles[i], axis=1)
-        upper = np.percentile(price_paths, percentiles[i + 1], axis=1)
+        lower = percentile_paths[i]
+        upper = percentile_paths[i + 1]
         ax.fill_between(
             time_steps,
             lower,

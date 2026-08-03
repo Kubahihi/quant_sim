@@ -87,6 +87,42 @@ def test_current_cash_includes_realized_pnl_and_reconciles_to_equity() -> None:
     assert result["current_weights"]["CASH"] == pytest.approx(420 / 530)
 
 
+def test_individual_bond_coupon_cash_reconciles_with_dirty_market_value() -> None:
+    result = build_live_competition_analytics(
+        positions=[{
+            "id": 1,
+            "ticker": "US0001",
+            "security_type": "Bond",
+            "bond_instrument_type": "individual",
+            "status": "open",
+            "quantity": 10,
+            "face_value": 1_000,
+            "entry_price": 98,
+            "entry_accrued_interest": 1,
+            "last_price": 101,
+            "accrued_interest": 0.5,
+            "entry_fx_rate_to_usd": 1,
+            "fx_rate_to_usd": 1,
+            "coupon_income": 250,
+            "coupon_rate": 0.05,
+            "coupon_frequency": 2,
+            "maturity_date": "2030-08-02",
+        }],
+        live_prices={},
+        asset_returns=pd.DataFrame(),
+        initial_capital=20_000,
+    )
+
+    assert result["current_cash"] == pytest.approx(20_000 - 9_900 + 250)
+    assert result["open_exposures"]["CurrentValue"].sum() == pytest.approx(10_150)
+    assert result["current_equity"] == pytest.approx(20_500)
+    assert result["current_cash"] + result["open_exposures"]["CurrentValue"].sum() == pytest.approx(20_500)
+    exposure = result["open_exposures"].iloc[0]
+    assert exposure["UnrealizedPnL"] == pytest.approx(250)
+    assert exposure["CouponIncome"] == pytest.approx(250)
+    assert result["fixed_income"]["available"] is True
+
+
 def test_cash_weight_lowers_historical_risk_without_renormalising_risky_asset() -> None:
     asset_returns = _returns(AAA=[0.02, -0.01, 0.015, -0.02, 0.01, -0.005])
     result = build_live_competition_analytics(
@@ -248,4 +284,3 @@ def test_empty_ledger_returns_stable_empty_outputs_and_full_cash_weight() -> Non
 def test_initial_capital_must_be_positive_and_finite() -> None:
     with pytest.raises(ValueError, match="initial_capital"):
         build_live_competition_analytics([], {}, pd.DataFrame(), initial_capital=np.nan)
-

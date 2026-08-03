@@ -325,6 +325,12 @@ def calculate_dcf(
 
 
 def default_dcf_assumptions(info: Mapping[str, Any]) -> dict[str, float | int]:
+    """Build deterministic, company-specific starting assumptions for the DCF.
+
+    These values are a reproducible fallback for the AI recommendation shown in
+    the UI.  They deliberately use observable company fields and never sample
+    random values, so reopening a company cannot silently change its valuation.
+    """
     growth_candidates = [
         _number(info.get("revenueGrowth"), np.nan),
         _number(info.get("earningsGrowth"), np.nan),
@@ -333,14 +339,30 @@ def default_dcf_assumptions(info: Mapping[str, Any]) -> dict[str, float | int]:
     finite_growth = [value for value in growth_candidates if np.isfinite(value)]
     growth_rate = float(np.median(finite_growth)) if finite_growth else 0.05
     growth_rate = min(max(growth_rate, -0.05), 0.15)
+
+    # Transparent cost-of-capital proxy: a structural 4% risk-free anchor,
+    # 5% equity-risk premium scaled by beta, plus a modest leverage premium.
+    beta = min(max(_number(info.get("beta"), 1.0), 0.5), 2.0)
+    market_cap = max(_number(info.get("marketCap")), 0.0)
+    debt = max(_number(info.get("totalDebt")), 0.0)
+    invested_capital = market_cap + debt
+    debt_share = debt / invested_capital if invested_capital > 0 else 0.0
+    discount_rate = 0.04 + (0.05 * beta) + (0.03 * debt_share)
+    discount_rate = min(max(discount_rate, 0.065), 0.16)
+
+    # Faster-growing businesses receive a longer explicit fade period.  The
+    # terminal rate remains conservative and safely below the discount rate.
+    years = 10 if abs(growth_rate) >= 0.12 else 7 if abs(growth_rate) >= 0.07 else 5
+    terminal_growth_rate = min(0.03, max(0.015, 0.02 + (0.05 * growth_rate)))
+    terminal_growth_rate = min(terminal_growth_rate, discount_rate - 0.025)
     return {
         "free_cash_flow": _number(info.get("freeCashflow")),
         "growth_rate": growth_rate,
-        "discount_rate": 0.10,
-        "terminal_growth_rate": 0.025,
-        "years": 5,
+        "discount_rate": discount_rate,
+        "terminal_growth_rate": terminal_growth_rate,
+        "years": years,
         "cash": _number(info.get("totalCash")),
-        "debt": _number(info.get("totalDebt")),
+        "debt": debt,
         "shares_outstanding": _number(info.get("sharesOutstanding")),
         "current_price": _number(info.get("currentPrice") or info.get("regularMarketPrice")),
     }

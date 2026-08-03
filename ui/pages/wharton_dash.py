@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from copy import deepcopy
 from html import escape
+import hashlib
 import importlib
 import json
 import os
@@ -76,8 +77,64 @@ QUANT_RESULT_KEY = "wharton_quant_result"
 QUANT_ERROR_KEY = "wharton_quant_error"
 QUANT_STACK_RESULT_KEY = "wharton_quant_stack_result"
 COMPANY_ANALYSIS_KEY = "wharton_company_analysis_v1"
+BOND_ANALYSIS_KEY = "wharton_bond_analysis_v1"
+COMMODITY_ANALYSIS_KEY = "wharton_commodity_analysis_v1"
+CURRENCY_RISK_KEY = "wharton_currency_risk_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
 HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
+
+COCKPIT_AREAS = {
+    "Home": ("Overview & Tasks", "Competition Readiness", "Assignment & Rules"),
+    "Portfolio": ("Strategy & Decisions", "Portfolio Tracker"),
+    "Research": ("Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"),
+    "Risk & Quant": (
+        "Quant Engine",
+        "Risk Cockpit",
+        "Currency Risk & Hedging",
+        "Factor Exposure",
+        "Regime Detection",
+    ),
+    "Scenarios": (
+        "Scenario Playground",
+        "Efficient Frontier",
+        "Monte Carlo",
+        "Advanced Monte Carlo",
+        "Advanced Analytics",
+    ),
+    "Teamspace": ("Mind Map", "Sub-Projects", "War Room", "File Vault"),
+}
+
+COCKPIT_AREA_DESCRIPTIONS = {
+    "Home": "Daily priorities, responsibilities, rules, and readiness checks.",
+    "Portfolio": "Turn the mandate into positions, decisions, and monitored theses.",
+    "Research": "Move from company evidence and screening to an investable shortlist.",
+    "Risk & Quant": "Run the analytical engine and inspect portfolio risk, factors, and regimes.",
+    "Scenarios": "Explore shocks, portfolio construction, and probabilistic outcomes.",
+    "Teamspace": "Coordinate projects and shared working material.",
+}
+
+COCKPIT_PANEL_DESCRIPTIONS = {
+    "Overview & Tasks": "Start here for the team's current workload and immediate priorities.",
+    "Competition Readiness": "Close strategy, evidence, governance, report, and pitch gaps before submission.",
+    "Assignment & Rules": "Keep competition requirements and team readiness in one place.",
+    "Strategy & Decisions": "Document the mandate, strategy, theses, catalysts, and decisions.",
+    "Portfolio Tracker": "Track positions, performance, ownership, and reconciliation.",
+    "Company Analysis": "Review company evidence, regions, financials, management, moat, and valuation.",
+    "Bond Analysis": "Value a bond or bond ETF and inspect yield, cash flows, duration, and rate sensitivity.",
+    "Commodity Analysis": "Compare commodity proxies, inspect diversification, and stress a proposed position.",
+    "Stock Screener": "Filter and rank the investable universe before deeper research.",
+    "Quant Engine": "Configure and run the shared analytical pipeline.",
+    "Risk Cockpit": "Inspect portfolio-level risk signals and concentrations.",
+    "Currency Risk & Hedging": "Measure FX exposure, stress exchange rates, and optimize hedge ratios after costs.",
+    "Factor Exposure": "Understand systematic drivers behind portfolio behavior.",
+    "Regime Detection": "Review the current market-state classification and evidence.",
+    "Scenario Playground": "Apply explicit shocks and compare portfolio responses.",
+    "Efficient Frontier": "Compare the current portfolio with optimized alternatives.",
+    "Monte Carlo": "Review baseline probabilistic portfolio paths and tail outcomes.",
+    "Advanced Monte Carlo": "Add jumps and richer distribution assumptions.",
+    "Advanced Analytics": "Open specialist diagnostics after the core review.",
+    "Sub-Projects": "Organize focused workstreams and their supporting material.",
+}
 
 TASK_PRIORITIES = ["Critical", "High", "Medium", "Low"]
 TASK_PRIORITY_COLORS = {
@@ -102,9 +159,16 @@ QUANT_MODULES = [
 QUANT_OPERATOR_USERS = {"Jakub", "Matfyz_Genius"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
 
+
+def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str, np.ndarray]:
+    """Calculate all requested path percentiles in one partitioning pass."""
+    values = np.percentile(paths, percentiles, axis=1)
+    return {f"p{percentile}": values[index] for index, percentile in enumerate(percentiles)}
+
+
 DEFAULT_USERS = [
-    {"username": "Jakub", "role": "Captain/Quant", "primary_module": "Quant Engine"},
-    {"username": "Matěj", "role": "Oxford/CIO", "primary_module": "Dashboard & Strategy"},
+    {"username": "Jakub", "role": "Co-Captain / Quant", "primary_module": "Quant Engine"},
+    {"username": "Matěj", "role": "Co-Captain / Strategy", "primary_module": "Dashboard & Strategy"},
     {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
     {"username": "Lukáš", "role": "Geopolitics", "primary_module": "Macro Intelligence"},
     {"username": "Janek", "role": "Intelligence", "primary_module": "War Room"},
@@ -150,6 +214,7 @@ def init_db() -> None:
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
+        from src.portfolio_tracker.competition_audit import init_competition_audit_tables
         from src.portfolio_tracker.governance_store import init_governance_tables
         from src.portfolio_tracker.strategy_store import init_strategy_tables
 
@@ -158,6 +223,7 @@ def init_db() -> None:
         init_macro_snapshot_table(conn)
         init_strategy_tables(conn)
         init_governance_tables(conn)
+        init_competition_audit_tables(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
@@ -277,9 +343,88 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'open',
                 exit_price REAL,
                 exit_date TEXT,
-                closed_by TEXT
+                closed_by TEXT,
+                bond_instrument_type TEXT DEFAULT '',
+                bond_category TEXT DEFAULT '',
+                isin TEXT DEFAULT '',
+                issuer TEXT DEFAULT '',
+                currency TEXT DEFAULT 'USD',
+                face_value REAL,
+                coupon_rate REAL,
+                maturity_date TEXT,
+                coupon_frequency INTEGER DEFAULT 2,
+                next_coupon_date TEXT,
+                entry_accrued_interest REAL DEFAULT 0,
+                accrued_interest REAL DEFAULT 0,
+                entry_fx_rate_to_usd REAL DEFAULT 1,
+                fx_rate_to_usd REAL DEFAULT 1,
+                exit_accrued_interest REAL DEFAULT 0,
+                exit_fx_rate_to_usd REAL DEFAULT 1,
+                coupon_income REAL DEFAULT 0,
+                yield_to_maturity REAL,
+                modified_duration REAL,
+                convexity REAL,
+                credit_rating TEXT DEFAULT '',
+                seniority TEXT DEFAULT '',
+                valuation_source TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
+                price_observed_at TEXT,
+                callable INTEGER DEFAULT 0,
+                call_date TEXT,
+                call_price REAL,
+                benchmark_name TEXT DEFAULT '',
+                benchmark_yield REAL,
+                income_yield REAL,
+                default_probability REAL,
+                recovery_rate REAL,
+                competition_eligibility_status TEXT DEFAULT 'Pending verification',
+                eligibility_source TEXT DEFAULT '',
+                eligibility_checked_at TEXT
             )
         """)
+        position_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(competition_positions)").fetchall()
+        }
+        for col, definition in [
+            ("bond_instrument_type", "TEXT DEFAULT ''"),
+            ("bond_category", "TEXT DEFAULT ''"),
+            ("isin", "TEXT DEFAULT ''"),
+            ("issuer", "TEXT DEFAULT ''"),
+            ("currency", "TEXT DEFAULT 'USD'"),
+            ("face_value", "REAL"),
+            ("coupon_rate", "REAL"),
+            ("maturity_date", "TEXT"),
+            ("coupon_frequency", "INTEGER DEFAULT 2"),
+            ("next_coupon_date", "TEXT"),
+            ("entry_accrued_interest", "REAL DEFAULT 0"),
+            ("accrued_interest", "REAL DEFAULT 0"),
+            ("entry_fx_rate_to_usd", "REAL DEFAULT 1"),
+            ("fx_rate_to_usd", "REAL DEFAULT 1"),
+            ("exit_accrued_interest", "REAL DEFAULT 0"),
+            ("exit_fx_rate_to_usd", "REAL DEFAULT 1"),
+            ("coupon_income", "REAL DEFAULT 0"),
+            ("yield_to_maturity", "REAL"),
+            ("modified_duration", "REAL"),
+            ("convexity", "REAL"),
+            ("credit_rating", "TEXT DEFAULT ''"),
+            ("seniority", "TEXT DEFAULT ''"),
+            ("valuation_source", "TEXT DEFAULT ''"),
+            ("source_url", "TEXT DEFAULT ''"),
+            ("price_observed_at", "TEXT"),
+            ("callable", "INTEGER DEFAULT 0"),
+            ("call_date", "TEXT"),
+            ("call_price", "REAL"),
+            ("benchmark_name", "TEXT DEFAULT ''"),
+            ("benchmark_yield", "REAL"),
+            ("income_yield", "REAL"),
+            ("default_probability", "REAL"),
+            ("recovery_rate", "REAL"),
+            ("competition_eligibility_status", "TEXT DEFAULT 'Pending verification'"),
+            ("eligibility_source", "TEXT DEFAULT ''"),
+            ("eligibility_checked_at", "TEXT"),
+        ]:
+            if col not in position_cols:
+                conn.execute(f"ALTER TABLE competition_positions ADD COLUMN {col} {definition}")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
@@ -362,14 +507,18 @@ def init_db() -> None:
                     continue
                 stored_hash = existing_users[user["username"]]
                 if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
+                    conn.execute(
+                        "UPDATE wharton_users SET role = ?, primary_module = ? WHERE username = ?",
+                        (user["role"], user["primary_module"], user["username"]),
+                    )
                     continue
                 # Password changed, update it
                 password_hash = bcrypt.hashpw(
                     user_pass.encode("utf-8"), bcrypt.gensalt()
                 ).decode("utf-8")
                 conn.execute(
-                    "UPDATE wharton_users SET password_hash = ? WHERE username = ?",
-                    (password_hash, user["username"])
+                    "UPDATE wharton_users SET password_hash = ?, role = ?, primary_module = ? WHERE username = ?",
+                    (password_hash, user["role"], user["primary_module"], user["username"])
                 )
             else:
                 password_hash = bcrypt.hashpw(
@@ -442,29 +591,35 @@ def _logout() -> None:
 
 
 def _render_login() -> None:
-    st.markdown("""
-        <div style="max-width:420px;margin:4rem auto 0;padding:2.5rem;
-            background:linear-gradient(135deg,#0f172a,#1e293b);
-            border-radius:20px;border:1px solid rgba(20,184,166,0.3);
-            box-shadow:0 24px 60px rgba(0,0,0,0.4);">
-          <h2 style="color:#f8fafc;margin:0 0 0.25rem;font-size:1.6rem;">Wharton Cockpit</h2>
-          <p style="color:rgba(248,250,252,0.6);margin:0 0 1.5rem;font-size:0.9rem;">
-            Production workspace · Strategy · Quant · Team
-          </p>
-        </div>
-    """, unsafe_allow_html=True)
-
     users = _fetch_users()
     usernames = [str(u["username"]) for u in users]
     if not usernames:
         st.error("No users found. Restart the app.")
         st.stop()
 
-    with st.form("wharton_login_form", clear_on_submit=False):
-        # duplicate username selectbox removed
-        username = st.selectbox("Username", options=usernames, key="wharton_login_username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Enter Cockpit", type="primary", use_container_width=True)
+    _, center, _ = st.columns([1, 1.15, 1])
+    with center:
+        st.markdown(
+            """
+            <div class="wharton-login-header">
+              <h1>Wharton Cockpit</h1>
+              <p>Sign in to your team workspace.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.form("wharton_login_form", clear_on_submit=False):
+            username = st.selectbox(
+                "Team member",
+                options=usernames,
+                key="wharton_login_username",
+            )
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button(
+                "Enter workspace",
+                type="primary",
+                use_container_width=True,
+            )
 
     # Check if we are in development mode and using the insecure default password
     if _is_development_mode() and submitted and password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD:
@@ -501,24 +656,73 @@ def _inject_cockpit_styles() -> None:
     st.markdown("""
         <style>
         .block-container {
-            max-width: 100% !important;
-            padding-top: 1.2rem !important;
-            padding-left: 2rem !important;
-            padding-right: 2rem !important;
+            max-width: 1480px !important;
+            padding-top: 2rem !important;
+            padding-left: 2.25rem !important;
+            padding-right: 2.25rem !important;
         }
         .wharton-hero {
-            border: 1px solid rgba(15,23,42,0.12);
-            border-radius: 24px;
-            padding: 1.25rem 1.45rem;
-            margin-bottom: 1rem;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 20px;
+            padding: 1.65rem 1.8rem;
+            margin-bottom: 1.25rem;
             background:
-                radial-gradient(circle at 4% 18%, rgba(20,184,166,0.20), transparent 30%),
-                linear-gradient(135deg, rgba(15,23,42,0.97), rgba(30,41,59,0.94));
+                radial-gradient(circle at 88% 10%, rgba(72,193,185,0.24), transparent 20rem),
+                linear-gradient(135deg, #142238 0%, #193450 65%, #175e61 130%);
             color: #f8fafc;
-            box-shadow: 0 18px 50px rgba(15,23,42,0.16);
+            box-shadow: 0 10px 30px rgba(27,39,54,0.07);
         }
-        .wharton-hero h1 { margin:0; font-size:2.05rem; letter-spacing:-0.04em; }
-        .wharton-hero p { margin:0.45rem 0 0; color:rgba(248,250,252,0.78); }
+        .wharton-hero h1 { color:#fff; margin:0; font-size:2.05rem; letter-spacing:-0.04em; }
+        .wharton-hero p { margin:0.45rem 0 0; color:rgba(248,250,252,0.72); }
+        .wharton-login-header {
+            margin:4rem 0 1.25rem;
+            padding:0 0.15rem;
+        }
+        .wharton-login-header h1 {
+            margin:0;
+            color:#17202e;
+            font-size:1.75rem;
+            letter-spacing:-0.035em;
+        }
+        .wharton-login-header p {
+            margin:0.35rem 0 0;
+            color:#64748b;
+        }
+        .wharton-profile-strip {
+            display:flex;
+            align-items:center;
+            gap:0.8rem;
+            padding:0.85rem 1rem;
+            margin-bottom:1.1rem;
+            border:1px solid #e3e8ef;
+            border-radius:14px;
+            background:rgba(255,255,255,0.82);
+            box-shadow:0 3px 14px rgba(27,39,54,0.035);
+        }
+        .wharton-profile-avatar {
+            display:grid;
+            place-items:center;
+            width:2.15rem;
+            height:2.15rem;
+            flex:0 0 2.15rem;
+            border-radius:10px;
+            color:#167d78;
+            background:#eaf7f5;
+            font-size:0.82rem;
+            font-weight:800;
+        }
+        .wharton-profile-copy strong {
+            display:block;
+            color:#17202e;
+            font-size:0.96rem;
+            line-height:1.25;
+        }
+        .wharton-profile-copy span {
+            display:block;
+            margin-top:0.12rem;
+            color:#64748b;
+            font-size:0.8rem;
+        }
         .wharton-badge-row { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.9rem; }
         .wharton-badge {
             border:1px solid rgba(226,232,240,0.22); border-radius:999px;
@@ -526,26 +730,50 @@ def _inject_cockpit_styles() -> None:
             color:#e2e8f0; font-size:0.86rem;
         }
         .wharton-panel {
-            border:1px solid rgba(15,23,42,0.10); border-radius:18px;
-            padding:1rem 1.15rem; background:rgba(248,250,252,0.74); margin-bottom:1rem;
+            border:1px solid #e3e8ef; border-radius:14px;
+            padding:1rem 1.15rem; background:#fff; margin-bottom:1rem;
+            box-shadow:0 4px 16px rgba(27,39,54,0.04);
+        }
+        .wharton-nav-panel {
+            display:flex;
+            align-items:flex-start;
+            justify-content:space-between;
+            gap:1rem;
+            padding:0.95rem 1.1rem;
+            margin:0.2rem 0 1rem;
+            border:1px solid #dce5ec;
+            border-left:4px solid #167d78;
+            border-radius:14px;
+            background:linear-gradient(90deg,#f0faf8 0%,rgba(255,255,255,0.94) 72%);
+        }
+        .wharton-nav-panel strong {
+            display:block;
+            color:#17202e;
+            font-size:1rem;
+            letter-spacing:-0.015em;
+        }
+        .wharton-nav-panel span {
+            display:block;
+            margin-top:0.2rem;
+            color:#64748b;
+            font-size:0.84rem;
+            line-height:1.45;
         }
         .wharton-section-kicker {
             color:#0f766e; text-transform:uppercase; letter-spacing:0.12em;
             font-weight:800; font-size:0.76rem; margin-bottom:0.35rem;
         }
         div[data-testid="stMetric"] {
-            border:1px solid rgba(20,184,166,0.32); border-radius:16px;
-            padding:0.85rem 0.95rem;
-            background:
-                radial-gradient(circle at top left, rgba(45,212,191,0.22), transparent 42%),
-                linear-gradient(135deg, #0f172a, #164e63);
-            box-shadow:0 12px 30px rgba(15,23,42,0.16);
+            border:1px solid #e3e8ef; border-radius:14px;
+            padding:0.9rem 1rem;
+            background:#fff;
+            box-shadow:0 4px 18px rgba(27,39,54,0.045);
         }
         div[data-testid="stMetric"] label,
         div[data-testid="stMetric"] [data-testid="stMetricLabel"],
         div[data-testid="stMetric"] [data-testid="stMetricValue"],
-        div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color:#f8fafc !important; }
-        div[data-testid="stMetric"] svg { fill:#f8fafc !important; }
+        div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color:#17202e !important; }
+        div[data-testid="stMetric"] svg { fill:#64748b !important; }
         .wharton-graph-shell {
             border:1px solid rgba(20,184,166,0.24); border-radius:20px;
             padding:0.75rem 0.75rem 0.25rem;
@@ -563,7 +791,21 @@ def _inject_cockpit_styles() -> None:
             padding:1rem 1.2rem; margin-bottom:0.75rem;
             background:linear-gradient(135deg,rgba(15,23,42,0.04),rgba(20,184,166,0.04));
         }
-        div[data-testid="stTabs"] button { font-weight:700; }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            overflow-x:auto;
+            gap:0.25rem;
+            border-bottom:1px solid #e3e8ef;
+        }
+        div[data-testid="stTabs"] button {
+            white-space:nowrap;
+            font-weight:650;
+        }
+        @media (max-width:900px) {
+            .block-container {
+                padding:1.15rem 1rem 3rem !important;
+            }
+            .wharton-hero { padding:1.35rem 1.2rem; border-radius:16px; }
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -1087,7 +1329,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
     from src.storage.wharton_adapter import get_storage_backend
     is_local_backend = get_storage_backend().backend_name == "local"
     if is_local_backend:
-        st.error("⚠️ **VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
+        st.error("**VAROVÁNÍ: File Vault používá LOKÁLNÍ úložiště!**\n\nCloudflare R2 není správně nakonfigurováno. Všechny soubory, které teď nahrajete, po restartu aplikace zmizí (přestože jejich názvy zůstanou v databázi). Zkontrolujte, zda máte v nastavení Streamlit Cloud Secrets přidanou sekci `[storage]` s údaji pro R2.")
 
     if is_local_backend and not _is_development_mode():
         st.error("Uploads are disabled in production when running on local storage to prevent data loss.")
@@ -1233,7 +1475,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 
     with st.expander(" Create New Sub-Project", expanded=False):
         with st.form("wharton_create_subproject_form", clear_on_submit=True):
-            sp_name = st.text_input("Project Name", placeholder="e.g. EU AI Act Impact on ASML")
+            sp_name = st.text_input("Project Name", placeholder="e.g. EU regulation impact on ASML")
             sp_desc = st.text_area("Analysis / Description",
                                    placeholder="Describe scope, methodology, what this covers, key findings...",
                                    height=120)
@@ -1373,14 +1615,14 @@ def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date)
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
 
-def _parse_tickers(raw: str) -> list[str]:
+def _parse_tickers(raw: str, *, allow_empty: bool = False) -> list[str]:
     tickers, seen = [], set()
     for chunk in raw.replace(",", "\n").splitlines():
         t = chunk.strip().upper()
         if t and t not in seen:
             tickers.append(t)
             seen.add(t)
-    if not tickers: raise ValueError("Enter at least one ticker.")
+    if not tickers and not allow_empty: raise ValueError("Enter at least one ticker.")
     return tickers
 
 
@@ -1424,21 +1666,47 @@ def _compute_quant_run(
     risk_free_rate, current_value, max_weight, turnover_limit,
     transaction_cost_bps, risk_aversion, simulation_days, n_simulations, random_seed,
     jump_intensity, jump_mean, jump_volatility,
+    manual_bonds=None,
 ) -> dict[str, Any]:
     modules = _load_quant_modules()
     analytics, optimization, simulation = modules["analytics"], modules["optimization"], modules["simulation"]
 
-    prices = _fetch_close_prices_cached(tuple(tickers), start_date, end_date)
+    from src.portfolio_tracker.manual_bond_quant import (
+        build_manual_bond_metrics_table,
+        build_manual_bond_proxy_returns,
+        combine_hybrid_weights,
+    )
+
+    manual_bonds = [dict(item) for item in (manual_bonds or [])]
+    proxy_tickers = sorted({
+        str(item.get("proxy_ticker") or "").strip().upper()
+        for item in manual_bonds if str(item.get("proxy_ticker") or "").strip()
+    })
+    data_symbols = list(dict.fromkeys([*tickers, *proxy_tickers]))
+    if not data_symbols:
+        raise ValueError("Enter at least one market ticker or manual individual bond.")
+    prices = _fetch_close_prices_cached(tuple(data_symbols), start_date, end_date)
     if prices.empty: raise ValueError("No price data returned.")
     prices = prices.sort_index().ffill().dropna(how="all")
-    available = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
-    prices = prices[available].dropna(how="any")
+    available_data = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
+    prices = prices[available_data].dropna(how="any")
     if prices.empty: raise ValueError("Not enough aligned data.")
 
-    returns = prices.pct_change().dropna(how="any")
+    data_returns = prices.pct_change().dropna(how="any")
+    available_market = [ticker for ticker in tickers if ticker in data_returns.columns]
+    return_parts = [data_returns[available_market]] if available_market else []
+    if manual_bonds:
+        return_parts.append(
+            build_manual_bond_proxy_returns(
+                manual_bonds, data_returns, as_of=end_date,
+            )
+        )
+    returns = pd.concat(return_parts, axis=1, join="inner").dropna(how="any") if return_parts else pd.DataFrame()
     if returns.empty: raise ValueError("Return series is empty.")
 
-    aligned_w = _align_weights(tickers, weights, list(returns.columns))
+    aligned_w = combine_hybrid_weights(
+        tickers, weights, manual_bonds, list(returns.columns),
+    )
     portfolio_returns = analytics.calculate_portfolio_daily_returns(returns, aligned_w)
     core_metrics = analytics.calculate_portfolio_core_metrics(portfolio_returns, risk_free_rate)
     concentration = analytics.calculate_concentration_metrics(aligned_w)
@@ -1448,8 +1716,8 @@ def _compute_quant_run(
     benchmark_symbol = benchmark_ticker.strip().upper()
     benchmark_returns = pd.Series(dtype=float)
     if benchmark_symbol:
-        if benchmark_symbol in returns.columns:
-            benchmark_returns = returns[benchmark_symbol]
+        if benchmark_symbol in data_returns.columns:
+            benchmark_returns = data_returns[benchmark_symbol]
         else:
             bp = _fetch_close_prices_cached((benchmark_symbol,), start_date, end_date)
             if benchmark_symbol in bp.columns:
@@ -1463,11 +1731,12 @@ def _compute_quant_run(
     )
     return_contribution = analytics.calculate_return_contribution(returns, aligned_w)
     risk_contribution = analytics.calculate_risk_contribution(returns, aligned_w)
-    min_variance = optimization.optimize_minimum_variance(returns, max_weight=max_weight)
-    max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=max_weight)
+    effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
+    min_variance = optimization.optimize_minimum_variance(returns, max_weight=effective_max_weight)
+    max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
     cost_aware = optimization.optimize_cost_aware_rebalance(
         returns=returns, current_weights=aligned_w, risk_free_rate=risk_free_rate,
-        max_weight=max_weight, turnover_limit=turnover_limit,
+        max_weight=effective_max_weight, turnover_limit=turnover_limit,
         transaction_cost_bps=transaction_cost_bps, risk_aversion=risk_aversion,
     )
     portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
@@ -1488,12 +1757,33 @@ def _compute_quant_run(
         jump_intensity=jump_intensity, jump_mean=jump_mean, jump_volatility=jump_volatility,
     )
 
+    from src.analytics.scenario_playground import classify_asset_role
+
+    role_security_labels = {
+        "bond": "Bond",
+        "commodity": "Commodity",
+        "gold": "Gold",
+        "crypto": "Crypto",
+        "cash": "Cash",
+        "equity": "Market",
+    }
+    security_types = {
+        column: (
+            "Bond"
+            if str(column).startswith("BOND:")
+            else role_security_labels[classify_asset_role(str(column))]
+        )
+        for column in returns.columns
+    }
+
     # Run full modular quant stack (models, signals, news, backtest, history)
     quant_stack_result = None
     try:
         pipeline = _load_modular_pipeline()
         config = {
             "tickers": list(returns.columns),
+            "news_tickers": available_market,
+            "security_types": security_types,
             "weights": aligned_w.tolist(),
             "start_date": start_date,
             "end_date": end_date,
@@ -1536,10 +1826,24 @@ def _compute_quant_run(
         "avg_correlation": avg_corr,
         "observations": int(returns.shape[0]),
     }
+    manual_bond_metrics = build_manual_bond_metrics_table(manual_bonds, as_of=end_date)
+    if not manual_bond_metrics.empty:
+        manual_bond_metrics["AllocatedMarketValueUSD"] = (
+            pd.to_numeric(manual_bond_metrics["Weight"], errors="coerce").fillna(0.0)
+            * float(current_value)
+        )
+        manual_bond_metrics["DV01USD"] = (
+            manual_bond_metrics["AllocatedMarketValueUSD"]
+            * pd.to_numeric(manual_bond_metrics["ModifiedDuration"], errors="coerce")
+            * 0.0001
+        )
     return {
         "generated_at": _now_iso(),
         "tickers": list(returns.columns),
         "requested_tickers": tickers,
+        "manual_bonds": manual_bonds,
+        "manual_bond_metrics": manual_bond_metrics,
+        "security_types": security_types,
         "weights": aligned_w,
         "benchmark_ticker": benchmark_symbol,
         "prices": prices,
@@ -1563,24 +1867,37 @@ def _compute_quant_run(
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
             "risk_free_rate": risk_free_rate, "current_value": current_value,
-            "max_weight": max_weight, "turnover_limit": turnover_limit,
+            "max_weight": effective_max_weight, "requested_max_weight": max_weight,
+            "turnover_limit": turnover_limit,
             "transaction_cost_bps": transaction_cost_bps, "risk_aversion": risk_aversion,
             "simulation_days": simulation_days, "n_simulations": n_simulations,
             "random_seed": random_seed,
+            "manual_bond_count": len(manual_bonds),
+            "manual_bond_proxy_method": "Proxy returns rescaled to entered annual volatility and shifted to yield to worst less entered expected credit loss",
         },
     }
 
 
 def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
-    default_start = default_end - timedelta(days=365 * 2)
+    default_start = date(2014, 1, 1)
 
     with st.expander(" Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
         with st.form("wharton_quant_config_form"):
             col_in, col_risk = st.columns([1, 1], gap="large")
             with col_in:
-                tickers_text = st.text_area("Portfolio Tickers", value="\n".join(DEFAULT_QUANT_TICKERS), height=145)
-                weights_text = st.text_area("Weights (leave empty = equal)", value="", height=115)
+                tickers_text = st.text_area(
+                    "Market Tickers",
+                    value="\n".join(DEFAULT_QUANT_TICKERS),
+                    height=145,
+                    help="Stocks and traded ETFs. Leave empty for a manual-bond-only portfolio.",
+                )
+                weights_text = st.text_area(
+                    "Market Sleeve Weights (leave empty = equal)",
+                    value="",
+                    height=115,
+                    help="Relative weights inside the portion left after explicit manual-bond weights.",
+                )
                 benchmark_ticker = st.text_input("Benchmark Ticker", value="SPY").strip().upper()
                 current_value = st.number_input("Portfolio Value ($)", min_value=1_000.0, value=100_000.0, step=5_000.0)
             with col_risk:
@@ -1592,20 +1909,64 @@ def _render_quant_configuration() -> None:
                 transaction_cost_bps = st.slider("Transaction Cost (bps)", 0.0, 100.0, 10.0, 1.0)
                 risk_aversion = st.slider("Risk Aversion", 0.5, 10.0, 3.0, 0.5)
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
-                n_simulations = st.slider("Simulation Count", 200, 15000, 1200, 100)
+                n_simulations = st.slider("Simulation Count", 200, 15000, 10000, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
                 st.markdown("#### Jump Diffusion (Advanced MC)")
                 jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
                 jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
                 jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
+            st.markdown("#### Manual Individual Bonds")
+            st.caption(
+                "Add bonds without exchange tickers. Their explicit weights reduce the market sleeve. "
+                "The selected traded bond ETF proxy supplies covariance; YTW and the entered annual volatility set the proxy series' mean and risk."
+            )
+            manual_bond_rows = st.data_editor(
+                pd.DataFrame([{
+                    "Identifier": "",
+                    "Weight %": 10.0,
+                    "Clean Price": 100.0,
+                    "Face Value": 1000.0,
+                    "Quantity": 1.0,
+                    "Coupon %": 5.0,
+                    "Maturity": date.today() + timedelta(days=365 * 5),
+                    "Coupon Frequency": 2,
+                    "YTM %": 5.0,
+                    "Modified Duration": 4.0,
+                    "Convexity": 20.0,
+                    "Annual Volatility %": 5.0,
+                    "Proxy Ticker": "IEF",
+                    "Issuer": "",
+                    "Credit Rating": "",
+                    "Callable": False,
+                    "First Call Date": None,
+                    "Call Price": 100.0,
+                    "Default Probability %": 0.0,
+                    "Recovery Rate %": 40.0,
+                }]),
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key="wharton_quant_manual_bonds",
+                column_config={
+                    "Maturity": st.column_config.DateColumn("Maturity", format="YYYY-MM-DD"),
+                    "Weight %": st.column_config.NumberColumn("Weight %", min_value=0.0, max_value=100.0, format="%.2f"),
+                    "Coupon Frequency": st.column_config.SelectboxColumn("Coupon Frequency", options=[1, 2, 4, 12]),
+                    "Proxy Ticker": st.column_config.TextColumn("Proxy Ticker", help="Tradable bond ETF used only as a historical covariance proxy."),
+                    "Callable": st.column_config.CheckboxColumn("Callable"),
+                    "First Call Date": st.column_config.DateColumn("First Call Date", format="YYYY-MM-DD"),
+                },
+            )
             run_clicked = st.form_submit_button(" Run Full Quant Engine", type="primary")
 
     if run_clicked:
         st.session_state.pop(QUANT_ERROR_KEY, None)
         try:
-            tickers = _parse_tickers(tickers_text)
-            weights = _parse_weights(weights_text, tickers)
             if start_date >= end_date: raise ValueError("Start Date must be before End Date.")
+            from src.portfolio_tracker.manual_bond_quant import parse_manual_bond_rows
+
+            manual_bonds = parse_manual_bond_rows(manual_bond_rows, as_of=end_date)
+            tickers = _parse_tickers(tickers_text, allow_empty=bool(manual_bonds))
+            weights = _parse_weights(weights_text, tickers) if tickers else np.asarray([], dtype=float)
             with st.spinner("Fetching data and running full quant stack..."):
                 st.session_state[QUANT_RESULT_KEY] = _compute_quant_run(
                     tickers=tickers, weights=weights, benchmark_ticker=benchmark_ticker,
@@ -1616,6 +1977,7 @@ def _render_quant_configuration() -> None:
                     simulation_days=int(simulation_days), n_simulations=int(n_simulations),
                     random_seed=int(random_seed),
                     jump_intensity=float(jump_intensity), jump_mean=float(jump_mean), jump_volatility=float(jump_volatility),
+                    manual_bonds=manual_bonds,
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -1647,16 +2009,16 @@ def _fetch_ai_insight_cached(context_data: dict, prompt_type: str) -> dict:
         api_key = resolve_groq_api_key(st.secrets)
         return generate_advisor_insight(context_data, prompt_type, api_key)
     except ImportError:
-        return {"available": False, "error": "AI Advisor module not found."}
+        return {"available": False, "error": "Supplementary analysis module not found."}
 
 
 def _render_ai_advisor_card(context_data: dict, prompt_type: str) -> None:
-    with st.spinner(" AI Advisor is analyzing..."):
+    with st.spinner("Preparing supplementary analysis..."):
         res = _fetch_ai_insight_cached(context_data, prompt_type)
     if res.get("available") and res.get("insight"):
-        st.info(f"** AI Advisor Insight:**\n\n{res['insight']}")
+        st.info(f"**Supplementary insight:**\n\n{res['insight']}")
     elif not res.get("available"):
-        st.caption(f"AI Insight unavailable: {res.get('error', 'Unknown error')}")
+        st.caption(f"Supplementary insight unavailable: {res.get('error', 'Unknown error')}")
 
 
 def _render_benchmark_analytics(result: dict, advanced: bool) -> None:
@@ -1764,7 +2126,7 @@ def _render_simulation(result: dict, advanced: bool) -> None:
     r[2].metric("5th Percentile", f"${stats['percentile_5']:,.0f}")
     r[3].metric("95th Percentile", f"${stats['percentile_95']:,.0f}")
 
-    pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+    pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
     st.markdown("#### Percentile Paths")
     st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
@@ -2149,7 +2511,7 @@ def _render_monte_carlo(result: dict) -> None:
         # Fan chart with percentile bands
         st.markdown("#### Percentile Fan Chart")
         percentiles = [5, 10, 25, 50, 75, 90, 95]
-        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        pctl_data = _percentile_path_map(paths, percentiles)
         days = list(range(len(pctl_data["p50"])))
 
         fig_fan = go.Figure()
@@ -2238,7 +2600,7 @@ def _render_monte_carlo(result: dict) -> None:
                 showlegend=False,
             ))
         fig_paths.add_trace(go.Scatter(
-            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            x=list(range(paths.shape[0])), y=pctl_data["p50"].tolist(),
             mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
         ))
         fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
@@ -2250,7 +2612,7 @@ def _render_monte_carlo(result: dict) -> None:
         st.plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
-        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
         st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
@@ -2308,7 +2670,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         # Fan chart with percentile bands
         st.markdown("#### Percentile Fan Chart")
         percentiles = [5, 10, 25, 50, 75, 90, 95]
-        pctl_data = {f"p{p}": np.percentile(paths, p, axis=1) for p in percentiles}
+        pctl_data = _percentile_path_map(paths, percentiles)
         days = list(range(len(pctl_data["p50"])))
 
         fig_fan = go.Figure()
@@ -2397,7 +2759,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
                 showlegend=False,
             ))
         fig_paths.add_trace(go.Scatter(
-            x=list(range(paths.shape[0])), y=np.median(paths, axis=1).tolist(),
+            x=list(range(paths.shape[0])), y=pctl_data["p50"].tolist(),
             mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
         ))
         fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
@@ -2409,7 +2771,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         st.plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
-        pcts = {f"p{p}": np.percentile(paths, p, axis=1) for p in [5, 25, 50, 75, 95]}
+        pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
         st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
@@ -2702,8 +3064,8 @@ def _render_risk_cockpit(result: dict) -> None:
 
 
 def _render_factor_exposure(result: dict) -> None:
-    """Tier 1: Factor Exposure Analysis (Fama-French proxies)"""
-    st.markdown("###  Factor Exposure Analysis")
+    """Estimate transparent tradable-ETF proxy exposures with inference."""
+    st.markdown("### Factor Exposure Analysis")
     
     try:
         import plotly.graph_objects as go
@@ -2721,11 +3083,14 @@ def _render_factor_exposure(result: dict) -> None:
         st.warning("No portfolio data found.")
         return
 
-    st.markdown("This analysis maps your portfolio against classical Fama-French and Smart Beta factors.")
+    st.markdown(
+        "This is a **tradable ETF proxy model**, not an academic Fama–French replication. "
+        "Style factors are ETF-minus-market spreads and inference uses HAC standard errors."
+    )
 
     factors = ["Market (Beta)", "Size (SMB)", "Value (HML)", "Momentum (MOM)", "Quality (QAL)", "Low Vol (VOL)"]
-    portfolio_factors = {f: 0.0 for f in factors}
-    is_synthetic = False
+    portfolio_factors: dict[str, float] = {}
+    inference_rows: list[dict[str, Any]] = []
 
     try:
         start_date_str = result.get("inputs", {}).get("start_date")
@@ -2770,46 +3135,43 @@ def _render_factor_exposure(result: dict) -> None:
             raise ValueError(f"Not enough aligned data points for OLS (only {len(aligned)} days).")
 
         import statsmodels.api as sm
-        available_etfs = [s for s in etf_symbols if s in aligned.columns]
-        if not available_etfs:
-            raise ValueError("None of the factor ETFs are present in the aligned dataset.")
-        X = aligned[available_etfs]
+        missing_etfs = [symbol for symbol in etf_symbols if symbol not in aligned.columns]
+        if missing_etfs:
+            raise ValueError(f"Missing proxy series: {', '.join(missing_etfs)}")
+        X = pd.DataFrame({
+            "Market (Beta)": aligned["SPY"],
+            "Size (SMB)": aligned["IWN"] - aligned["SPY"],
+            "Value (HML)": aligned["IWD"] - aligned["SPY"],
+            "Momentum (MOM)": aligned["MTUM"] - aligned["SPY"],
+            "Quality (QAL)": aligned["QUAL"] - aligned["SPY"],
+            "Low Vol (VOL)": aligned["USMV"] - aligned["SPY"],
+        }, index=aligned.index)
         X = sm.add_constant(X)
         y = aligned.iloc[:, 0]
-        model = sm.OLS(y, X).fit()
-
-        portfolio_factors = {
-            "Market (Beta)": float(model.params.get("SPY", 0.0)),
-            "Size (SMB)": float(model.params.get("IWN", 0.0)),
-            "Value (HML)": float(model.params.get("IWD", 0.0)),
-            "Momentum (MOM)": float(model.params.get("MTUM", 0.0)),
-            "Quality (QAL)": float(model.params.get("QUAL", 0.0)),
-            "Low Vol (VOL)": float(model.params.get("USMV", 0.0)),
-        }
+        model = sm.OLS(y, X).fit(cov_type="HAC", cov_kwds={"maxlags": 5})
+        portfolio_factors = {factor: float(model.params[factor]) for factor in factors}
+        confidence = model.conf_int(alpha=0.05)
+        inference_rows = [{
+            "Factor": factor,
+            "Loading": float(model.params[factor]),
+            "HAC p-value": float(model.pvalues[factor]),
+            "95% CI low": float(confidence.loc[factor, 0]),
+            "95% CI high": float(confidence.loc[factor, 1]),
+        } for factor in factors]
+        st.caption(
+            f"Observations: {int(model.nobs)} · adjusted R²: {float(model.rsquared_adj):.3f} · "
+            f"annualized intercept: {float(model.params['const']) * 252:.2%}."
+        )
     except Exception as e:
-        is_synthetic = True
-        st.warning(f"⚠️ **Illustrative / Placeholder — do not cite in report** (Real regression failed: {e})")
-        # Generate deterministic synthetic factor loadings based on ticker names for demonstration
-        for t, w in zip(tickers, weights):
-            seed = sum(ord(c) for c in t)
-            np.random.seed(seed)
-            if t in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
-                t_factors = [1.1, -0.2, -0.6, 0.8, 0.9, 0.1]
-            elif t in ["BTC", "ETH", "COIN", "MSTR"]:
-                t_factors = [1.5, 0.5, -0.8, 0.9, -0.5, -0.9]
-            elif t in ["BIL", "SHY", "TLT", "IEF"]:
-                t_factors = [0.1, 0.0, 0.5, 0.0, 0.8, 0.9]
-            else:
-                t_factors = np.random.normal(0, 0.5, len(factors))
-                t_factors = np.clip(t_factors, -1, 1.5)
-            for i, f in enumerate(factors):
-                portfolio_factors[f] += t_factors[i] * w
-        np.random.seed(None)
+        st.error(f"Factor regression unavailable: {e}")
+        st.info("No placeholder or synthetic loadings are shown. Re-run when aligned portfolio and proxy data are available.")
+        return
     
     _render_ai_advisor_card(
         context_data={"factor_exposures": portfolio_factors},
         prompt_type="factor_exposure"
     )
+    st.dataframe(pd.DataFrame(inference_rows), hide_index=True, use_container_width=True)
 
     if HAS_PLOTLY:
         c1, c2 = st.columns([2, 1])
@@ -3334,7 +3696,8 @@ def _render_scenario_playground(result: dict) -> None:
         run_suite = st.button(" Run Full Stress Suite", key="wharton_run_suite", type="primary")
 
     # Role exposure table
-    role_df = scenario_mod.build_role_exposure_table(tickers, weights)
+    security_types = result.get("security_types", {})
+    role_df = scenario_mod.build_role_exposure_table(tickers, weights, security_types)
     with st.expander(" Role Exposure Breakdown"):
         st.dataframe(role_df, use_container_width=True, hide_index=True)
 
@@ -3347,6 +3710,7 @@ def _render_scenario_playground(result: dict) -> None:
                         returns_df=returns_df, tickers=tickers, weights=weights,
                         severity=severity, initial_value=initial_value,
                         horizon_override=horizon,
+                        security_types=security_types,
                     )
                     st.session_state["wharton_scenario_suite_result"] = suite
                 except Exception as e:
@@ -3510,7 +3874,7 @@ def _render_stock_screener() -> None:
     except ImportError:
         HAS_PLOTLY = False
 
-    st.caption("Screen stocks using fundamental and technical criteria powered by yfinance.")
+    st.caption("Screen stocks using fundamental and technical criteria from yfinance.")
 
     # Screener inputs
     with st.expander(" Screener Configuration", expanded=True):
@@ -3680,6 +4044,35 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
 
     st.success(f"Latest run: {result.get('generated_at', 'unknown')}")
     advanced = st.checkbox("Show advanced diagnostics", key=diag_key)
+    requested_max = float(result.get("inputs", {}).get("requested_max_weight", result.get("inputs", {}).get("max_weight", 1.0)))
+    effective_max = float(result.get("inputs", {}).get("max_weight", requested_max))
+    if effective_max > requested_max + 1e-12:
+        st.info(
+            f"Optimizer max weight was raised from {requested_max:.1%} to {effective_max:.1%}; "
+            "the requested cap was infeasible for the number of assets in this run."
+        )
+
+    manual_bond_metrics = result.get("manual_bond_metrics")
+    if isinstance(manual_bond_metrics, pd.DataFrame) and not manual_bond_metrics.empty:
+        with st.expander(f"Manual Individual Bonds ({len(manual_bond_metrics)})", expanded=True):
+            st.dataframe(
+                manual_bond_metrics,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Weight": st.column_config.NumberColumn("Weight", format="percent"),
+                    "YieldToWorst": st.column_config.NumberColumn("Yield to Worst", format="percent"),
+                    "ExpectedLossRate": st.column_config.NumberColumn("Expected Credit Loss", format="percent"),
+                    "ProxyExpectedReturn": st.column_config.NumberColumn("Proxy Expected Return", format="percent"),
+                    "AnnualVolatilityAssumption": st.column_config.NumberColumn("Annual Volatility", format="percent"),
+                    "AllocatedMarketValueUSD": st.column_config.NumberColumn("Allocated Value (USD)", format="$%.2f"),
+                    "DV01USD": st.column_config.NumberColumn("DV01 (USD)", format="$%.2f"),
+                },
+            )
+            st.warning(
+                "Manual-bond historical returns are proxy estimates, not observed bond prices. "
+                "The selected ETF determines covariance; entered volatility and YTW less expected credit loss determine scale and mean."
+            )
 
     nav_col, content_col = st.columns([0.18, 0.82], gap="large")
     with nav_col:
@@ -3977,6 +4370,46 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 value=float(current.get("liquidity_need_pct") or 0.0) * 100.0, step=1.0,
             )
             base_currency = st.text_input("Base currency", value=str(current.get("base_currency") or "USD"))
+        policy1, policy2, policy3 = st.columns(3)
+        with policy1:
+            capacity_options = ["Not specified", "Low", "Moderate", "High"]
+            saved_capacity = str(current.get("risk_capacity") or "Not specified")
+            risk_capacity = st.selectbox(
+                "Risk capacity",
+                capacity_options,
+                index=capacity_options.index(saved_capacity) if saved_capacity in capacity_options else 0,
+                help="Financial ability to absorb loss; keep separate from willingness to take risk.",
+            )
+        with policy2:
+            max_tolerated_drawdown = st.number_input(
+                "Maximum tolerated drawdown (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(current.get("max_tolerated_drawdown") or 0.0) * 100.0,
+                step=1.0,
+            )
+        with policy3:
+            policy_benchmark = st.text_input(
+                "Policy benchmark",
+                value=str(current.get("policy_benchmark") or ""),
+                help="Example: 70% ACWI / 30% Bloomberg US Aggregate.",
+            )
+        drawdown_response = st.text_area(
+            "Expected client behavior and portfolio response during a drawdown",
+            value=str(current.get("drawdown_response") or ""),
+            height=75,
+        )
+        total_financial_picture = st.text_area(
+            "Client total financial picture",
+            value=str(current.get("total_financial_picture") or ""),
+            height=75,
+            help="Operating assets, liabilities, income needs, outside investments, and relevant concentrations.",
+        )
+        policy_benchmark_rationale = st.text_area(
+            "Why this benchmark matches the client's goals and constraints",
+            value=str(current.get("policy_benchmark_rationale") or ""),
+            height=75,
+        )
         mandate_summary = st.text_area(
             "Mandate summary and explicit assumptions",
             value=str(current.get("mandate_summary") or ""),
@@ -4042,6 +4475,12 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "client_name": client_name.strip(),
                 "case_status": case_status,
                 "risk_tolerance": risk_tolerance,
+                "risk_capacity": risk_capacity,
+                "max_tolerated_drawdown": float(max_tolerated_drawdown) / 100.0,
+                "drawdown_response": drawdown_response.strip(),
+                "total_financial_picture": total_financial_picture.strip(),
+                "policy_benchmark": policy_benchmark.strip(),
+                "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
                 "horizon_years": float(horizon_years),
                 "liquidity_need_pct": float(liquidity_need_pct) / 100.0,
                 "base_currency": base_currency.strip().upper() or "USD",
@@ -4057,8 +4496,15 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
             payload.update({
                 "case_status": case_status,
                 "risk_tolerance": risk_tolerance,
+                "risk_capacity": risk_capacity,
+                "max_tolerated_drawdown": float(max_tolerated_drawdown) / 100.0,
+                "drawdown_response": drawdown_response.strip(),
+                "total_financial_picture": total_financial_picture.strip(),
+                "policy_benchmark": policy_benchmark.strip(),
+                "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
                 "mandate_summary": mandate_summary.strip(),
                 "values_constraints_text": values_constraints.strip(),
+                "behavioral_profile": current.get("behavioral_profile", {}),
             })
             with get_connection() as conn:
                 save_client_mandate(conn, payload, updated_by=str(profile["username"]))
@@ -4071,6 +4517,320 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
         summary_cols[1].metric("Risk tolerance", str(current.get("risk_tolerance") or "Not specified"))
         summary_cols[2].metric("Horizon", f"{float(current.get('horizon_years') or 0):g} years")
         summary_cols[3].metric("Liquidity need", f"{float(current.get('liquidity_need_pct') or 0):.1%}")
+
+
+def _render_client_behavioral_profile(
+    profile: dict[str, str | int],
+    record: dict[str, Any] | None,
+) -> None:
+    from src.portfolio_tracker.client_behavior import (
+        BEHAVIORAL_QUESTIONS,
+        DEFAULT_DRAWDOWN_ACTIONS,
+        DRAWDOWN_ACTION_SCORES,
+        LIKERT_OPTIONS,
+        assess_behavioral_profile,
+        parse_likert_answer,
+    )
+    from src.portfolio_tracker.strategy_store import save_client_mandate
+
+    current = _strategy_payload(record)
+    st.markdown("#### Client Behavioral Profile")
+    st.caption(
+        "Document how the client is likely to make decisions under uncertainty and convert observable tendencies "
+        "into communication, review, and trading guardrails. Higher scores mean greater vulnerability to a bias."
+    )
+    st.info(
+        "This is a transparent investment-governance aid, not a clinical diagnosis or a validated psychometric test. "
+        "Distinguish client statements, observed behavior, adviser judgement, and analyst assumptions."
+    )
+    if not current:
+        st.warning("Save the Client Mandate first so the behavioral profile can be versioned with it.")
+        return
+
+    saved = current.get("behavioral_profile")
+    saved = dict(saved) if isinstance(saved, dict) else {}
+    saved_answers = saved.get("answers") if isinstance(saved.get("answers"), dict) else {}
+    saved_actions = saved.get("drawdown_actions") if isinstance(saved.get("drawdown_actions"), dict) else {}
+
+    def answer_label(question_id: str) -> str:
+        try:
+            return LIKERT_OPTIONS[parse_likert_answer(saved_answers.get(question_id, 3)) - 1]
+        except ValueError:
+            return LIKERT_OPTIONS[2]
+
+    questionnaire_frame = pd.DataFrame(
+        [
+            {
+                "Category": question["category_label"],
+                "Statement": question["statement"],
+                "Response": answer_label(question["id"]),
+                "QuestionId": question["id"],
+            }
+            for question in BEHAVIORAL_QUESTIONS
+        ]
+    )
+    drawdown_frame = pd.DataFrame(
+        [
+            {
+                "Portfolio drawdown": threshold,
+                "Intended client action": str(saved_actions.get(threshold) or default_action),
+            }
+            for threshold, default_action in DEFAULT_DRAWDOWN_ACTIONS.items()
+        ]
+    )
+    source_options = [
+        "Client interview",
+        "Observed client behavior",
+        "Adviser assessment",
+        "Analyst assumption",
+        "Not verified",
+    ]
+    saved_source = str(saved.get("source_status") or "Not verified")
+    if saved_source not in source_options:
+        saved_source = "Not verified"
+    frequency_options = ["On demand", "Weekly", "Monthly", "Quarterly", "Semi-annually"]
+    saved_frequency = str(saved.get("communication_frequency") or "Quarterly")
+    if saved_frequency not in frequency_options:
+        saved_frequency = "Quarterly"
+    style_options = [
+        "Goal-based summary",
+        "Detailed evidence and scenarios",
+        "Visual dashboard",
+        "Short recommendation with appendix",
+        "Not specified",
+    ]
+    saved_style = str(saved.get("communication_style") or "Not specified")
+    if saved_style not in style_options:
+        saved_style = "Not specified"
+    experience_options = [
+        "No material loss experience",
+        "Experienced a loss and stayed with the plan",
+        "Experienced a loss and reduced risk",
+        "Experienced a loss and exited most risk assets",
+        "Unknown",
+    ]
+    saved_experience = str(saved.get("loss_experience") or "Unknown")
+    if saved_experience not in experience_options:
+        saved_experience = "Unknown"
+    try:
+        saved_assessment_date = date.fromisoformat(str(saved.get("assessment_date") or ""))
+    except ValueError:
+        saved_assessment_date = date.today()
+
+    with st.form("client_behavioral_profile_form"):
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            source_status = st.selectbox(
+                "Evidence status",
+                source_options,
+                index=source_options.index(saved_source),
+                help="Record whether the answers came directly from the client or are still assumptions.",
+            )
+            assessment_date = st.date_input("Assessment date", value=saved_assessment_date)
+        with m2:
+            communication_frequency = st.selectbox(
+                "Preferred communication frequency",
+                frequency_options,
+                index=frequency_options.index(saved_frequency),
+            )
+            communication_style = st.selectbox(
+                "Preferred communication style",
+                style_options,
+                index=style_options.index(saved_style),
+            )
+        with m3:
+            loss_experience = st.selectbox(
+                "Prior market-loss experience",
+                experience_options,
+                index=experience_options.index(saved_experience),
+            )
+            decision_makers = st.text_input(
+                "Decision makers / influencers",
+                value=str(saved.get("decision_makers") or ""),
+                placeholder="Client, spouse, board, adviser...",
+            )
+        evidence_reference = st.text_input(
+            "Interview, observation, or case-evidence reference",
+            value=str(saved.get("evidence_reference") or ""),
+            help="Point to meeting notes, the official case, or another reviewable source.",
+        )
+
+        st.markdown("##### Behavioral tendency questionnaire")
+        st.caption(
+            "Use 1 (strongly disagree) to 5 (strongly agree). Every statement is oriented so a higher answer "
+            "means greater potential decision vulnerability."
+        )
+        edited_questionnaire = st.data_editor(
+            questionnaire_frame,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Category", "Statement", "QuestionId"],
+            key="client_behavior_questionnaire_editor",
+            column_config={
+                "Response": st.column_config.SelectboxColumn("Response", options=list(LIKERT_OPTIONS), required=True),
+                "QuestionId": None,
+            },
+        )
+
+        st.markdown("##### Pre-committed drawdown behavior")
+        st.caption("Choose the action the client can realistically follow, not the answer that appears most sophisticated.")
+        edited_drawdowns = st.data_editor(
+            drawdown_frame,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Portfolio drawdown"],
+            key="client_behavior_drawdown_editor",
+            column_config={
+                "Intended client action": st.column_config.SelectboxColumn(
+                    "Intended client action", options=list(DRAWDOWN_ACTION_SCORES), required=True
+                ),
+            },
+        )
+
+        n1, n2 = st.columns(2)
+        with n1:
+            stress_triggers = st.text_area(
+                "Known emotional or decision triggers",
+                value=str(saved.get("stress_triggers") or ""),
+                height=90,
+                placeholder="Loss threshold, concentrated holding, alarming news, peer comparison...",
+            )
+            trusted_sources = st.text_area(
+                "Trusted information sources and people",
+                value=str(saved.get("trusted_sources") or ""),
+                height=85,
+            )
+        with n2:
+            decision_protocol = st.text_area(
+                "Agreed decision and escalation protocol",
+                value=str(saved.get("decision_protocol") or ""),
+                height=90,
+                placeholder="Who must be consulted, waiting period, evidence required, emergency exception...",
+            )
+            profile_notes = st.text_area(
+                "Context and limitations",
+                value=str(saved.get("notes") or ""),
+                height=85,
+            )
+        save_profile = st.form_submit_button(
+            "Save Behavioral Profile", type="primary", use_container_width=True
+        )
+
+    if save_profile:
+        try:
+            answers = {
+                str(row["QuestionId"]): parse_likert_answer(row["Response"])
+                for _, row in edited_questionnaire.iterrows()
+            }
+            drawdown_actions = {
+                str(row["Portfolio drawdown"]): str(row["Intended client action"])
+                for _, row in edited_drawdowns.iterrows()
+            }
+            assessment = assess_behavioral_profile(
+                answers,
+                drawdown_actions=drawdown_actions,
+                risk_tolerance=str(current.get("risk_tolerance") or ""),
+            )
+            behavioral_profile = {
+                "schema_version": 1,
+                "source_status": source_status,
+                "assessment_date": assessment_date.isoformat(),
+                "evidence_reference": evidence_reference.strip(),
+                "decision_makers": decision_makers.strip(),
+                "communication_frequency": communication_frequency,
+                "communication_style": communication_style,
+                "loss_experience": loss_experience,
+                "stress_triggers": stress_triggers.strip(),
+                "trusted_sources": trusted_sources.strip(),
+                "decision_protocol": decision_protocol.strip(),
+                "notes": profile_notes.strip(),
+                "answers": assessment["ParsedAnswers"],
+                "drawdown_actions": drawdown_actions,
+                "last_scored_at": _now_iso(),
+            }
+            updated_mandate = dict(current)
+            updated_mandate["behavioral_profile"] = behavioral_profile
+            with get_connection() as conn:
+                save_client_mandate(conn, updated_mandate, updated_by=str(profile["username"]))
+        except (TypeError, ValueError) as exc:
+            st.error(str(exc))
+        else:
+            st.success("Behavioral profile saved and versioned with the Client Mandate.")
+            st.rerun()
+
+    if not saved:
+        st.warning("No saved behavioral assessment yet. Complete the questionnaire and document its evidence status.")
+        return
+
+    try:
+        assessment = assess_behavioral_profile(
+            saved_answers,
+            drawdown_actions=saved_actions,
+            risk_tolerance=str(current.get("risk_tolerance") or ""),
+        )
+    except (TypeError, ValueError) as exc:
+        st.error(f"The saved behavioral profile is invalid: {exc}")
+        return
+
+    if saved_source in {"Analyst assumption", "Not verified"}:
+        st.warning(
+            "This profile is based on an analyst assumption or unverified evidence. Do not treat it as a confirmed client preference."
+        )
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Behavioral vulnerability", f"{float(assessment['OverallVulnerabilityScore']):.0f}/100")
+    k2.metric("Vulnerability band", str(assessment["VulnerabilityBand"]))
+    k3.metric("Decision style", str(assessment["DecisionStyle"]))
+    resilience = assessment.get("DrawdownResilienceScore")
+    k4.metric("Drawdown discipline", f"{float(resilience):.0f}/100" if resilience is not None else "N/A")
+    k5.metric("Question coverage", f"{float(assessment['CoveragePct']):.0%}")
+
+    st.markdown("##### Declared tolerance versus intended behavior")
+    status = str(assessment["RiskToleranceConsistency"])
+    note = str(assessment["RiskToleranceConsistencyNote"])
+    if status == "Broadly consistent":
+        st.success(f"{status}: {note}")
+    elif status == "Not assessed":
+        st.info(f"{status}: {note}")
+    else:
+        st.warning(f"{status}: {note}")
+
+    bias_scores = assessment.get("BiasScores")
+    if isinstance(bias_scores, pd.DataFrame) and not bias_scores.empty:
+        b1, b2 = st.columns([0.44, 0.56], gap="large")
+        with b1:
+            st.markdown("##### Bias vulnerability map")
+            st.bar_chart(bias_scores.set_index("Bias")[["Score"]], use_container_width=True)
+        with b2:
+            st.markdown("##### Scored tendencies")
+            st.dataframe(
+                bias_scores,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.ProgressColumn("Vulnerability", min_value=0, max_value=100, format="%.0f"),
+                    "AnsweredItems": st.column_config.NumberColumn("Answered items", format="%d"),
+                },
+            )
+
+    guardrails = assessment.get("Guardrails")
+    st.markdown("##### Required behavioral guardrails")
+    if isinstance(guardrails, pd.DataFrame):
+        st.dataframe(guardrails, use_container_width=True, hide_index=True)
+    st.markdown("##### Communication plan")
+    for recommendation in assessment.get("CommunicationPlan", []):
+        st.write(f"- {recommendation}")
+
+    st.download_button(
+        "Download Behavioral Profile (JSON)",
+        data=json.dumps(saved, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name=f"client_behavioral_profile_{saved.get('assessment_date', 'latest')}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    st.caption(
+        f"Evidence: {saved_source} · Assessment date: {saved.get('assessment_date', 'n/a')} · "
+        "Reassess after a material life event, mandate change, or observed behavior during market stress."
+    )
 
 
 def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any]) -> None:
@@ -4152,7 +4912,7 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             "Require every holding to be on the loaded Approved Universe",
             value=bool(current.get("require_approved")),
         )
-        allowed_type_options = ["Stock", "ETF", "Bond", "Other"]
+        allowed_type_options = ["Stock", "ETF", "Bond", "Commodity", "Other"]
         saved_allowed_types = {str(item).casefold() for item in current.get("allowed_asset_types", [])}
         default_allowed_types = [
             item for item in allowed_type_options if item.casefold() in saved_allowed_types
@@ -4408,6 +5168,24 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
                 help="Tags are checked against required tags in the Client Mandate.",
             )
         investment_thesis = st.text_area("Core investment thesis", value=str(current.get("investment_thesis") or ""), height=100)
+        role1, role2 = st.columns(2)
+        with role1:
+            portfolio_role = st.text_input(
+                "Portfolio role",
+                value=str(current.get("portfolio_role") or ""),
+                help="Why this security belongs in the portfolio: compounder, diversifier, income, catalyst, etc.",
+            )
+        with role2:
+            why_now = st.text_input("Why now / timing", value=str(current.get("why_now") or ""))
+        driver1, driver2 = st.columns(2)
+        with driver1:
+            value_drivers = st.text_area(
+                "Value drivers (one per line)", value="\n".join(current.get("value_drivers", [])), height=85,
+            )
+        with driver2:
+            monitoring_kpis = st.text_area(
+                "Monitoring KPIs (one per line)", value="\n".join(current.get("monitoring_kpis", [])), height=85,
+            )
         s1, s2, s3 = st.columns(3)
         with s1:
             bear_case = st.text_area("Bear case", value=str(current.get("bear_case") or ""), height=100)
@@ -4421,6 +5199,25 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
             "Observable thesis-invalidation condition",
             value=str(current.get("invalidation") or ""), height=80,
         )
+        counter_thesis = st.text_area(
+            "Strongest counter-thesis",
+            value=str(current.get("counter_thesis") or ""),
+            height=80,
+            help="State the best evidence-based case against owning the security.",
+        )
+        saved_fair_values = current.get("fair_value_scenarios", {}) if isinstance(current.get("fair_value_scenarios"), dict) else {}
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
+            bear_fair_value = st.number_input("Bear fair value", min_value=0.0, value=float(saved_fair_values.get("bear") or 0.0), step=1.0)
+        with v2:
+            base_fair_value = st.number_input("Base fair value", min_value=0.0, value=float(saved_fair_values.get("base") or 0.0), step=1.0)
+        with v3:
+            bull_fair_value = st.number_input("Bull fair value", min_value=0.0, value=float(saved_fair_values.get("bull") or 0.0), step=1.0)
+        with v4:
+            margin_of_safety = st.number_input(
+                "Margin of safety (%)", min_value=0.0, max_value=100.0,
+                value=float(current.get("margin_of_safety") or 0.0) * 100.0, step=1.0,
+            )
         save_thesis = st.form_submit_button("Save Thesis Monitor", type="primary", use_container_width=True)
     if save_thesis:
         payload = {
@@ -4432,10 +5229,21 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
             "tags": [item.strip().lower() for item in holding_tags.replace(";", ",").split(",") if item.strip()],
             "review_date": review_date.isoformat(),
             "investment_thesis": investment_thesis.strip(),
+            "portfolio_role": portfolio_role.strip(),
+            "why_now": why_now.strip(),
+            "value_drivers": [item.strip() for item in value_drivers.splitlines() if item.strip()],
+            "monitoring_kpis": [item.strip() for item in monitoring_kpis.splitlines() if item.strip()],
             "bear_case": bear_case.strip(), "base_case": base_case.strip(), "bull_case": bull_case.strip(),
             "catalysts": [item.strip() for item in catalysts.splitlines() if item.strip()],
             "risks": [item.strip() for item in risks.splitlines() if item.strip()],
             "invalidation": invalidation.strip(),
+            "counter_thesis": counter_thesis.strip(),
+            "fair_value_scenarios": {
+                "bear": float(bear_fair_value) if bear_fair_value > 0 else None,
+                "base": float(base_fair_value) if base_fair_value > 0 else None,
+                "bull": float(bull_fair_value) if bull_fair_value > 0 else None,
+            },
+            "margin_of_safety": float(margin_of_safety) / 100.0 if margin_of_safety > 0 else None,
             "updated_by": str(profile["username"]),
         }
         with get_connection() as conn:
@@ -4458,7 +5266,11 @@ def _render_thesis_monitor(profile: dict[str, str | int], data: dict[str, Any]) 
     for ticker in tickers:
         item = thesis_by_ticker.get(ticker, {})
         payload = _strategy_payload(item)
-        required = ["sector", "primary_goal", "investment_thesis", "bear_case", "base_case", "bull_case", "invalidation", "review_date"]
+        required = [
+            "sector", "primary_goal", "portfolio_role", "why_now", "investment_thesis",
+            "value_drivers", "monitoring_kpis", "bear_case", "base_case", "bull_case",
+            "counter_thesis", "invalidation", "fair_value_scenarios", "review_date",
+        ]
         completeness = sum(bool(payload.get(field)) for field in required) / len(required)
         review_text = str(payload.get("review_date") or "")
         try:
@@ -4830,7 +5642,7 @@ def _render_pretrade_lab(data: dict[str, Any]) -> None:
                 "Execution price (optional)": st.column_config.NumberColumn(
                     "Execution price (optional)", min_value=0.0, format="$%.2f",
                 ),
-                "Type": st.column_config.SelectboxColumn("Type", options=["Stock", "ETF", "Bond", "Other"]),
+                "Type": st.column_config.SelectboxColumn("Type", options=["Stock", "ETF", "Bond", "Commodity", "Other"]),
             },
         )
         analyze_plan = st.form_submit_button("Analyze Trade Plan", type="primary", use_container_width=True)
@@ -5230,12 +6042,14 @@ def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> N
         str(item.get("name")) for item in mandate.get("goals", [])
         if isinstance(item, dict) and item.get("name")
     ]
-    mandate_tab, rulebook_tab, alignment_tab, pretrade_tab, thesis_tab, catalysts_tab, universe_tab, decisions_tab, review_tab = st.tabs([
-        "Client Mandate", "Strategy Rulebook", "Alignment & Drift", "Pre-Trade Lab",
+    mandate_tab, behavior_tab, rulebook_tab, alignment_tab, pretrade_tab, thesis_tab, catalysts_tab, universe_tab, decisions_tab, review_tab = st.tabs([
+        "Client Mandate", "Behavioral Profile", "Strategy Rulebook", "Alignment & Drift", "Pre-Trade Lab",
         "Thesis Monitor", "Catalyst Calendar", "Approved Universe", "Decision Journal", "Review & Learning",
     ])
     with mandate_tab:
         _render_client_mandate(profile, data.get("mandate_record"))
+    with behavior_tab:
+        _render_client_behavioral_profile(profile, data.get("mandate_record"))
     with rulebook_tab:
         _render_strategy_rulebook(profile, data)
     with alignment_tab:
@@ -5776,7 +6590,7 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
             no_client_contact = st.checkbox("The team has not contacted the competition client", value=bool(current.get("no_client_contact")))
             no_paid_advisor = st.checkbox("No paid advisor, consultant, or prohibited course has been used", value=bool(current.get("no_paid_advisor")))
             student_owned_work = st.checkbox("Students created the strategy and made the decisions", value=bool(current.get("student_owned_work")))
-            ai_cited = st.checkbox("AI-generated content is cited and is not presented as original student work", value=bool(current.get("ai_cited")))
+            ai_cited = st.checkbox("Generated content is cited and is not presented as original student work", value=bool(current.get("ai_cited")))
             sources_cited = st.checkbox("All sources, images, and media are cited", value=bool(current.get("sources_cited")))
             school_permission = st.checkbox("School authorization on official letterhead is ready", value=bool(current.get("school_permission")))
         save_rules = st.form_submit_button("Save and Recalculate Compliance", type="primary", use_container_width=True)
@@ -5811,10 +6625,10 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
     failed = sum(item["status"] == "fail" for item in checks)
     pending = sum(item["status"] == "pending" for item in checks)
     k1, k2, k3 = st.columns(3)
-    k1.metric("✅ Passed", passed)
-    k2.metric("❌ Failed", failed)
-    k3.metric("🟡 Awaiting Wharton", pending)
-    status_map = {"pass": "✅", "fail": "❌", "pending": "🟡"}
+    k1.metric("Passed", passed)
+    k2.metric("Failed", failed)
+    k3.metric("Awaiting Wharton", pending)
+    status_map = {"pass": "Pass", "fail": "Fail", "pending": "Pending"}
     st.dataframe(pd.DataFrame([
         {"Status": status_map[item["status"]], "Rule": item["rule"], "Exact Check Result": item["detail"]}
         for item in checks
@@ -5853,6 +6667,7 @@ def _render_wins_reconciliation(
         normalize_wins_rows,
         reconcile_wins_positions,
     )
+    from src.portfolio_tracker.bond_analytics import position_cost_usd, value_position
 
     with st.expander("WInS Reconciliation", expanded=False):
         st.caption(
@@ -5900,6 +6715,8 @@ def _render_wins_reconciliation(
                 if market_price in (None, "", 0, 0.0):
                     market_price = row.get("entry_price")
                 row["current_price"] = market_price
+                row["total_cost"] = position_cost_usd(row)
+                row["current_value"] = value_position(row, market_price)["current_value"]
             tracked_snapshot.append(row)
 
         result = reconcile_wins_positions(uploaded_rows, tracked_snapshot)
@@ -5985,6 +6802,7 @@ def _render_live_competition_analytics(
     live_prices: dict[str, float],
 ) -> None:
     from src.portfolio_tracker.live_analytics import build_live_competition_analytics
+    from src.portfolio_tracker.bond_analytics import is_individual_bond
     from src.portfolio_tracker.research_health import assess_research_health
     from src.portfolio_tracker.strategy_store import list_holding_theses
 
@@ -5992,6 +6810,13 @@ def _render_live_competition_analytics(
         str(row.get("ticker") or "").upper()
         for row in positions
         if row.get("ticker") and str(row.get("status") or "open").lower() == "open"
+    ))
+    market_history_tickers = list(dict.fromkeys(
+        str(row.get("ticker") or "").upper()
+        for row in positions
+        if row.get("ticker")
+        and str(row.get("status") or "open").lower() == "open"
+        and not is_individual_bond(row)
     ))
     st.markdown("#### Live Competition Portfolio Analytics")
     st.caption(
@@ -6012,7 +6837,7 @@ def _render_live_competition_analytics(
     if run_live_analytics:
         end_date = date.today() + timedelta(days=1)
         start_date = end_date - timedelta(days=365 * int(lookback_years))
-        history_symbols = list(dict.fromkeys([*open_tickers, *([benchmark] if benchmark else [])]))
+        history_symbols = list(dict.fromkeys([*market_history_tickers, *([benchmark] if benchmark else [])]))
         with st.spinner("Loading histories and calculating live-portfolio analytics…"):
             prices = _fetch_close_prices_cached(tuple(history_symbols), start_date, end_date)
             asset_prices = prices.reindex(columns=open_tickers) if open_tickers else pd.DataFrame(index=prices.index)
@@ -6049,6 +6874,18 @@ def _render_live_competition_analytics(
                 ticker: {"observed_at": date.today().isoformat(), "source": "Yahoo Finance"}
                 for ticker in open_tickers if ticker in live_prices
             }
+            for position in positions:
+                ticker = str(position.get("ticker") or "").upper()
+                if (
+                    ticker
+                    and str(position.get("status") or "open").lower() == "open"
+                    and is_individual_bond(position)
+                    and position.get("price_observed_at")
+                ):
+                    price_observations[ticker] = {
+                        "observed_at": str(position.get("price_observed_at")),
+                        "source": str(position.get("valuation_source") or "Manual bond valuation"),
+                    }
             analytics_result["research_health"] = assess_research_health(
                 open_tickers,
                 theses=thesis_records,
@@ -6189,8 +7026,1193 @@ def _render_live_competition_analytics(
         st.caption(str(health.get("macro_policy") or ""))
 
 
+def _render_fixed_income_dashboard(
+    positions: list[dict[str, Any]],
+    performance_rows: list[dict[str, Any]],
+) -> None:
+    from src.portfolio_tracker.bond_analytics import (
+        build_fixed_income_analytics,
+        stress_fixed_income,
+    )
+
+    analytics = build_fixed_income_analytics(positions, performance_rows)
+    if not analytics.get("available"):
+        return
+
+    st.markdown("#### Fixed-Income Dashboard")
+    st.caption(
+        "Individual bonds use clean price plus accrued interest and FX. Bond ETFs retain share-price valuation."
+    )
+    metrics = st.columns(6)
+    metrics[0].metric("Fixed-income value", f"${float(analytics.get('market_value_usd') or 0):,.0f}")
+    metrics[1].metric("Weighted YTW", _fmt_pct(analytics.get("weighted_yield_to_worst")))
+    metrics[2].metric(
+        "Benchmark spread",
+        f"{float(analytics.get('weighted_spread_to_benchmark') or 0) * 10_000:+,.0f} bp"
+        if analytics.get("weighted_spread_to_benchmark") is not None else "n/a",
+    )
+    metrics[3].metric("Modified duration", _fmt_float(analytics.get("weighted_modified_duration")))
+    metrics[4].metric("Portfolio DV01", f"${float(analytics.get('portfolio_dv01_usd') or 0):,.2f}")
+    metrics[5].metric("Expected credit loss", f"${float(analytics.get('expected_credit_loss_usd') or 0):,.2f}")
+
+    overview_tab, cashflow_tab, exposure_tab, stress_tab = st.tabs(
+        ["Bond Overview", "Cash-Flow Calendar", "Concentrations", "Rate & Spread Stress"]
+    )
+    with overview_tab:
+        overview = analytics.get("overview")
+        if isinstance(overview, pd.DataFrame) and not overview.empty:
+            display_overview = overview.copy()
+            for percentage_column in (
+                "CouponRate", "CurrentYield", "YieldToMaturity", "YieldToCall",
+                "YieldToWorst", "BenchmarkYield", "SpreadToBenchmark",
+            ):
+                display_overview[percentage_column] = pd.to_numeric(
+                    display_overview[percentage_column], errors="coerce"
+                ) * 100.0
+            st.dataframe(
+                display_overview,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "MarketValueUSD": st.column_config.NumberColumn("Market Value", format="$%.2f"),
+                    "CouponRate": st.column_config.NumberColumn("Coupon", format="%.2f%%"),
+                    "CurrentYield": st.column_config.NumberColumn("Current Yield", format="%.2f%%"),
+                    "YieldToMaturity": st.column_config.NumberColumn("YTM", format="%.2f%%"),
+                    "YieldToCall": st.column_config.NumberColumn("YTC", format="%.2f%%"),
+                    "YieldToWorst": st.column_config.NumberColumn("YTW", format="%.2f%%"),
+                    "BenchmarkYield": st.column_config.NumberColumn("Benchmark", format="%.2f%%"),
+                    "SpreadToBenchmark": st.column_config.NumberColumn("Spread", format="%.2f%%"),
+                    "DV01USD": st.column_config.NumberColumn("DV01", format="$%.2f"),
+                },
+            )
+            st.download_button(
+                "Download Bond Overview (CSV)",
+                data=overview.to_csv(index=False).encode("utf-8"),
+                file_name=f"fixed_income_overview_{analytics.get('as_of')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        st.caption("YTM is solved from the entered dirty price unless an override is supplied. ETF metrics require provider/manual overrides.")
+    with cashflow_tab:
+        cashflows = analytics.get("cashflows")
+        if isinstance(cashflows, pd.DataFrame) and not cashflows.empty:
+            st.dataframe(
+                cashflows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"TotalUSD": st.column_config.NumberColumn("Total USD", format="$%.2f")},
+            )
+            st.download_button(
+                "Download Cash-Flow Calendar (CSV)",
+                data=cashflows.to_csv(index=False).encode("utf-8"),
+                file_name=f"fixed_income_cashflows_{analytics.get('as_of')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        else:
+            st.info("Cash-flow dates are available for individual bonds with maturity and coupon data.")
+    with exposure_tab:
+        e1, e2 = st.columns(2)
+        with e1:
+            st.markdown("##### Maturity ladder")
+            st.dataframe(analytics["maturity_ladder"], use_container_width=True, hide_index=True)
+            st.markdown("##### Currency exposure")
+            st.dataframe(analytics["currency_exposure"], use_container_width=True, hide_index=True)
+        with e2:
+            st.markdown("##### Issuer exposure")
+            st.dataframe(analytics["issuer_exposure"], use_container_width=True, hide_index=True)
+            st.markdown("##### Rating exposure")
+            st.dataframe(analytics["rating_exposure"], use_container_width=True, hide_index=True)
+    with stress_tab:
+        with st.form("fixed_income_stress_form"):
+            s1, s2 = st.columns(2)
+            with s1:
+                curve_shock = st.number_input("Parallel curve shock (bp)", value=100.0, step=25.0)
+            with s2:
+                spread_shock = st.number_input("Credit-spread shock (bp)", value=50.0, step=25.0)
+            run_stress = st.form_submit_button("Run Fixed-Income Stress", use_container_width=True)
+        if run_stress:
+            stress = stress_fixed_income(
+                analytics,
+                curve_shock_bps=float(curve_shock),
+                credit_spread_shock_bps=float(spread_shock),
+            )
+            total_pnl = float(stress["EstimatedPnLUSD"].fillna(0.0).sum()) if not stress.empty else 0.0
+            st.metric("Estimated fixed-income P/L", f"${total_pnl:+,.2f}")
+            st.dataframe(stress, use_container_width=True, hide_index=True)
+            st.caption("Deterministic duration-convexity estimate; it is a sensitivity, not a forecast.")
+
+
+def _render_currency_risk(profile: dict[str, str | int]) -> None:
+    from src.analytics.currency_risk import (
+        SUPPORTED_CURRENCIES,
+        aggregate_currency_exposure,
+        build_fx_rate_history,
+        build_fx_stress_table,
+        calculate_fx_risk,
+        optimize_currency_hedges,
+        required_fx_symbols,
+    )
+
+    del profile  # The result is session-scoped; shared persistence can be added later.
+    st.markdown("### Currency Risk & Hedging")
+    st.caption(
+        "Translate every local-currency position into one reporting currency, measure standalone FX risk, "
+        "and size transparent forward hedges after estimated carry and execution cost."
+    )
+
+    with st.form("currency_risk_configuration_form"):
+        settings_col, exposure_col = st.columns([0.32, 0.68], gap="large")
+        with settings_col:
+            base_currency = st.selectbox(
+                "Reporting currency",
+                options=list(SUPPORTED_CURRENCIES),
+                index=list(SUPPORTED_CURRENCIES).index("USD"),
+                help="All exposures, risk estimates, and hedge notionals are reported in this currency.",
+            )
+            fx_start = st.date_input(
+                "History start",
+                value=date.today() - timedelta(days=365 * 3),
+                key="currency_risk_start",
+            )
+            fx_end = st.date_input(
+                "History end",
+                value=date.today(),
+                key="currency_risk_end",
+            )
+            confidence_pct = st.select_slider(
+                "One-day risk confidence",
+                options=[90, 95, 97.5, 99],
+                value=95,
+                format_func=lambda value: f"{value}%",
+            )
+            annual_cost_bps = st.number_input(
+                "Estimated annual hedge cost (bp)",
+                min_value=0.0,
+                max_value=2_000.0,
+                value=15.0,
+                step=1.0,
+                help="Indicative carry, spread, and rollover cost applied to hedged notional.",
+            )
+            risk_aversion = st.number_input(
+                "FX risk aversion",
+                min_value=0.0,
+                max_value=100.0,
+                value=1.0,
+                step=0.25,
+                help="Higher values favor more risk reduction relative to hedge cost.",
+            )
+            max_hedge_pct = st.slider(
+                "Maximum hedge ratio",
+                min_value=0,
+                max_value=100,
+                value=100,
+                step=5,
+            )
+        with exposure_col:
+            st.markdown("##### Asset and liability exposures")
+            st.caption(
+                "Enter current market values in each instrument's local currency. "
+                "Use negative values for liabilities or short positions."
+            )
+            edited_positions = st.data_editor(
+                pd.DataFrame(
+                    [
+                        {"Asset": "US sleeve", "Currency": "USD", "MarketValueLocal": 300_000.0},
+                        {"Asset": "European equities", "Currency": "EUR", "MarketValueLocal": 150_000.0},
+                        {"Asset": "UK equities", "Currency": "GBP", "MarketValueLocal": 75_000.0},
+                        {"Asset": "Japan equities", "Currency": "JPY", "MarketValueLocal": 12_000_000.0},
+                    ]
+                ),
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key="currency_risk_position_editor",
+                column_config={
+                    "Asset": st.column_config.TextColumn("Asset / sleeve", required=True),
+                    "Currency": st.column_config.SelectboxColumn(
+                        "Currency", options=list(SUPPORTED_CURRENCIES), required=True
+                    ),
+                    "MarketValueLocal": st.column_config.NumberColumn(
+                        "Market value (local)", required=True, format="%.2f"
+                    ),
+                },
+            )
+        run_currency = st.form_submit_button(
+            "Run FX Risk & Hedge Optimization", type="primary", use_container_width=True
+        )
+
+    if run_currency:
+        try:
+            if fx_start >= fx_end:
+                raise ValueError("History start must be before history end.")
+            positions = edited_positions.copy()
+            positions = positions[
+                positions["Currency"].notna() & positions["MarketValueLocal"].notna()
+            ].copy()
+            if positions.empty:
+                raise ValueError("Enter at least one currency exposure.")
+            positions["Asset"] = positions["Asset"].fillna("Unlabelled exposure").astype(str)
+            currencies = positions["Currency"].astype(str).str.upper().tolist()
+            symbols = required_fx_symbols(currencies, base_currency)
+            if symbols:
+                with st.spinner("Fetching FX history and solving hedge ratios..."):
+                    market_prices = _fetch_close_prices_cached(symbols, fx_start, fx_end)
+                rate_history = build_fx_rate_history(
+                    market_prices,
+                    currencies,
+                    base_currency=base_currency,
+                )
+            else:
+                rate_history = pd.DataFrame(
+                    {base_currency: [1.0, 1.0]},
+                    index=pd.bdate_range(end=pd.Timestamp(fx_end), periods=2),
+                )
+            if any(currency != base_currency for currency in currencies) and len(rate_history) < 30:
+                raise ValueError("At least 30 aligned FX observations are required for a useful risk estimate.")
+            exposure = aggregate_currency_exposure(
+                positions,
+                rate_history.iloc[-1],
+                base_currency=base_currency,
+            )
+            risk = calculate_fx_risk(
+                exposure,
+                rate_history,
+                confidence=float(confidence_pct) / 100.0,
+            )
+            optimizer = optimize_currency_hedges(
+                exposure,
+                rate_history,
+                annual_cost_bps=float(annual_cost_bps),
+                risk_aversion=float(risk_aversion),
+                max_hedge_ratio=float(max_hedge_pct) / 100.0,
+            )
+            st.session_state[CURRENCY_RISK_KEY] = {
+                "generated_at": _now_iso(),
+                "base_currency": base_currency,
+                "start_date": fx_start.isoformat(),
+                "end_date": fx_end.isoformat(),
+                "confidence": float(confidence_pct) / 100.0,
+                "annual_cost_bps": float(annual_cost_bps),
+                "positions": positions,
+                "rate_history": rate_history,
+                "exposure": exposure,
+                "risk": risk,
+                "optimizer": optimizer,
+            }
+            st.session_state.pop("wharton_fx_stress_v1", None)
+            st.session_state.pop("wharton_fx_stress_editor", None)
+        except (TypeError, ValueError) as exc:
+            st.error(str(exc))
+        else:
+            st.success("Currency risk analysis and hedge optimization complete.")
+
+    result = st.session_state.get(CURRENCY_RISK_KEY)
+    if not isinstance(result, dict):
+        st.info("Enter the portfolio's local-currency market values to create the first FX risk report.")
+        return
+
+    base = str(result.get("base_currency") or "USD")
+    exposure = result.get("exposure")
+    rate_history = result.get("rate_history")
+    risk = result.get("risk")
+    optimizer = result.get("optimizer")
+    if not isinstance(exposure, pd.DataFrame) or not isinstance(risk, dict) or not isinstance(optimizer, dict):
+        st.warning("The saved currency result is incomplete. Run the analysis again.")
+        return
+
+    exposure_tab, optimizer_tab, stress_tab, methodology_tab = st.tabs(
+        ["Exposure & Risk", "Hedge Optimizer", "FX Stress", "Data & Methodology"]
+    )
+
+    with exposure_tab:
+        foreign_mask = exposure["Currency"].astype(str) != base
+        gross_foreign = float(exposure.loc[foreign_mask, "GrossExposureBase"].sum())
+        total_gross = float(exposure["GrossExposureBase"].sum())
+        foreign_share = gross_foreign / total_gross if total_gross > 0 else 0.0
+        kpis = st.columns(5)
+        kpis[0].metric("Gross FX exposure", f"{gross_foreign:,.0f} {base}")
+        kpis[1].metric("Foreign share", f"{foreign_share:.1%}")
+        kpis[2].metric("Annual FX volatility", f"{float(risk['AnnualizedVolatilityBase']):,.0f} {base}")
+        kpis[3].metric(
+            f"1-day VaR ({float(result.get('confidence', 0.95)):.1%})",
+            f"{float(risk['HistoricalVaRBase']):,.0f} {base}",
+        )
+        kpis[4].metric("Expected shortfall", f"{float(risk['ExpectedShortfallBase']):,.0f} {base}")
+
+        st.markdown("#### Currency exposure map")
+        st.dataframe(
+            exposure,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "LocalMarketValue": st.column_config.NumberColumn("Net value (local)", format="%.2f"),
+                "RateToBase": st.column_config.NumberColumn(f"{base} per currency unit", format="%.6f"),
+                "NetExposureBase": st.column_config.NumberColumn(f"Net exposure ({base})", format="%.2f"),
+                "GrossExposureBase": st.column_config.NumberColumn(f"Gross exposure ({base})", format="%.2f"),
+                "GrossShare": st.column_config.NumberColumn("Gross share", format="percent"),
+            },
+        )
+        contributions = risk.get("Contributions")
+        if isinstance(contributions, pd.DataFrame) and not contributions.empty:
+            chart_col, table_col = st.columns([0.48, 0.52], gap="large")
+            with chart_col:
+                st.markdown("#### FX risk contribution")
+                chart_data = contributions.set_index("Currency")[["AnnualizedRiskContributionBase"]]
+                st.bar_chart(chart_data, use_container_width=True)
+            with table_col:
+                st.markdown("#### Contribution detail")
+                st.dataframe(
+                    contributions,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "NetExposureBase": st.column_config.NumberColumn(f"Exposure ({base})", format="%.2f"),
+                        "AnnualizedRiskContributionBase": st.column_config.NumberColumn(
+                            f"Risk contribution ({base})", format="%.2f"
+                        ),
+                        "RiskContributionPct": st.column_config.NumberColumn("Share of risk", format="percent"),
+                    },
+                )
+        st.download_button(
+            "Download Currency Exposure (CSV)",
+            data=exposure.to_csv(index=False).encode("utf-8"),
+            file_name=f"currency_exposure_{base}_{result.get('end_date', 'latest')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with optimizer_tab:
+        plan = optimizer.get("Plan")
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("FX volatility before", f"{float(optimizer['BeforeAnnualVolatilityBase']):,.0f} {base}")
+        o2.metric("FX volatility after", f"{float(optimizer['AfterAnnualVolatilityBase']):,.0f} {base}")
+        o3.metric("Estimated risk reduction", f"{float(optimizer['RiskReductionPct']):.1%}")
+        o4.metric("Estimated annual cost", f"{float(optimizer['EstimatedAnnualCostBase']):,.0f} {base}")
+        if not isinstance(plan, pd.DataFrame) or plan.empty:
+            st.success("The portfolio has no non-base-currency exposure to hedge.")
+        else:
+            st.markdown("#### Indicative hedge plan")
+            st.dataframe(
+                plan,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "NetExposureBase": st.column_config.NumberColumn(f"Exposure ({base})", format="%.2f"),
+                    "HedgeRatio": st.column_config.NumberColumn("Hedge ratio", format="percent"),
+                    "HedgeNotionalBase": st.column_config.NumberColumn(f"Hedge notional ({base})", format="%.2f"),
+                    "HedgeNotionalLocal": st.column_config.NumberColumn("Hedge notional (local)", format="%.2f"),
+                    "ResidualExposureBase": st.column_config.NumberColumn(f"Residual ({base})", format="%.2f"),
+                    "AnnualCostBps": st.column_config.NumberColumn("Annual cost", format="%.1f bp"),
+                    "EstimatedAnnualCostBase": st.column_config.NumberColumn(f"Est. cost ({base})", format="%.2f"),
+                },
+            )
+            st.download_button(
+                "Download Hedge Plan (CSV)",
+                data=plan.to_csv(index=False).encode("utf-8"),
+                file_name=f"fx_hedge_plan_{base}_{result.get('end_date', 'latest')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.warning(
+                "Directions and notionals are indicative. Before execution, verify forward points, tenor, "
+                "counterparty limits, collateral, lot sizes, and whether the mandate permits derivatives."
+            )
+
+    with stress_tab:
+        st.markdown("#### Deterministic currency shock")
+        st.caption(
+            f"A positive shock means the currency strengthens against {base}; a negative shock means it weakens."
+        )
+        stress_inputs = exposure[["Currency"]].copy()
+        stress_inputs["Shock %"] = np.where(stress_inputs["Currency"] == base, 0.0, -10.0)
+        edited_shocks = st.data_editor(
+            stress_inputs,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Currency"],
+            key="wharton_fx_stress_editor",
+            column_config={
+                "Currency": st.column_config.TextColumn("Currency"),
+                "Shock %": st.column_config.NumberColumn("Shock vs reporting currency (%)", format="%.2f"),
+            },
+        )
+        if st.button("Run FX Stress", type="primary", use_container_width=True):
+            try:
+                shock_map = {
+                    str(row["Currency"]): float(row["Shock %"]) / 100.0
+                    for _, row in edited_shocks.iterrows()
+                }
+                st.session_state["wharton_fx_stress_v1"] = build_fx_stress_table(
+                    exposure,
+                    shock_map,
+                    hedge_plan=optimizer.get("Plan"),
+                )
+            except (TypeError, ValueError) as exc:
+                st.error(str(exc))
+        stress = st.session_state.get("wharton_fx_stress_v1")
+        if isinstance(stress, pd.DataFrame) and not stress.empty:
+            s1, s2, s3 = st.columns(3)
+            unhedged_pnl = float(stress["UnhedgedPnLBase"].sum())
+            hedged_pnl = float(stress["HedgedPnLBase"].sum())
+            s1.metric("Unhedged FX P/L", f"{unhedged_pnl:+,.0f} {base}")
+            s2.metric("Hedged FX P/L", f"{hedged_pnl:+,.0f} {base}")
+            s3.metric("P/L difference", f"{hedged_pnl - unhedged_pnl:+,.0f} {base}")
+            st.dataframe(
+                stress,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Shock": st.column_config.NumberColumn("FX shock", format="percent"),
+                    "NetExposureBase": st.column_config.NumberColumn(f"Exposure ({base})", format="%.2f"),
+                    "UnhedgedPnLBase": st.column_config.NumberColumn(f"Unhedged P/L ({base})", format="%.2f"),
+                    "ResidualExposureBase": st.column_config.NumberColumn(f"Residual ({base})", format="%.2f"),
+                    "HedgedPnLBase": st.column_config.NumberColumn(f"Hedged P/L ({base})", format="%.2f"),
+                    "HedgeBenefitBase": st.column_config.NumberColumn(f"Hedge effect ({base})", format="%.2f"),
+                },
+            )
+
+    with methodology_tab:
+        st.markdown("#### Historical exchange-rate monitor")
+        if isinstance(rate_history, pd.DataFrame) and not rate_history.empty:
+            indexed_rates = rate_history.div(rate_history.iloc[0]).mul(100.0)
+            non_base_columns = [column for column in indexed_rates.columns if column != base]
+            if non_base_columns:
+                st.line_chart(indexed_rates[non_base_columns], use_container_width=True)
+                correlations = rate_history[non_base_columns].pct_change(fill_method=None).corr()
+                st.markdown("#### Daily FX return correlation")
+                st.dataframe(
+                    correlations.style.format("{:.2f}").background_gradient(
+                        cmap="RdYlGn", vmin=-1.0, vmax=1.0, axis=None
+                    ),
+                    use_container_width=True,
+                )
+        st.markdown("#### Model boundaries")
+        st.info(
+            "Rates are converted to a consistent base-per-foreign convention. Historical VaR and expected "
+            "shortfall use daily close-to-close returns; the optimizer uses the historical covariance matrix."
+        )
+        st.markdown(
+            "- FX risk is isolated from the underlying asset's local-market return; joint asset/FX moves are not modeled.\n"
+            "- Hedge cost is an annual estimate, not a live executable forward quote.\n"
+            "- The optimizer cannot hedge beyond the exposure or create a speculative reverse position.\n"
+            "- VaR is a loss threshold, not a maximum possible loss; stressed gaps and liquidity can be worse.\n"
+            "- Re-run after trades, cash flows, valuation changes, or material exchange-rate moves."
+        )
+        st.caption(
+            f"Generated {result.get('generated_at', 'n/a')} · FX history: Yahoo Finance · "
+            f"{int(risk.get('Observations', 0))} aligned daily returns"
+        )
+
+
+def _render_commodity_analysis(profile: dict[str, str | int]) -> None:
+    from src.analytics.commodity_analysis import (
+        COMMODITY_CATALOG,
+        build_cumulative_index,
+        build_price_shock_table,
+        build_return_correlation,
+        calculate_commodity_metrics,
+        commodity_catalog_frame,
+    )
+
+    del profile  # Reserved for future per-user research persistence.
+    st.markdown("### Commodity Analysis")
+    st.caption(
+        "Compare exchange-traded commodity vehicles and continuous-futures proxies, "
+        "then translate an explicit price shock into position P/L."
+    )
+    monitor_tab, stress_tab, universe_tab = st.tabs(
+        ["Market Monitor", "Position Stress", "Universe & Methodology"]
+    )
+
+    catalog_by_ticker = {item["ticker"]: item for item in COMMODITY_CATALOG}
+    catalog_tickers = list(catalog_by_ticker)
+
+    with monitor_tab:
+        with st.form("commodity_market_monitor_form"):
+            left, right = st.columns([1.35, 1.0], gap="large")
+            with left:
+                selected = st.multiselect(
+                    "Starter universe",
+                    options=catalog_tickers,
+                    default=["DBC", "GLD", "USO", "DBA", "CPER"],
+                    format_func=lambda ticker: (
+                        f"{ticker} - {catalog_by_ticker[ticker]['name']}"
+                    ),
+                    help="ETF rows are investable vehicles; =F rows are continuous-futures research proxies.",
+                )
+                custom_tickers = st.text_area(
+                    "Additional Yahoo tickers",
+                    value="",
+                    height=80,
+                    placeholder="One ticker per line",
+                )
+            with right:
+                commodity_start = st.date_input(
+                    "Start date",
+                    value=date.today() - timedelta(days=365 * 3),
+                    key="commodity_analysis_start",
+                )
+                commodity_end = st.date_input(
+                    "End date",
+                    value=date.today(),
+                    key="commodity_analysis_end",
+                )
+                commodity_risk_free = st.number_input(
+                    "Annual risk-free rate (%)",
+                    min_value=-10.0,
+                    max_value=30.0,
+                    value=0.0,
+                    step=0.25,
+                )
+            run_monitor = st.form_submit_button(
+                "Run Commodity Analysis", type="primary", use_container_width=True
+            )
+
+        if run_monitor:
+            try:
+                if commodity_start >= commodity_end:
+                    raise ValueError("Start date must be before end date.")
+                requested = list(
+                    dict.fromkeys(
+                        [*selected, *_parse_tickers(custom_tickers, allow_empty=True)]
+                    )
+                )
+                if not requested:
+                    raise ValueError("Select or enter at least one commodity ticker.")
+                with st.spinner("Fetching commodity histories..."):
+                    fetched = _fetch_close_prices_cached(
+                        tuple(requested), commodity_start, commodity_end
+                    )
+                available = [
+                    ticker
+                    for ticker in requested
+                    if ticker in fetched.columns and fetched[ticker].notna().sum() >= 2
+                ]
+                if not available:
+                    raise ValueError("No usable commodity price history was returned.")
+                prices = fetched[available].sort_index().ffill().dropna(how="all")
+                metrics = calculate_commodity_metrics(
+                    prices,
+                    annual_risk_free_rate=float(commodity_risk_free) / 100.0,
+                )
+                st.session_state[COMMODITY_ANALYSIS_KEY] = {
+                    "generated_at": _now_iso(),
+                    "start_date": commodity_start.isoformat(),
+                    "end_date": commodity_end.isoformat(),
+                    "requested": requested,
+                    "missing": [ticker for ticker in requested if ticker not in available],
+                    "prices": prices,
+                    "metrics": metrics,
+                    "cumulative": build_cumulative_index(prices),
+                    "correlation": build_return_correlation(prices),
+                }
+            except (TypeError, ValueError) as exc:
+                st.error(str(exc))
+            else:
+                st.success("Commodity analysis complete.")
+
+        commodity_result = st.session_state.get(COMMODITY_ANALYSIS_KEY)
+        if not isinstance(commodity_result, dict):
+            st.info("Choose commodity proxies above to build a comparable risk and return monitor.")
+        else:
+            metrics = commodity_result.get("metrics")
+            prices = commodity_result.get("prices")
+            cumulative = commodity_result.get("cumulative")
+            correlation = commodity_result.get("correlation")
+            missing = commodity_result.get("missing", [])
+            if missing:
+                st.warning(f"No usable history for: {', '.join(str(item) for item in missing)}")
+            if isinstance(metrics, pd.DataFrame) and not metrics.empty:
+                return_12m = pd.to_numeric(metrics["Return12M"], errors="coerce")
+                volatility = pd.to_numeric(metrics["AnnualizedVolatility"], errors="coerce")
+                best_index = return_12m.idxmax() if return_12m.notna().any() else None
+                low_vol_index = volatility.idxmin() if volatility.notna().any() else None
+                average_corr = np.nan
+                if isinstance(correlation, pd.DataFrame) and correlation.shape[0] > 1:
+                    corr_values = correlation.to_numpy(dtype=float)
+                    upper = corr_values[np.triu_indices_from(corr_values, k=1)]
+                    finite_upper = upper[np.isfinite(upper)]
+                    if finite_upper.size:
+                        average_corr = float(finite_upper.mean())
+                kpis = st.columns(4)
+                kpis[0].metric("Instruments", str(len(metrics)))
+                kpis[1].metric(
+                    "Best 12M return",
+                    str(metrics.loc[best_index, "Ticker"]) if best_index is not None else "n/a",
+                    _fmt_pct(return_12m.loc[best_index]) if best_index is not None else None,
+                )
+                kpis[2].metric(
+                    "Lowest volatility",
+                    str(metrics.loc[low_vol_index, "Ticker"]) if low_vol_index is not None else "n/a",
+                    _fmt_pct(volatility.loc[low_vol_index]) if low_vol_index is not None else None,
+                )
+                kpis[3].metric("Average pair correlation", _fmt_float(average_corr, 2))
+
+                st.markdown("#### Risk and return snapshot")
+                st.dataframe(
+                    metrics,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "LastPrice": st.column_config.NumberColumn("Last price", format="%.3f"),
+                        "Return1M": st.column_config.NumberColumn("1M return", format="percent"),
+                        "Return3M": st.column_config.NumberColumn("3M return", format="percent"),
+                        "Return12M": st.column_config.NumberColumn("12M return", format="percent"),
+                        "AnnualizedReturn": st.column_config.NumberColumn("Ann. return", format="percent"),
+                        "AnnualizedVolatility": st.column_config.NumberColumn("Ann. volatility", format="percent"),
+                        "Sharpe": st.column_config.NumberColumn("Sharpe", format="%.2f"),
+                        "MaxDrawdown": st.column_config.NumberColumn("Max drawdown", format="percent"),
+                    },
+                )
+                st.download_button(
+                    "Download Snapshot (CSV)",
+                    data=metrics.to_csv(index=False).encode("utf-8"),
+                    file_name=f"commodity_snapshot_{commodity_result.get('end_date', 'latest')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+            if isinstance(cumulative, pd.DataFrame) and not cumulative.empty:
+                st.markdown("#### Rebased performance (start = 100)")
+                st.line_chart(cumulative, use_container_width=True)
+            if isinstance(correlation, pd.DataFrame) and not correlation.empty:
+                st.markdown("#### Daily-return correlation")
+                st.dataframe(
+                    correlation.style.format("{:.2f}").background_gradient(
+                        cmap="RdYlGn", vmin=-1.0, vmax=1.0, axis=None
+                    ),
+                    use_container_width=True,
+                )
+            st.caption(
+                "The same ETF and futures-proxy tickers can be entered under Market Tickers in Quant Engine."
+            )
+
+    with stress_tab:
+        commodity_result = st.session_state.get(COMMODITY_ANALYSIS_KEY)
+        prices = commodity_result.get("prices") if isinstance(commodity_result, dict) else None
+        available_tickers = list(prices.columns) if isinstance(prices, pd.DataFrame) else []
+        if not available_tickers:
+            st.info("Run Market Monitor first; its latest prices will prefill the position stress test.")
+        else:
+            with st.form("commodity_position_stress_form"):
+                s1, s2, s3, s4 = st.columns(4)
+                with s1:
+                    stress_ticker = st.selectbox("Instrument", available_tickers)
+                    observed_price = float(prices[stress_ticker].dropna().iloc[-1])
+                with s2:
+                    stress_price = st.number_input(
+                        "Current price", min_value=0.000001, value=observed_price, format="%.4f"
+                    )
+                with s3:
+                    stress_units = st.number_input(
+                        "Units / contracts", min_value=0.000001, value=1.0, format="%.4f"
+                    )
+                with s4:
+                    stress_multiplier = st.number_input(
+                        "Contract multiplier",
+                        min_value=0.000001,
+                        value=1.0,
+                        format="%.4f",
+                        help="Use 1 for ETF shares. Verify the exchange specification for futures.",
+                    )
+                p1, p2 = st.columns(2)
+                with p1:
+                    stress_fx = st.number_input(
+                        "FX rate to USD", min_value=0.000001, value=1.0, format="%.6f"
+                    )
+                with p2:
+                    stress_shocks = st.text_input(
+                        "Price shocks (%)", value="-20, -10, -5, 5, 10, 20"
+                    )
+                run_stress = st.form_submit_button(
+                    "Run Position Stress", type="primary", use_container_width=True
+                )
+            if run_stress:
+                try:
+                    shock_values = [
+                        float(value.strip().replace("%", "")) / 100.0
+                        for value in stress_shocks.replace(";", ",").split(",")
+                        if value.strip()
+                    ]
+                    stress_table = build_price_shock_table(
+                        stress_price,
+                        stress_units,
+                        contract_multiplier=stress_multiplier,
+                        fx_to_usd=stress_fx,
+                        shocks=shock_values,
+                    )
+                    st.session_state["wharton_commodity_stress_v1"] = {
+                        "ticker": stress_ticker,
+                        "notional": float(stress_price * stress_units * stress_multiplier * stress_fx),
+                        "table": stress_table,
+                    }
+                except ValueError as exc:
+                    st.error(str(exc))
+            stress_result = st.session_state.get("wharton_commodity_stress_v1")
+            if isinstance(stress_result, dict):
+                st.metric(
+                    f"{stress_result.get('ticker', 'Position')} notional",
+                    f"${float(stress_result.get('notional') or 0):,.2f}",
+                )
+                stress_table = stress_result.get("table")
+                if isinstance(stress_table, pd.DataFrame):
+                    st.dataframe(
+                        stress_table,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Shock": st.column_config.NumberColumn("Price shock", format="percent"),
+                            "StressedPrice": st.column_config.NumberColumn("Stressed price", format="%.4f"),
+                            "PositionValueUSD": st.column_config.NumberColumn("Position value (USD)", format="$%.2f"),
+                            "PnLUSD": st.column_config.NumberColumn("P/L (USD)", format="$%.2f"),
+                        },
+                    )
+                st.caption("Direct mark-to-market sensitivity only; margin, carry, fees, and liquidity are excluded.")
+
+    with universe_tab:
+        st.markdown("#### Starter universe")
+        st.dataframe(commodity_catalog_frame(), use_container_width=True, hide_index=True)
+        st.markdown("#### Interpretation limits")
+        st.info(
+            "Continuous-futures tickers are research proxies, not executable contracts. "
+            "Their history can embed contract rolls and may not match a specific expiry."
+        )
+        st.markdown(
+            "- Commodity ETFs can differ from spot returns because of roll yield, fees, collateral, and tracking.\n"
+            "- Futures sizing requires a verified contract multiplier, currency, expiry, and margin policy.\n"
+            "- Historical correlation can change sharply across inflation, growth, supply, and liquidity regimes.\n"
+            "- The stress table is a transparent price sensitivity, not a forecast or a VaR model."
+        )
+
+
+def _render_bond_analysis(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.bond_analytics import (
+        assess_bond_data_quality,
+        build_bond_sensitivity,
+        build_fixed_income_analytics,
+        build_rate_spread_scenario_grid,
+        calculate_bond_metrics,
+        is_individual_bond,
+        value_position,
+    )
+    from src.portfolio_tracker.bond_competition import (
+        ELIGIBILITY_INELIGIBLE,
+        ELIGIBILITY_PENDING,
+        ELIGIBILITY_VERIFIED,
+        assess_bond_competition_case,
+        build_bond_pitch_questions,
+        build_bond_relative_value_table,
+        generate_bond_competition_memo,
+    )
+    from src.portfolio_tracker.wharton_competition import calculate_portfolio_performance
+
+    st.markdown("### Bond Analysis")
+    st.caption(
+        "Analyze an individual bond from contractual cash flows or a bond ETF from provider/manual yield and duration data."
+    )
+    single_tab, portfolio_tab = st.tabs(["Single Bond / ETF", "Saved Fixed-Income Portfolio"])
+
+    with single_tab:
+        with st.form("standalone_bond_analysis_form"):
+            a1, a2, a3, a4 = st.columns(4)
+            with a1:
+                identifier = st.text_input("Identifier", placeholder="Ticker, ISIN, or internal code").strip().upper()
+                instrument_label = st.selectbox("Instrument", ["Individual bond", "Bond ETF"])
+                issuer = st.text_input("Issuer / fund provider")
+                bond_category = st.selectbox("Category", ["Corporate", "Government", "Municipal", "Sovereign", "Other"])
+            with a2:
+                quantity = st.number_input("Quantity", min_value=0.000001, value=1.0, step=1.0)
+                face_value = st.number_input("Face value per bond", min_value=0.01, value=1000.0, step=100.0)
+                entry_price = st.number_input("Entry clean price / unit price", min_value=0.000001, value=100.0, step=0.01)
+                current_price = st.number_input("Current clean price / unit price", min_value=0.000001, value=100.0, step=0.01)
+            with a3:
+                coupon_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.01)
+                coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1, key="analysis_coupon_frequency")
+                accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                entry_accrued = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+            with a4:
+                as_of = st.date_input("Analysis date", value=date.today())
+                maturity = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
+                next_coupon = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
+                coupon_income = st.number_input("Coupons received (USD)", min_value=0.0, value=0.0, step=1.0)
+
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                currency = st.text_input("Currency", value="USD", key="analysis_bond_currency").strip().upper()
+                entry_fx = st.number_input("Entry FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f", key="analysis_entry_fx")
+            with b2:
+                current_fx = st.number_input("Current FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f", key="analysis_current_fx")
+                credit_rating = st.text_input("Credit rating", placeholder="e.g. A-")
+            with b3:
+                ytm_override_pct = st.number_input("YTM override (%)", value=0.0, step=0.01, help="Zero calculates YTM for an individual bond.")
+                duration_override = st.number_input("Modified duration override", min_value=0.0, value=0.0, step=0.1)
+            with b4:
+                convexity_override = st.number_input("Convexity override", min_value=0.0, value=0.0, step=0.1)
+                source = st.text_input("Data source / reference")
+                source_url = st.text_input("Source URL / document reference")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                callable_bond = st.checkbox("Callable bond")
+                call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2))
+                call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01)
+            with c2:
+                benchmark_name = st.text_input("Yield benchmark", placeholder="e.g. 5Y U.S. Treasury")
+                benchmark_yield_pct = st.number_input("Benchmark yield (%)", value=0.0, step=0.01)
+                income_yield_pct = st.number_input("ETF income yield (%)", min_value=0.0, value=0.0, step=0.01)
+            with c3:
+                default_probability_pct = st.number_input("Annual default probability (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.05)
+                recovery_rate_pct = st.number_input("Recovery rate (%)", min_value=0.0, max_value=100.0, value=40.0, step=1.0)
+            with c4:
+                scenario_horizon = st.number_input("Scenario horizon (years)", min_value=0.1, max_value=10.0, value=1.0, step=0.5)
+            st.markdown("##### Competition case")
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                client_goal = st.text_input("Client goal served", placeholder="e.g. income with capital preservation")
+                portfolio_role = st.selectbox(
+                    "Portfolio role",
+                    ["Income", "Capital preservation", "Diversifier", "Liquidity reserve", "Liability matching", "Tactical rate view", "Other"],
+                )
+            with d2:
+                proposed_weight_pct = st.number_input("Proposed portfolio weight (%)", min_value=0.0, max_value=100.0, value=2.0, step=0.5)
+                max_position_weight_pct = st.number_input("Team position limit (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.5)
+            with d3:
+                eligibility_status = st.selectbox(
+                    "Current WInS eligibility",
+                    [ELIGIBILITY_PENDING, ELIGIBILITY_VERIFIED, ELIGIBILITY_INELIGIBLE],
+                    help="Do not mark eligible until the current official trading rules or WInS security list confirms it.",
+                )
+                eligibility_checked_at = st.date_input("Eligibility checked on", value=date.today())
+            with d4:
+                eligibility_source = st.text_input("Eligibility source", placeholder="Official rules or WInS list reference")
+            thesis = st.text_area("Bond thesis", height=75, placeholder="Why this security should deliver the intended client outcome")
+            e1, e2 = st.columns(2)
+            with e1:
+                why_now = st.text_area("Why now / catalyst", height=70)
+                risks = st.text_area("Key risks", height=70)
+            with e2:
+                invalidation = st.text_area("Observable invalidation condition", height=70)
+                sell_discipline = st.text_area("Sell / review discipline", height=70)
+            counter_thesis = st.text_input("Strongest counter-thesis")
+            run_analysis = st.form_submit_button("Run Bond Analysis", type="primary", use_container_width=True)
+
+        if run_analysis:
+            individual = instrument_label == "Individual bond"
+            if not identifier:
+                st.error("Enter an identifier.")
+            elif individual and maturity <= as_of:
+                st.error("Maturity must be after the analysis date.")
+            elif individual and callable_bond and not (as_of < call_date < maturity):
+                st.error("The first call date must be after the analysis date and before maturity.")
+            elif not individual and duration_override <= 0:
+                st.error("A bond ETF needs a modified-duration input for rate sensitivity.")
+            else:
+                position = {
+                    "id": "standalone",
+                    "ticker": identifier,
+                    "security_type": "Bond",
+                    "bond_instrument_type": "individual" if individual else "etf",
+                    "bond_category": bond_category,
+                    "isin": identifier if individual and len(identifier) == 12 else "",
+                    "issuer": issuer.strip(),
+                    "currency": currency or "USD",
+                    "quantity": float(quantity),
+                    "face_value": float(face_value) if individual else None,
+                    "entry_price": float(entry_price),
+                    "last_price": float(current_price),
+                    "coupon_rate": float(coupon_pct) / 100.0 if individual else None,
+                    "coupon_frequency": int(coupon_frequency) if individual else None,
+                    "entry_accrued_interest": float(entry_accrued) if individual else 0.0,
+                    "accrued_interest": float(accrued_interest) if individual else 0.0,
+                    "maturity_date": maturity.isoformat() if individual else None,
+                    "next_coupon_date": next_coupon.isoformat() if individual else None,
+                    "entry_fx_rate_to_usd": float(entry_fx) if individual else 1.0,
+                    "fx_rate_to_usd": float(current_fx) if individual else 1.0,
+                    "coupon_income": float(coupon_income),
+                    "yield_to_maturity": float(ytm_override_pct) / 100.0 if ytm_override_pct else None,
+                    "modified_duration": float(duration_override) if duration_override else None,
+                    "convexity": float(convexity_override) if convexity_override else None,
+                    "credit_rating": credit_rating.strip(),
+                    "valuation_source": source.strip(),
+                    "source_url": source_url.strip(),
+                    "price_observed_at": as_of.isoformat(),
+                    "callable": int(callable_bond and individual),
+                    "call_date": call_date.isoformat() if callable_bond and individual else None,
+                    "call_price": float(call_price) if callable_bond and individual else None,
+                    "benchmark_name": benchmark_name.strip(),
+                    "benchmark_yield": float(benchmark_yield_pct) / 100.0 if benchmark_yield_pct else None,
+                    "income_yield": float(income_yield_pct) / 100.0 if income_yield_pct else None,
+                    "default_probability": float(default_probability_pct) / 100.0 if default_probability_pct else 0.0,
+                    "recovery_rate": float(recovery_rate_pct) / 100.0,
+                    "competition_eligibility_status": eligibility_status,
+                    "eligibility_source": eligibility_source.strip(),
+                    "eligibility_checked_at": eligibility_checked_at.isoformat() if eligibility_status != ELIGIBILITY_PENDING else None,
+                    "analysis_horizon": float(scenario_horizon),
+                    "status": "open",
+                }
+                competition_case = {
+                    "client_goal": client_goal.strip(),
+                    "portfolio_role": portfolio_role,
+                    "proposed_weight": float(proposed_weight_pct) / 100.0,
+                    "max_position_weight": float(max_position_weight_pct) / 100.0,
+                    "eligibility_status": eligibility_status,
+                    "eligibility_source": eligibility_source.strip(),
+                    "eligibility_checked_at": eligibility_checked_at.isoformat() if eligibility_status != ELIGIBILITY_PENDING else None,
+                    "thesis": thesis.strip(),
+                    "why_now": why_now.strip(),
+                    "risks": risks.strip(),
+                    "invalidation": invalidation.strip(),
+                    "sell_discipline": sell_discipline.strip(),
+                    "counter_thesis": counter_thesis.strip(),
+                }
+                metrics = calculate_bond_metrics(position, current_price, as_of=as_of)
+                valuation = value_position(position, current_price)
+                sensitivity = build_bond_sensitivity(position, current_price, as_of=as_of)
+                scenario_grid = build_rate_spread_scenario_grid(
+                    position, current_price, as_of=as_of, horizon_years=scenario_horizon,
+                )
+                data_quality = assess_bond_data_quality(position, as_of=as_of)
+                competition_readiness = assess_bond_competition_case(
+                    position, metrics, data_quality, competition_case, scenario_grid=scenario_grid,
+                )
+                pitch_questions = build_bond_pitch_questions(
+                    position, metrics, competition_readiness, competition_case,
+                )
+                st.session_state[BOND_ANALYSIS_KEY] = {
+                    "position": position,
+                    "metrics": metrics,
+                    "valuation": valuation,
+                    "sensitivity": sensitivity,
+                    "scenario_grid": scenario_grid,
+                    "data_quality": data_quality,
+                    "competition_case": competition_case,
+                    "competition_readiness": competition_readiness,
+                    "pitch_questions": pitch_questions,
+                    "as_of": as_of.isoformat(),
+                }
+
+        result = st.session_state.get(BOND_ANALYSIS_KEY)
+        if not isinstance(result, dict):
+            st.info("Enter bond terms above to calculate valuation, yield, cash flows, and sensitivity.")
+        else:
+            position = result["position"]
+            metrics = result["metrics"]
+            valuation = result["valuation"]
+            sensitivity = result["sensitivity"]
+            scenario_grid = result.get("scenario_grid")
+            data_quality = result.get("data_quality", {})
+            competition_case = result.get("competition_case", {})
+            competition_readiness = result.get("competition_readiness", {})
+            pitch_questions = result.get("pitch_questions", [])
+            st.markdown(f"#### {position['ticker']} · {str(position.get('bond_instrument_type')).title()}")
+            if position.get("valuation_source"):
+                st.caption(f"Input source: {position['valuation_source']} · Analysis date: {result['as_of']}")
+            kpis = st.columns(6)
+            kpis[0].metric("Dirty price", _fmt_float(metrics.get("dirty_price"), 3))
+            kpis[1].metric("Market value", f"${float(metrics.get('market_value_usd') or 0):,.2f}")
+            kpis[2].metric("YTM", _fmt_pct(metrics.get("yield_to_maturity")))
+            kpis[3].metric("Current yield", _fmt_pct(metrics.get("current_yield")))
+            kpis[4].metric("Modified duration", _fmt_float(metrics.get("modified_duration")))
+            kpis[5].metric("DV01", f"${float(metrics.get('dv01_usd') or 0):,.2f}")
+            advanced_kpis = st.columns(6)
+            advanced_kpis[0].metric("Yield to call", _fmt_pct(metrics.get("yield_to_call")))
+            advanced_kpis[1].metric("Yield to worst", _fmt_pct(metrics.get("yield_to_worst")))
+            advanced_kpis[2].metric("Benchmark spread", f"{float(metrics.get('spread_to_benchmark') or 0) * 10_000:+,.0f} bp" if metrics.get("spread_to_benchmark") is not None else "n/a")
+            advanced_kpis[3].metric("Annual income", f"${float(metrics.get('annual_income_usd') or 0):,.2f}")
+            advanced_kpis[4].metric("Expected credit loss", f"${float(metrics.get('expected_loss_usd') or 0):,.2f}" if metrics.get("expected_loss_usd") is not None else "n/a")
+            advanced_kpis[5].metric("Carry breakeven", f"{float(metrics.get('breakeven_yield_rise_bps') or 0):,.0f} bp" if metrics.get("breakeven_yield_rise_bps") is not None else "n/a")
+            st.caption(
+                f"Cost ${float(valuation.get('cost') or 0):,.2f} · Current value ${float(valuation.get('current_value') or 0):,.2f} · "
+                f"Coupon income ${float(valuation.get('coupon_income') or 0):,.2f} · Total P/L ${float(valuation.get('pnl') or 0):+,.2f}"
+            )
+
+            summary_tab, sensitivity_tab, credit_tab, cashflow_tab, competition_tab, quality_tab, method_tab = st.tabs(
+                ["Summary", "Yield Sensitivity", "Credit & Scenarios", "Cash Flows", "Competition Case", "Data Quality", "Methodology"]
+            )
+            with summary_tab:
+                st.dataframe(pd.DataFrame([{
+                    "Identifier": position["ticker"],
+                    "Issuer": position.get("issuer") or "Unassigned",
+                    "Category": position.get("bond_category"),
+                    "Currency": position.get("currency"),
+                    "Clean Price": metrics.get("clean_price"),
+                    "Accrued / 100": float(position.get("accrued_interest") or 0),
+                    "Maturity": metrics.get("maturity_date") or "ETF / no fixed maturity",
+                    "Years to Maturity": metrics.get("years_to_maturity"),
+                    "Macaulay Duration": metrics.get("macaulay_duration"),
+                    "Convexity": metrics.get("convexity"),
+                    "Credit Rating": position.get("credit_rating") or "Unrated",
+                    "Callable": "Yes" if position.get("callable") else "No",
+                    "Call Date": position.get("call_date") or "—",
+                    "Call Price": position.get("call_price"),
+                    "Benchmark": position.get("benchmark_name") or "—",
+                }]), use_container_width=True, hide_index=True)
+            with sensitivity_tab:
+                if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
+                    display_sensitivity = sensitivity.copy()
+                    for column in ("YieldToMaturity", "PriceChange"):
+                        display_sensitivity[column] = pd.to_numeric(display_sensitivity[column], errors="coerce") * 100.0
+                    st.dataframe(display_sensitivity, use_container_width=True, hide_index=True)
+                    chart = sensitivity.dropna(subset=["CleanPrice"]).set_index("ShockBps")["CleanPrice"]
+                    if not chart.empty:
+                        st.line_chart(chart.rename("Clean price"))
+                    st.download_button(
+                        "Download Sensitivity (CSV)", sensitivity.to_csv(index=False).encode("utf-8"),
+                        file_name=f"bond_sensitivity_{position['ticker']}_{result['as_of']}.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+                else:
+                    st.warning("Sensitivity is unavailable. Supply YTM and duration data.")
+            with credit_tab:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Default probability", _fmt_pct(metrics.get("default_probability")))
+                c2.metric("Recovery rate", _fmt_pct(metrics.get("recovery_rate")))
+                c3.metric("Expected loss rate", _fmt_pct(metrics.get("expected_loss_rate")))
+                c4.metric("Scenario horizon", f"{float(position.get('analysis_horizon') or 1):.1f}Y")
+                if isinstance(scenario_grid, pd.DataFrame) and not scenario_grid.empty:
+                    display_grid = scenario_grid.copy()
+                    display_grid["ExpectedReturn"] = pd.to_numeric(display_grid["ExpectedReturn"], errors="coerce") * 100.0
+                    st.dataframe(display_grid, use_container_width=True, hide_index=True)
+                    pivot = scenario_grid.pivot(
+                        index="CurveShockBps", columns="SpreadShockBps", values="ExpectedReturn"
+                    )
+                    st.markdown("##### Expected return by curve and spread shock")
+                    st.dataframe(
+                        pivot.style.format("{:+.2%}").background_gradient(cmap="RdYlGn", axis=None),
+                        use_container_width=True,
+                    )
+                    st.download_button(
+                        "Download Scenario Grid (CSV)", scenario_grid.to_csv(index=False).encode("utf-8"),
+                        file_name=f"bond_scenarios_{position['ticker']}_{result['as_of']}.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+                st.caption("Expected loss is probability of default × loss given default. Scenario carry assumes the entered annual income remains unchanged over the selected horizon.")
+            with cashflow_tab:
+                performance_row = {
+                    **position,
+                    "current_price": metrics.get("clean_price"),
+                    "current_value": metrics.get("market_value_usd"),
+                    "price_source": "analysis input",
+                }
+                fixed_income = build_fixed_income_analytics(
+                    [position], [performance_row], as_of=result["as_of"]
+                )
+                cashflows = fixed_income.get("cashflows")
+                if isinstance(cashflows, pd.DataFrame) and not cashflows.empty:
+                    st.dataframe(cashflows, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "Download Cash Flows (CSV)", cashflows.to_csv(index=False).encode("utf-8"),
+                        file_name=f"bond_cashflows_{position['ticker']}_{result['as_of']}.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+                else:
+                    st.info("Bond ETFs have no fixed contractual cash-flow schedule.")
+            with competition_tab:
+                if not competition_readiness:
+                    st.info("Run the analysis again to generate the competition case.")
+                else:
+                    score = int(competition_readiness.get("score") or 0)
+                    status = str(competition_readiness.get("status") or "Not assessed")
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Case completeness", f"{score}/100")
+                    r2.metric("Decision gate", status)
+                    r3.metric("WInS eligibility", str(competition_readiness.get("eligibility_status") or ELIGIBILITY_PENDING))
+                    st.progress(score / 100.0)
+                    for blocker in competition_readiness.get("blockers", []):
+                        st.error(blocker)
+                    checks = pd.DataFrame(competition_readiness.get("checks", []))
+                    if not checks.empty:
+                        st.dataframe(checks, use_container_width=True, hide_index=True)
+                    st.markdown("##### Pitch-defense questions")
+                    for index, question in enumerate(pitch_questions, start=1):
+                        st.write(f"{index}. {question}")
+                    memo = generate_bond_competition_memo(
+                        position,
+                        metrics,
+                        competition_readiness,
+                        competition_case,
+                        questions=pitch_questions,
+                        generated_on=date.fromisoformat(result["as_of"]),
+                    )
+                    st.download_button(
+                        "Download Working Bond Memo (Markdown)",
+                        memo.encode("utf-8"),
+                        file_name=f"bond_case_{position['ticker']}_{result['as_of']}.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "The memo is an evidence worksheet, not submission-ready prose. Verify all numbers and sources, then write the final report in the team's own voice."
+                    )
+                    st.markdown(
+                        "Current official references: [2026–2027 Rules & Roles](https://globalyouth.wharton.upenn.edu/competitions/investment-competition/rules-roles/) · "
+                        "[Competition Deliverables](https://globalyouth.wharton.upenn.edu/competition-deliverables/)"
+                    )
+            with quality_tab:
+                if not data_quality:
+                    st.info("Run the analysis again to generate the input-quality review.")
+                else:
+                    score = int(data_quality.get("score") or 0)
+                    st.metric("Input quality", f"{score}/100", str(data_quality.get("status") or "unknown").title())
+                    st.progress(score / 100.0)
+                    issues = data_quality.get("issues", [])
+                    if not issues:
+                        st.success("Inputs are complete for the selected analytical scope.")
+                    for item in issues:
+                        severity = str(item.get("severity") or "info")
+                        message = str(item.get("message") or "")
+                        if severity == "error":
+                            st.error(message)
+                        elif severity == "warning":
+                            st.warning(message)
+                        else:
+                            st.info(message)
+            with method_tab:
+                st.markdown(
+                    "Individual bonds are discounted from their contractual coupon and principal cash flows. "
+                    "Yield sensitivity uses exact repricing. Bond ETFs use the supplied duration and convexity because their holdings change. "
+                    "Yield to worst is the lower available yield to maturity or first call. Benchmark spread is yield to worst minus the entered benchmark yield."
+                )
+                st.warning("Sensitivity results are deterministic analytical estimates, not price forecasts or investment advice.")
+
+    with portfolio_tab:
+        positions = _fetch_competition_positions()
+        bond_positions = [
+            row for row in positions
+            if str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
+        ]
+        if not bond_positions:
+            st.info("No saved bond or bond-ETF positions are available. Add one in Portfolio Tracker.")
+        else:
+            market_tickers = [
+                str(row.get("ticker") or "").upper()
+                for row in bond_positions
+                if str(row.get("status") or "open").lower() == "open" and not is_individual_bond(row)
+            ]
+            live_prices = _competition_live_prices(market_tickers)
+            performance = calculate_portfolio_performance(bond_positions, live_prices)
+            _render_fixed_income_dashboard(bond_positions, performance["positions"])
+            st.markdown("#### Relative-Value Shortlist")
+            relative_value = build_bond_relative_value_table(
+                bond_positions, performance["positions"], as_of=date.today(),
+            )
+            if relative_value.empty:
+                st.info("No open fixed-income positions are available for comparison.")
+            else:
+                st.dataframe(relative_value, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Download Relative-Value Table (CSV)",
+                    relative_value.to_csv(index=False).encode("utf-8"),
+                    file_name=f"bond_relative_value_{date.today().isoformat()}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption("Carry-after-loss and carry-per-duration are transparent comparison aids, not buy/sell scores.")
+
+
 def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
+    from src.portfolio_tracker.bond_analytics import is_individual_bond
 
     st.markdown("### Portfolio Tracker — Wharton 2026–2027")
     st.caption("Returns are measured from USD 500,000. Every position records its creator, dates, entry price, and performance.")
@@ -6198,25 +8220,147 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         with st.form("competition_add_position", clear_on_submit=True):
             p1, p2, p3 = st.columns(3)
             with p1:
-                ticker = st.text_input("Ticker", placeholder="e.g. MSFT")
-                security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Other"])
+                ticker = st.text_input("Ticker / internal identifier", placeholder="e.g. MSFT or bond code")
+                security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Commodity", "Other"])
             with p2:
                 quantity = st.number_input("Quantity", min_value=0.0, value=0.0, step=1.0)
-                entry_price = st.number_input("Entry Price per Unit (USD)", min_value=0.0, value=0.0, step=0.01)
+                entry_price = st.number_input(
+                    "Entry price", min_value=0.0, value=0.0, step=0.01,
+                    help="USD per unit for stocks/ETFs; clean quote per 100 of par for an individual bond.",
+                )
             with p3:
                 entry_date = st.date_input("Opening Date", value=date.today())
-                manual_price = st.number_input("Current Price (optional)", min_value=0.0, value=0.0, step=0.01)
+                manual_price = st.number_input(
+                    "Current price (optional)", min_value=0.0, value=0.0, step=0.01,
+                    help="For an individual bond, enter the current clean quote per 100 of par.",
+                )
+            st.markdown("##### Fixed-income details")
+            st.caption("These fields are used only when Type is Bond. Select Bond ETF for an exchange-traded fund.")
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                bond_instrument_type = st.selectbox("Bond instrument", ["Individual bond", "Bond ETF"])
+                bond_category = st.selectbox("Bond category", ["Corporate", "Government", "Municipal", "Sovereign", "Other"])
+                isin = st.text_input("ISIN (individual bond)").strip().upper()
+                issuer = st.text_input("Issuer")
+            with b2:
+                currency = st.text_input("Currency", value="USD").strip().upper()
+                face_value = st.number_input("Face value per bond", min_value=0.0, value=1000.0, step=100.0)
+                coupon_rate_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.01)
+                coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1)
+            with b3:
+                maturity_date = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
+                next_coupon_date = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
+                entry_accrued_interest = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+            with b4:
+                entry_fx_rate = st.number_input("Entry FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f")
+                current_fx_rate = st.number_input("Current FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f")
+                coupon_income = st.number_input("Coupons received (USD)", min_value=0.0, value=0.0, step=1.0)
+                credit_rating = st.text_input("Credit rating", placeholder="e.g. A-")
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                ytm_pct = st.number_input("YTM override (%)", value=0.0, step=0.01, help="Leave at zero to calculate it from price and cash flows.")
+            with r2:
+                modified_duration = st.number_input("Modified duration override", min_value=0.0, value=0.0, step=0.1)
+            with r3:
+                convexity = st.number_input("Convexity override", min_value=0.0, value=0.0, step=0.1)
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                seniority = st.text_input("Seniority", placeholder="e.g. Senior unsecured")
+            with m2:
+                valuation_source = st.text_input("Valuation source", placeholder="e.g. WInS statement")
+            with m3:
+                source_url = st.text_input("Source URL / reference")
+            q1, q2, q3, q4 = st.columns(4)
+            with q1:
+                callable_bond = st.checkbox("Callable individual bond", key="portfolio_bond_callable")
+                call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2), key="portfolio_bond_call_date")
+                call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01, key="portfolio_bond_call_price")
+            with q2:
+                benchmark_name = st.text_input("Yield benchmark", placeholder="e.g. 5Y U.S. Treasury", key="portfolio_bond_benchmark")
+                benchmark_yield_pct = st.number_input("Benchmark yield (%)", value=0.0, step=0.01, key="portfolio_bond_benchmark_yield")
+            with q3:
+                income_yield_pct = st.number_input("ETF income yield (%)", min_value=0.0, value=0.0, step=0.01, key="portfolio_bond_income_yield")
+                default_probability_pct = st.number_input("Annual default probability (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.05, key="portfolio_bond_pd")
+            with q4:
+                recovery_rate_pct = st.number_input("Recovery rate (%)", min_value=0.0, max_value=100.0, value=40.0, step=1.0, key="portfolio_bond_recovery")
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                competition_eligibility_status = st.selectbox(
+                    "Current WInS eligibility",
+                    ["Pending verification", "Verified eligible", "Verified ineligible"],
+                    key="portfolio_bond_eligibility",
+                    help="Verify against the current official rules or WInS security list before trading.",
+                )
+            with e2:
+                eligibility_source = st.text_input(
+                    "Eligibility source", placeholder="Official rule or WInS list reference",
+                    key="portfolio_bond_eligibility_source",
+                )
+            with e3:
+                eligibility_checked_at = st.date_input(
+                    "Eligibility checked on", value=date.today(), key="portfolio_bond_eligibility_date",
+                )
             notes = st.text_area("Notes / Investment Thesis", height=80)
             add_position = st.form_submit_button("Add Position", type="primary", use_container_width=True)
         if add_position:
-            clean_ticker = ticker.strip().upper()
+            individual_bond = security_type == "Bond" and bond_instrument_type == "Individual bond"
+            clean_ticker = ticker.strip().upper() or (isin if individual_bond else "")
             if not clean_ticker or quantity <= 0 or entry_price <= 0:
                 st.error("Ticker, quantity, and entry price are required and must be positive.")
+            elif individual_bond and (not isin or face_value <= 0 or maturity_date <= entry_date):
+                st.error("An individual bond requires an ISIN, positive face value, and maturity after the opening date.")
+            elif individual_bond and manual_price > 0 and not valuation_source.strip():
+                st.error("Identify the valuation source when entering a current bond price.")
+            elif individual_bond and callable_bond and not (entry_date < call_date < maturity_date):
+                st.error("The first call date must be after opening and before maturity.")
+            elif security_type == "Bond" and competition_eligibility_status != "Pending verification" and not eligibility_source.strip():
+                st.error("A verified eligibility status requires an official rule or WInS list reference.")
             else:
+                values = {
+                    "ticker": clean_ticker, "security_type": security_type,
+                    "quantity": float(quantity), "entry_price": float(entry_price),
+                    "entry_date": entry_date.isoformat(), "opened_by": str(profile["username"]),
+                    "opened_at": _now_iso(), "last_price": float(manual_price) if manual_price > 0 else None,
+                    "notes": notes.strip(), "status": "open",
+                    "bond_instrument_type": "individual" if individual_bond else "etf" if security_type == "Bond" else "",
+                    "bond_category": bond_category if security_type == "Bond" else "",
+                    "isin": isin if individual_bond else "", "issuer": issuer.strip() if security_type == "Bond" else "",
+                    "currency": currency or "USD", "face_value": float(face_value) if individual_bond else None,
+                    "coupon_rate": float(coupon_rate_pct) / 100.0 if individual_bond else None,
+                    "maturity_date": maturity_date.isoformat() if individual_bond else None,
+                    "coupon_frequency": int(coupon_frequency) if individual_bond else None,
+                    "next_coupon_date": next_coupon_date.isoformat() if individual_bond else None,
+                    "entry_accrued_interest": float(entry_accrued_interest) if individual_bond else 0.0,
+                    "accrued_interest": float(accrued_interest) if individual_bond else 0.0,
+                    "entry_fx_rate_to_usd": float(entry_fx_rate) if individual_bond else 1.0,
+                    "fx_rate_to_usd": float(current_fx_rate) if individual_bond else 1.0,
+                    "coupon_income": float(coupon_income) if individual_bond else 0.0,
+                    "yield_to_maturity": float(ytm_pct) / 100.0 if ytm_pct else None,
+                    "modified_duration": float(modified_duration) if modified_duration else None,
+                    "convexity": float(convexity) if convexity else None,
+                    "credit_rating": credit_rating.strip() if security_type == "Bond" else "",
+                    "seniority": seniority.strip() if individual_bond else "",
+                    "valuation_source": valuation_source.strip() if security_type == "Bond" else "",
+                    "source_url": source_url.strip() if security_type == "Bond" else "",
+                    "price_observed_at": date.today().isoformat() if security_type == "Bond" and manual_price > 0 else None,
+                    "callable": int(individual_bond and callable_bond),
+                    "call_date": call_date.isoformat() if individual_bond and callable_bond else None,
+                    "call_price": float(call_price) if individual_bond and callable_bond else None,
+                    "benchmark_name": benchmark_name.strip() if security_type == "Bond" else "",
+                    "benchmark_yield": float(benchmark_yield_pct) / 100.0 if security_type == "Bond" and benchmark_yield_pct else None,
+                    "income_yield": float(income_yield_pct) / 100.0 if security_type == "Bond" and income_yield_pct else None,
+                    "default_probability": float(default_probability_pct) / 100.0 if security_type == "Bond" else None,
+                    "recovery_rate": float(recovery_rate_pct) / 100.0 if security_type == "Bond" else None,
+                    "competition_eligibility_status": competition_eligibility_status if security_type == "Bond" else "",
+                    "eligibility_source": eligibility_source.strip() if security_type == "Bond" else "",
+                    "eligibility_checked_at": eligibility_checked_at.isoformat() if security_type == "Bond" and competition_eligibility_status != "Pending verification" else None,
+                }
+                columns = list(values)
                 with get_connection() as conn:
                     conn.execute(
-                        "INSERT INTO competition_positions (ticker, security_type, quantity, entry_price, entry_date, opened_by, opened_at, last_price, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
-                        (clean_ticker, security_type, float(quantity), float(entry_price), entry_date.isoformat(), str(profile["username"]), _now_iso(), float(manual_price) if manual_price > 0 else None, notes.strip()),
+                        f"INSERT INTO competition_positions ({', '.join(columns)}) VALUES ({', '.join(['?'] * len(columns))})",
+                        tuple(values[column] for column in columns),
                     )
                     conn.commit()
                     if hasattr(conn, "sync"):
@@ -6226,7 +8370,12 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
 
     positions = _fetch_competition_positions()
     open_tickers = [str(row["ticker"]).upper() for row in positions if row["status"] == "open"]
-    live_prices = _competition_live_prices(open_tickers)
+    market_tickers = [
+        str(row["ticker"]).upper()
+        for row in positions
+        if row["status"] == "open" and not is_individual_bond(row)
+    ]
+    live_prices = _competition_live_prices(market_tickers)
     performance = calculate_portfolio_performance(positions, live_prices)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Portfolio Value", f"${performance['equity']:,.2f}")
@@ -6235,7 +8384,7 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     m4.metric("Realized P/L", f"${performance['realized_pnl']:+,.2f}")
     st.caption(
         f"Initial capital: ${INITIAL_CAPITAL_USD:,.0f} · Uninvested cash before P/L: "
-        f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(open_tickers))} tickers."
+        f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(market_tickers))} market tickers."
     )
     _render_wins_reconciliation(positions, live_prices)
     if not performance["positions"]:
@@ -6252,8 +8401,13 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     }
     st.dataframe(pd.DataFrame([{
         "Status": "Open" if row["status"] == "open" else "Closed", "Ticker": row["ticker"],
-        "Type": row["security_type"], "Quantity": row["quantity"], "Entry Price": f"${row['entry_price']:,.2f}",
-        "Current / Exit Price": f"${row['current_price']:,.2f}", "Position Return": f"{row['return_pct']:+.2f}%",
+        "Type": row["security_type"], "Bond Instrument": row.get("bond_instrument_type") or "—",
+        "WInS Eligibility": row.get("competition_eligibility_status") or "—",
+        "ISIN": row.get("isin") or "—", "Currency": row.get("currency") or "USD",
+        "Quantity": row["quantity"], "Face Value": row.get("face_value"),
+        "Entry Price / Quote": row["entry_price"], "Current / Exit Price": row["current_price"],
+        "Current Value": row.get("current_value"), "Coupon Income": row.get("coupon_income") or 0.0,
+        "Maturity": row.get("maturity_date") or "—", "Position Return": f"{row['return_pct']:+.2f}%",
         "P/L": f"${row['pnl']:+,.2f}", "Opened By": row["opened_by"], "Opening Date": row["entry_date"],
         "Price Source": row["price_source"],
         "Client Goal": _strategy_payload(thesis_by_ticker.get(str(row["ticker"]).upper(), {})).get("primary_goal") or "Unassigned",
@@ -6263,21 +8417,129 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         "Next Review": thesis_by_ticker.get(str(row["ticker"]).upper(), {}).get("next_review_at") or "Not scheduled",
     } for row in performance["positions"]]), use_container_width=True, hide_index=True)
 
+    _render_fixed_income_dashboard(positions, performance["positions"])
     _render_live_competition_analytics(positions, live_prices)
 
     st.markdown("#### Manage Open Positions")
     for row in performance["positions"]:
         if row["status"] != "open":
             continue
+        individual_bond = is_individual_bond(row)
+        bond_security = str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
         with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · opened by {row['opened_by']}"):
             st.write(row.get("notes") or "No notes.")
             update_col, close_col = st.columns(2)
             with update_col:
                 with st.form(f"competition_update_price_{row['id']}"):
-                    new_price = st.number_input("Manual Current Price", min_value=0.0, value=float(row["current_price"]), step=0.01, key=f"competition_price_{row['id']}")
-                    if st.form_submit_button("Save Manual Price", use_container_width=True):
+                    new_price = st.number_input(
+                        "Manual current price" if not individual_bond else "Current clean price / 100",
+                        min_value=0.0, value=float(row["current_price"]), step=0.01,
+                        key=f"competition_price_{row['id']}",
+                    )
+                    if bond_security:
+                        new_accrued = float(row.get("accrued_interest") or 0.0)
+                        new_fx = float(row.get("fx_rate_to_usd") or 1.0)
+                        if individual_bond:
+                            new_accrued = st.number_input(
+                                "Accrued interest / 100", min_value=0.0,
+                                value=new_accrued, step=0.01,
+                                key=f"competition_accrued_{row['id']}",
+                            )
+                            new_fx = st.number_input(
+                                "Current FX to USD", min_value=0.000001,
+                                value=new_fx, step=0.01, format="%.6f",
+                                key=f"competition_fx_{row['id']}",
+                            )
+                        new_coupon_income = st.number_input(
+                            "Cumulative cash income (USD)", min_value=0.0,
+                            value=float(row.get("coupon_income") or 0.0), step=1.0,
+                            key=f"competition_coupon_income_{row['id']}",
+                        )
+                        new_ytm = st.number_input(
+                            "YTM override (%)", value=float(row.get("yield_to_maturity") or 0.0) * 100.0,
+                            step=0.01, key=f"competition_ytm_{row['id']}",
+                        )
+                        new_duration = st.number_input(
+                            "Modified duration override", min_value=0.0,
+                            value=float(row.get("modified_duration") or 0.0), step=0.1,
+                            key=f"competition_duration_{row['id']}",
+                        )
+                        new_source = st.text_input(
+                            "Valuation source", value=str(row.get("valuation_source") or ""),
+                            key=f"competition_source_{row['id']}",
+                        )
+                        new_source_url = st.text_input(
+                            "Source URL / reference", value=str(row.get("source_url") or ""),
+                            key=f"competition_source_url_{row['id']}",
+                        )
+                        new_benchmark = st.text_input(
+                            "Yield benchmark", value=str(row.get("benchmark_name") or ""),
+                            key=f"competition_benchmark_{row['id']}",
+                        )
+                        new_benchmark_yield = st.number_input(
+                            "Benchmark yield (%)", value=float(row.get("benchmark_yield") or 0.0) * 100.0,
+                            step=0.01, key=f"competition_benchmark_yield_{row['id']}",
+                        )
+                        new_income_yield = st.number_input(
+                            "Income yield (%)", min_value=0.0, value=float(row.get("income_yield") or 0.0) * 100.0,
+                            step=0.01, key=f"competition_income_yield_{row['id']}",
+                        )
+                        new_pd = st.number_input(
+                            "Annual default probability (%)", min_value=0.0, max_value=100.0,
+                            value=float(row.get("default_probability") or 0.0) * 100.0,
+                            step=0.05, key=f"competition_pd_{row['id']}",
+                        )
+                        new_recovery = st.number_input(
+                            "Recovery rate (%)", min_value=0.0, max_value=100.0,
+                            value=float(row.get("recovery_rate") if row.get("recovery_rate") is not None else 0.4) * 100.0,
+                            step=1.0, key=f"competition_recovery_{row['id']}",
+                        )
+                        eligibility_options = ["Pending verification", "Verified eligible", "Verified ineligible"]
+                        saved_eligibility = str(row.get("competition_eligibility_status") or "Pending verification")
+                        if saved_eligibility not in eligibility_options:
+                            saved_eligibility = "Pending verification"
+                        new_eligibility = st.selectbox(
+                            "Current WInS eligibility", eligibility_options,
+                            index=eligibility_options.index(saved_eligibility),
+                            key=f"competition_eligibility_{row['id']}",
+                        )
+                        new_eligibility_source = st.text_input(
+                            "Eligibility source", value=str(row.get("eligibility_source") or ""),
+                            key=f"competition_eligibility_source_{row['id']}",
+                        )
+                        try:
+                            saved_eligibility_date = date.fromisoformat(str(row.get("eligibility_checked_at") or ""))
+                        except ValueError:
+                            saved_eligibility_date = date.today()
+                        new_eligibility_date = st.date_input(
+                            "Eligibility checked on", value=saved_eligibility_date,
+                            key=f"competition_eligibility_date_{row['id']}",
+                        )
+                    if st.form_submit_button("Save Valuation Inputs", use_container_width=True):
                         with get_connection() as conn:
-                            conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
+                            if bond_security:
+                                conn.execute(
+                                    "UPDATE competition_positions SET last_price = ?, accrued_interest = ?, "
+                                    "fx_rate_to_usd = ?, coupon_income = ?, yield_to_maturity = ?, modified_duration = ?, "
+                                    "valuation_source = ?, source_url = ?, price_observed_at = ?, benchmark_name = ?, "
+                                    "benchmark_yield = ?, income_yield = ?, default_probability = ?, recovery_rate = ?, "
+                                    "competition_eligibility_status = ?, eligibility_source = ?, eligibility_checked_at = ? WHERE id = ?",
+                                    (
+                                        float(new_price), float(new_accrued), float(new_fx),
+                                        float(new_coupon_income), float(new_ytm) / 100.0 if new_ytm else None,
+                                        float(new_duration) if new_duration else None, new_source.strip(),
+                                        new_source_url.strip(), date.today().isoformat(), new_benchmark.strip(),
+                                        float(new_benchmark_yield) / 100.0 if new_benchmark_yield else None,
+                                        float(new_income_yield) / 100.0 if new_income_yield else None,
+                                        float(new_pd) / 100.0, float(new_recovery) / 100.0,
+                                        new_eligibility if new_eligibility == "Pending verification" or new_eligibility_source.strip() else "Pending verification",
+                                        new_eligibility_source.strip(),
+                                        new_eligibility_date.isoformat() if new_eligibility != "Pending verification" and new_eligibility_source.strip() else None,
+                                        int(row["id"]),
+                                    ),
+                                )
+                            else:
+                                conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
                             conn.commit()
                             if hasattr(conn, "sync"):
                                 conn.sync()
@@ -6286,9 +8548,30 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                 with st.form(f"competition_close_{row['id']}"):
                     exit_price = st.number_input("Exit Price", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
                     exit_date = st.date_input("Closing Date", value=date.today(), key=f"competition_exit_date_{row['id']}")
+                    if individual_bond:
+                        exit_accrued = st.number_input(
+                            "Exit accrued interest / 100", min_value=0.0,
+                            value=float(row.get("accrued_interest") or 0.0), step=0.01,
+                            key=f"competition_exit_accrued_{row['id']}",
+                        )
+                        exit_fx = st.number_input(
+                            "Exit FX to USD", min_value=0.000001,
+                            value=float(row.get("fx_rate_to_usd") or 1.0), step=0.01, format="%.6f",
+                            key=f"competition_exit_fx_{row['id']}",
+                        )
                     if st.form_submit_button("Close Position", type="primary", use_container_width=True):
                         with get_connection() as conn:
-                            conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
+                            if individual_bond:
+                                conn.execute(
+                                    "UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, "
+                                    "closed_by = ?, exit_accrued_interest = ?, exit_fx_rate_to_usd = ? WHERE id = ?",
+                                    (
+                                        float(exit_price), exit_date.isoformat(), str(profile["username"]),
+                                        float(exit_accrued), float(exit_fx), int(row["id"]),
+                                    ),
+                                )
+                            else:
+                                conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
                             conn.commit()
                             if hasattr(conn, "sync"):
                                 conn.sync()
@@ -6307,6 +8590,149 @@ def _fetch_company_analysis_cached(ticker: str) -> dict[str, Any]:
     from src.analytics.company_analysis import fetch_company_data
 
     return fetch_company_data(ticker)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_lightweight_company_info_cached(ticker: str) -> dict[str, Any]:
+    """Fetch only comparable-company fundamentals, without heavy research data."""
+    return _fetch_lightweight_company_info(ticker)
+
+
+def _fetch_lightweight_company_info(ticker: str) -> dict[str, Any]:
+    """Uncached worker used by the parallel automatic-peer discovery pass."""
+    import yfinance as yf
+
+    symbol = str(ticker or "").strip().upper()
+    if not symbol:
+        return {}
+    company = yf.Ticker(symbol)
+    try:
+        info = company.get_info()
+    except Exception:
+        try:
+            info = company.info
+        except Exception:
+            info = {}
+    return dict(info) if isinstance(info, dict) else {}
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _discover_automatic_peers_cached(
+    ticker: str,
+    target_info: dict[str, Any],
+    max_peers: int = 6,
+) -> dict[str, Any]:
+    """Discover same-industry candidates, enrich them lightly, then rank them."""
+    from src.analytics.industry_analysis import select_similar_peers
+    from src.data.sector_mapper import EXTENDED_SECTOR_MAP, KNOWN_SECTOR_MAP
+
+    symbol = str(ticker or "").strip().upper()
+    candidate_profiles: dict[str, dict[str, Any]] = {}
+    for source in (KNOWN_SECTOR_MAP, EXTENDED_SECTOR_MAP):
+        for candidate, classification in source.items():
+            candidate_symbol = str(candidate).strip().upper()
+            if not candidate_symbol or candidate_symbol == symbol or candidate_symbol in candidate_profiles:
+                continue
+            sector, industry = classification
+            candidate_profiles[candidate_symbol] = {
+                "symbol": candidate_symbol,
+                "sector": sector,
+                "industry": industry,
+            }
+    shortlist = select_similar_peers(
+        target_info,
+        candidate_profiles,
+        target_ticker=symbol,
+        max_peers=max(12, int(max_peers) * 2),
+    )
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    enriched: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    shortlist_symbols = [
+        str(candidate.get("ticker") or "").upper()
+        for candidate in shortlist
+        if str(candidate.get("ticker") or "").strip()
+    ]
+    if shortlist_symbols:
+        with ThreadPoolExecutor(max_workers=min(6, len(shortlist_symbols))) as executor:
+            future_symbols = {
+                executor.submit(_fetch_lightweight_company_info, candidate_symbol): candidate_symbol
+                for candidate_symbol in shortlist_symbols
+            }
+            for future in as_completed(future_symbols):
+                candidate_symbol = future_symbols[future]
+                try:
+                    info = future.result()
+                except Exception:
+                    info = {}
+                if info:
+                    enriched[candidate_symbol] = info
+                else:
+                    enriched[candidate_symbol] = candidate_profiles[candidate_symbol]
+                    failures.append(candidate_symbol)
+    ranked = select_similar_peers(
+        target_info,
+        enriched,
+        target_ticker=symbol,
+        max_peers=int(max_peers),
+    )
+    return {
+        "available": bool(ranked),
+        "source": "Static GICS classifications + Yahoo Finance fundamentals",
+        "peers": ranked,
+        "info": {row["ticker"]: enriched.get(row["ticker"], {}) for row in ranked},
+        "failures": sorted(failures),
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_ai_dcf_provider_cached(
+    ticker: str,
+    evidence: dict[str, Any],
+    credential_fingerprint: str,
+    _api_key: str,
+) -> dict[str, Any]:
+    """Cache successful provider attempts without using the secret as a cache key."""
+    module = importlib.import_module("src.ai.company_analysis")
+    if not hasattr(module, "generate_dcf_assumptions"):
+        module = importlib.reload(module)
+
+    return module.generate_dcf_assumptions({"ticker": ticker, **evidence}, _api_key)
+
+
+def _fetch_ai_dcf_assumptions_cached(ticker: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return a stable AI proposal while allowing newly configured credentials."""
+    from src.ai.ai_review import resolve_groq_api_key
+
+    api_key = resolve_groq_api_key(st.secrets)
+    if not api_key:
+        return {"available": False, "source": "ai_unavailable", "error": "GROQ_API_KEY was not provided."}
+    fingerprint = hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:12]
+    return _fetch_ai_dcf_provider_cached(ticker, evidence, fingerprint, str(api_key))
+
+
+def _dcf_widget_values(ticker: str, defaults: dict[str, Any]) -> dict[str, float | int | bool]:
+    """Translate model assumptions into the units displayed by DCF widgets."""
+    return {
+        f"dcf_fcf_{ticker}": float(defaults["starting_fcff"]) / 1e9,
+        f"dcf_growth_{ticker}": float(defaults["initial_growth_rate"]) * 100,
+        f"dcf_near_{ticker}": int(defaults["near_term_years"]),
+        f"dcf_fade_{ticker}": int(defaults["fade_years"]),
+        f"dcf_wacc_{ticker}": float(defaults["discount_rate"]) * 100,
+        f"dcf_terminal_{ticker}": float(defaults["terminal_growth_rate"]) * 100,
+        f"dcf_shares_{ticker}": float(defaults["shares_outstanding"]) / 1e6,
+        f"dcf_cash_{ticker}": float(defaults["cash"]) / 1e9,
+        f"dcf_debt_{ticker}": float(defaults["debt"]) / 1e9,
+        f"dcf_midyear_{ticker}": bool(defaults.get("midyear_convention", True)),
+    }
+
+
+def _dcf_widget_keys(ticker: str) -> tuple[str, ...]:
+    return tuple(
+        f"dcf_{field}_{ticker}"
+        for field in ("fcf", "growth", "near", "fade", "wacc", "terminal", "shares", "cash", "debt", "midyear")
+    )
 
 
 def _load_company_analysis_module(*required_names: str, minimum_macro_schema: int = 0) -> Any:
@@ -6879,31 +9305,76 @@ def _render_industry_peer_analysis(
     from src.analytics.industry_analysis import (
         PORTER_FORCES,
         build_industry_analysis,
+        select_similar_peers,
     )
     from src.portfolio_tracker.strategy_store import load_company_research, save_company_research
 
     with get_connection() as conn:
         research_record = load_company_research(conn, selected_ticker)
     current = _strategy_payload(research_record)
-    peer_options = [ticker for ticker in valid_results if ticker != selected_ticker]
-    saved_peers = [
-        str(ticker).upper() for ticker in current.get("peer_tickers", [])
-        if str(ticker).upper() in peer_options
-    ]
-    default_peers = saved_peers if "peer_tickers" in current else peer_options
+    company_info = valid_results[selected_ticker].get("info", {})
+    with st.spinner("Finding comparable companies in the same industry…"):
+        automatic_peer_payload = _discover_automatic_peers_cached(selected_ticker, dict(company_info), 6)
+    automatic_info = dict(automatic_peer_payload.get("info", {}))
+    loaded_info = {
+        ticker: snapshot.get("info", {})
+        for ticker, snapshot in valid_results.items() if ticker != selected_ticker
+    }
+    saved_peer_tickers = [str(ticker).strip().upper() for ticker in current.get("peer_tickers", []) if str(ticker).strip()]
+    for saved_ticker in saved_peer_tickers:
+        if saved_ticker != selected_ticker and saved_ticker not in automatic_info and saved_ticker not in loaded_info:
+            saved_info = _fetch_lightweight_company_info_cached(saved_ticker)
+            if saved_info:
+                automatic_info[saved_ticker] = saved_info
+    peer_universe_info = {**automatic_info, **loaded_info}
+    automatic_ranking = select_similar_peers(
+        company_info,
+        peer_universe_info,
+        target_ticker=selected_ticker,
+        max_peers=6,
+    )
+    automatic_peers = [row["ticker"] for row in automatic_ranking]
+    peer_options = list(dict.fromkeys([
+        *automatic_peers,
+        *saved_peer_tickers,
+        *(ticker for ticker in valid_results if ticker != selected_ticker),
+    ]))
+    saved_peers = [ticker for ticker in saved_peer_tickers if ticker in peer_options]
+    has_saved_peer_set = "peer_tickers" in current
+    default_peers = saved_peers if has_saved_peer_set else automatic_peers
+    if not default_peers and not has_saved_peer_set:
+        default_peers = [ticker for ticker in valid_results if ticker != selected_ticker]
+    peer_widget_key = f"industry_peer_set_{selected_ticker}"
+    if peer_widget_key in st.session_state:
+        current_peer_selection = st.session_state.get(peer_widget_key, [])
+        st.session_state[peer_widget_key] = [
+            ticker for ticker in current_peer_selection if ticker in peer_options
+        ]
 
     st.markdown("#### Industry Structure & Peer Comparison")
     st.caption(
-        "Quantitative comparisons use only the loaded companies. Porter Five Forces and SWOT use only analyst-entered "
-        "ratings and evidence; missing qualitative judgments remain missing."
+        "Comparable companies are discovered automatically from the same industry and ranked by classification, "
+        "market cap, profitability, and growth. You can still edit and save the peer set manually. Porter Five Forces "
+        "and SWOT use only analyst-entered ratings and evidence."
     )
+    peer_default = {} if peer_widget_key in st.session_state else {"default": default_peers}
     selected_peers = st.multiselect(
-        "Peer set from loaded companies",
+        "Comparable companies",
         peer_options,
-        default=default_peers,
-        key=f"industry_peer_set_{selected_ticker}",
-        help="Load additional tickers in Company Analysis to expand the peer set.",
+        key=peer_widget_key,
+        help="Automatically suggested peers can be added or removed manually.",
+        **peer_default,
     )
+    if automatic_ranking:
+        st.markdown("##### Automatically selected competitors")
+        st.dataframe(pd.DataFrame([{
+            "Ticker": row.get("ticker"),
+            "Company": row.get("name"),
+            "Match": str(row.get("classification_match") or "").replace("_", " ").title(),
+            "Industry": row.get("industry"),
+            "Similarity": row.get("score"),
+            "Financial coverage %": row.get("financial_coverage_pct"),
+        } for row in automatic_ranking]), use_container_width=True, hide_index=True)
 
     porter_current = current.get("porter", {}) if isinstance(current.get("porter"), dict) else {}
     porter_frame = pd.DataFrame([{
@@ -6987,10 +9458,9 @@ def _render_industry_peer_analysis(
         st.success("Industry and peer research saved to the shared database.")
         st.rerun()
 
-    company_info = valid_results[selected_ticker].get("info", {})
     peer_metrics = {
-        ticker: valid_results[ticker].get("info", {})
-        for ticker in selected_peers if ticker in valid_results
+        ticker: peer_universe_info.get(ticker, {})
+        for ticker in selected_peers if ticker in peer_universe_info
     }
     analysis = build_industry_analysis(
         company_info,
@@ -7037,13 +9507,13 @@ def _render_industry_peer_analysis(
         st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True, height=470)
     else:
         st.warning(
-            "A robust peer score needs at least two loaded peer companies with comparable metrics. "
-            "The app does not manufacture a peer set."
+            "A robust peer score needs at least two selected companies with sufficient comparable metrics. "
+            "Keep the automatic suggestions or add another peer manually."
         )
 
     scatter_rows = []
     for ticker in [selected_ticker, *selected_peers]:
-        info = valid_results.get(ticker, {}).get("info", {})
+        info = company_info if ticker == selected_ticker else peer_universe_info.get(ticker, {})
         forward_pe = info.get("forwardPE")
         growth = info.get("revenueGrowth")
         if forward_pe is None or growth is None:
@@ -7272,8 +9742,14 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     from src.analytics.company_analysis import (
         analyze_moat,
         analyze_track_record,
-        build_dcf_scenarios,
-        default_dcf_assumptions,
+    )
+    from src.analytics.dcf import (
+        build_dcf_sensitivity,
+        build_multistage_dcf_scenarios,
+        calculate_multistage_dcf,
+        default_multistage_dcf_assumptions,
+        prepare_dcf_inputs,
+        solve_reverse_dcf,
     )
 
     st.markdown("### Company Analysis")
@@ -7310,6 +9786,15 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                 progress.progress(index / len(tickers), text=f"Loaded {index}/{len(tickers)}: {ticker}")
             progress.empty()
             st.session_state[COMPANY_ANALYSIS_KEY] = results
+            # A deliberate new analysis should load a fresh model proposal.
+            # Ordinary reruns retain any manual edits made after initialization.
+            for ticker in tickers:
+                st.session_state.pop(f"dcf_defaults_loaded_{ticker}", None)
+                st.session_state.pop(f"dcf_v2_defaults_loaded_{ticker}", None)
+                st.session_state.pop(f"dcf_years_{ticker}", None)
+                st.session_state.pop(f"industry_peer_set_{ticker}", None)
+                for widget_key in _dcf_widget_keys(ticker):
+                    st.session_state.pop(widget_key, None)
 
     results = st.session_state.get(COMPANY_ANALYSIS_KEY, {})
     if not isinstance(results, dict) or not results:
@@ -7328,7 +9813,8 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     for ticker, snapshot in valid_results.items():
         info = snapshot.get("info", {})
         moat = analyze_moat(info)
-        base_dcf = build_dcf_scenarios(info).get("Base", {})
+        dcf_inputs = prepare_dcf_inputs(snapshot)
+        base_dcf = calculate_multistage_dcf(dcf_inputs, default_multistage_dcf_assumptions(dcf_inputs))
         geographic_analysis = snapshot.get("geographic_revenue", {}).get("analysis", {})
         comparison_rows.append({
             "Ticker": ticker,
@@ -7345,7 +9831,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                 if geographic_analysis.get("available")
                 else "Not disclosed"
             ),
-            "Base DCF / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
+            "Baseline DCF v2 / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
         })
     st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
 
@@ -7496,18 +9982,18 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                 "news": news_rows,
                 "deterministic_track_record": analyze_track_record(info, snapshot.get("history")),
             }
-            with st.spinner("Groq is synthesizing only the supplied evidence…"):
+            with st.spinner("Preparing a synthesis from the supplied evidence…"):
                 st.session_state[ai_key] = generate_company_deep_dive(evidence, api_key)
         ai_result = st.session_state.get(ai_key)
         if isinstance(ai_result, dict):
             if ai_result.get("available"):
-                st.markdown("#### AI Management-History Synthesis")
+                st.markdown("#### Management-History Synthesis")
                 st.write(ai_result.get("management_history") or "Insufficient evidence.")
                 st.markdown("**Investment View**")
                 st.write(ai_result.get("investment_view") or "—")
                 st.caption(ai_result.get("evidence_limitations") or "")
             else:
-                st.warning(f"AI synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
+                st.warning(f"Supplementary synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
 
     with moat_tab:
         moat = analyze_moat(info)
@@ -7517,7 +10003,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
         label_col.metric("Result", moat["label"])
         st.caption(moat["warning"])
         st.dataframe(pd.DataFrame([{
-            "Status": "✅" if signal["passed"] else "❌", "Area": signal["name"], "Evidence": signal["evidence"],
+            "Status": "Pass" if signal["passed"] else "Fail", "Area": signal["name"], "Evidence": signal["evidence"],
         } for signal in moat["signals"]]), use_container_width=True, hide_index=True)
         success_col, failure_col = st.columns(2)
         with success_col:
@@ -7546,48 +10032,191 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
                     st.error(item)
 
     with dcf_tab:
-        defaults = default_dcf_assumptions(info)
-        st.markdown("#### Custom DCF Assumptions")
+        dcf_inputs = prepare_dcf_inputs(snapshot)
+        defaults = default_multistage_dcf_assumptions(dcf_inputs)
+        dcf_evidence = {key: info.get(key) for key in [
+            "shortName", "sector", "industry", "marketCap", "beta", "freeCashflow",
+            "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth", "grossMargins",
+            "operatingMargins", "profitMargins", "returnOnEquity", "totalCash", "totalDebt",
+            "sharesOutstanding", "currentPrice", "regularMarketPrice",
+        ]}
+        dcf_evidence.update({
+            "normalizedFcff": dcf_inputs.get("normalized", {}).get("fcff"),
+            "cashFlowBasis": dcf_inputs.get("normalized", {}).get("cash_flow_basis"),
+            "calculatedWacc": dcf_inputs.get("wacc", {}).get("wacc"),
+            "statementPeriods": dcf_inputs.get("quality", {}).get("statement_periods"),
+        })
+        with st.spinner("Preparing AI-informed multi-stage DCF assumptions…"):
+            ai_dcf = _fetch_ai_dcf_assumptions_cached(selected_ticker, dcf_evidence)
+        if ai_dcf.get("available") and isinstance(ai_dcf.get("assumptions"), dict):
+            ai_assumptions = ai_dcf["assumptions"]
+            ai_forecast_assumptions = {
+                key: ai_assumptions[key] for key in (
+                    "initial_growth_rate", "near_term_years", "fade_years",
+                    "terminal_growth_rate", "lifecycle",
+                ) if key in ai_assumptions
+            }
+            if "terminal_growth_rate" in ai_forecast_assumptions:
+                ai_forecast_assumptions["terminal_growth_rate"] = min(
+                    max(float(ai_forecast_assumptions["terminal_growth_rate"]), -0.02),
+                    float(defaults["discount_rate"]) - 0.025,
+                )
+            defaults = {
+                **defaults,
+                **ai_forecast_assumptions,
+            }
+            st.success(
+                f"AI-informed {str(defaults.get('lifecycle') or 'company-specific').replace('_', ' ')} starting point loaded automatically."
+            )
+            st.caption(
+                f"{ai_dcf.get('rationale', 'Based on the available company metrics.')} "
+                f"Confidence: {float(ai_dcf.get('confidence') or 0.5):.0%}. Forecast judgments remain editable; "
+                "WACC stays tied to the transparent beta and capital-structure calculation."
+            )
+        else:
+            st.info(
+                "AI proposal is unavailable. A lifecycle-aware deterministic model was loaded automatically from statements, "
+                "growth, beta, and capital structure; no assumption is randomized."
+            )
+
+        normalized = dcf_inputs.get("normalized", {})
+        wacc_detail = dcf_inputs.get("wacc", {})
+        quality = dcf_inputs.get("quality", {})
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Normalized FCFF", f"${float(normalized.get('fcff') or 0) / 1e9:,.2f}B")
+        summary_cols[1].metric("Cash-flow basis", str(normalized.get("cash_flow_basis") or "Unavailable").replace("_", " ").title())
+        summary_cols[2].metric("Calculated WACC", f"{float(wacc_detail.get('wacc') or 0):.2%}")
+        summary_cols[3].metric("Lifecycle", str(defaults.get("lifecycle") or "Unknown").replace("_", " ").title())
+        st.caption(
+            "DCF v2 separates reported data, normalized FCFF, calculated WACC, AI forecast judgments, and manual overrides. "
+            "Growth fades smoothly into the terminal rate instead of dropping abruptly."
+        )
+
+        st.markdown("#### Editable Multi-Stage Assumptions")
+        reset_values = _dcf_widget_values(selected_ticker, defaults)
+        initialization_key = f"dcf_v2_defaults_loaded_{selected_ticker}"
+        if not st.session_state.get(initialization_key):
+            st.session_state.update(reset_values)
+            st.session_state[initialization_key] = True
+        if st.button("Reset all fields to current suggested values", key=f"dcf_reset_{selected_ticker}"):
+            st.session_state.update(reset_values)
         with st.form(f"dcf_form_{selected_ticker}"):
             d1, d2, d3, d4 = st.columns(4)
             with d1:
-                fcf_b = st.number_input("Normalized FCF (billions)", value=float(defaults["free_cash_flow"]) / 1e9, step=0.1, key=f"dcf_fcf_{selected_ticker}")
-                growth_pct = st.number_input("FCF Growth (%)", value=float(defaults["growth_rate"]) * 100, step=0.5, key=f"dcf_growth_{selected_ticker}")
+                fcf_b = st.number_input("Normalized FCFF (billions)", step=0.1, key=f"dcf_fcf_{selected_ticker}")
+                growth_pct = st.number_input("Initial FCFF Growth (%)", min_value=-99.0, max_value=100.0, step=0.5, key=f"dcf_growth_{selected_ticker}")
             with d2:
-                discount_pct = st.number_input("Discount Rate / WACC (%)", value=float(defaults["discount_rate"]) * 100, step=0.5, key=f"dcf_wacc_{selected_ticker}")
-                terminal_pct = st.number_input("Terminal Growth (%)", value=float(defaults["terminal_growth_rate"]) * 100, step=0.25, key=f"dcf_terminal_{selected_ticker}")
+                near_years = st.number_input("Near-Term Stage (years)", min_value=1, max_value=10, step=1, key=f"dcf_near_{selected_ticker}")
+                fade_years = st.number_input("Competitive Fade (years)", min_value=1, max_value=15, step=1, key=f"dcf_fade_{selected_ticker}")
             with d3:
-                years = st.number_input("Explicit Forecast Years", 1, 20, int(defaults["years"]), key=f"dcf_years_{selected_ticker}")
-                shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, value=float(defaults["shares_outstanding"]) / 1e6, step=1.0, key=f"dcf_shares_{selected_ticker}")
+                discount_pct = st.number_input("Discount Rate / WACC (%)", step=0.5, key=f"dcf_wacc_{selected_ticker}")
+                terminal_pct = st.number_input("Terminal Growth (%)", step=0.25, key=f"dcf_terminal_{selected_ticker}")
             with d4:
-                cash_b = st.number_input("Cash (billions)", value=float(defaults["cash"]) / 1e9, step=0.1, key=f"dcf_cash_{selected_ticker}")
-                debt_b = st.number_input("Debt (billions)", value=float(defaults["debt"]) / 1e9, step=0.1, key=f"dcf_debt_{selected_ticker}")
-            st.form_submit_button("Recalculate DCF", type="primary", use_container_width=True)
+                shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, step=1.0, key=f"dcf_shares_{selected_ticker}")
+                cash_b = st.number_input("Cash (billions)", step=0.1, key=f"dcf_cash_{selected_ticker}")
+                debt_b = st.number_input("Debt (billions)", step=0.1, key=f"dcf_debt_{selected_ticker}")
+            midyear = st.checkbox(
+                "Mid-year discounting convention",
+                key=f"dcf_midyear_{selected_ticker}",
+                help="Assumes cash flows arrive through the year instead of only on the final day.",
+            )
+            st.form_submit_button("Recalculate Multi-Stage DCF", type="primary", use_container_width=True)
         assumptions = {
-            "free_cash_flow": float(fcf_b) * 1e9, "growth_rate": float(growth_pct) / 100,
-            "discount_rate": float(discount_pct) / 100, "terminal_growth_rate": float(terminal_pct) / 100,
-            "years": int(years), "cash": float(cash_b) * 1e9, "debt": float(debt_b) * 1e9,
-            "shares_outstanding": float(shares_m) * 1e6, "current_price": float(defaults["current_price"]),
+            **defaults,
+            "starting_fcff": float(fcf_b) * 1e9,
+            "initial_growth_rate": float(growth_pct) / 100,
+            "near_term_years": int(near_years),
+            "fade_years": int(fade_years),
+            "discount_rate": float(discount_pct) / 100,
+            "terminal_growth_rate": float(terminal_pct) / 100,
+            "cash": float(cash_b) * 1e9,
+            "debt": float(debt_b) * 1e9,
+            "shares_outstanding": float(shares_m) * 1e6,
+            "current_price": float(defaults["current_price"]),
+            "midyear_convention": bool(midyear),
         }
-        scenarios = build_dcf_scenarios(info, assumptions)
+        scenarios = build_multistage_dcf_scenarios(dcf_inputs, assumptions)
         scenario_columns = st.columns(3)
         for column, (name, result) in zip(scenario_columns, scenarios.items()):
             with column:
                 st.markdown(f"#### {name}")
                 if result.get("available"):
                     st.metric("Fair Value / Share", f"${result['fair_value_per_share']:,.2f}", f"{result['upside_pct']:+.1%}" if result.get("upside_pct") is not None else None)
-                    st.caption(f"Terminal value: {result['terminal_value_share']:.1%} EV")
+                    st.caption(
+                        f"Terminal value: {result['terminal_value_share']:.1%} EV · "
+                        f"Explicit forecast: {len(result.get('projected', []))} years"
+                    )
                 else:
                     st.error(result.get("error", "DCF cannot be calculated."))
         base_result = scenarios.get("Base", {})
         if base_result.get("available"):
-            st.markdown("#### Base-Case Projection")
+            st.markdown("#### Base-Case Growth Fade")
             st.dataframe(pd.DataFrame([{
-                "Year": row["year"], "FCF": f"${row['free_cash_flow'] / 1e9:,.2f}B", "Present Value": f"${row['present_value'] / 1e9:,.2f}B",
+                "Year": row["year"],
+                "Phase": str(row.get("phase") or "").replace("_", " ").title(),
+                "FCFF Growth": row.get("growth_rate"),
+                "FCFF ($B)": row["free_cash_flow"] / 1e9,
+                "Discount Factor": row.get("discount_factor"),
+                "Present Value ($B)": row["present_value"] / 1e9,
             } for row in base_result["projected"]]), use_container_width=True, hide_index=True)
-            if base_result["terminal_value_share"] > 0.75:
-                st.warning("More than 75% of enterprise value comes from terminal value; the result is highly sensitive to WACC and terminal growth.")
-        st.caption("DCF is a scenario model, not a price target or investment recommendation.")
+
+            bridge = base_result.get("bridge", {})
+            st.markdown("#### Enterprise-to-Equity Bridge")
+            bridge_cols = st.columns(5)
+            bridge_cols[0].metric("Explicit PV", f"${float(base_result.get('pv_explicit') or 0) / 1e9:,.2f}B")
+            bridge_cols[1].metric("Terminal PV", f"${float(base_result.get('terminal_present_value') or 0) / 1e9:,.2f}B")
+            bridge_cols[2].metric("Enterprise Value", f"${float(bridge.get('enterprise_value') or 0) / 1e9:,.2f}B")
+            bridge_cols[3].metric("Net Cash / (Debt)", f"${(float(bridge.get('cash') or 0) - float(bridge.get('debt') or 0)) / 1e9:,.2f}B")
+            bridge_cols[4].metric("Equity Value", f"${float(bridge.get('equity_value') or 0) / 1e9:,.2f}B")
+
+            reverse = solve_reverse_dcf(dcf_inputs, assumptions)
+            st.markdown("#### What Must Be True? — Reverse DCF")
+            if reverse.get("available"):
+                reverse_cols = st.columns(3)
+                reverse_cols[0].metric("Current Market Price", f"${float(reverse['target_price']):,.2f}")
+                reverse_cols[1].metric("Base Initial Growth", f"{float(reverse['base_initial_growth_rate']):.1%}")
+                reverse_cols[2].metric(
+                    "Growth Implied by Market",
+                    f"{float(reverse['implied_initial_growth_rate']):.1%}",
+                    f"{float(reverse['growth_gap']):+.1%} vs base",
+                )
+                st.caption(
+                    "This is not a forecast. It solves the initial FCFF growth required for the model to equal the current share price, "
+                    "holding the remaining assumptions constant."
+                )
+            else:
+                st.warning(reverse.get("error", "Reverse DCF is unavailable."))
+
+            sensitivity = build_dcf_sensitivity(dcf_inputs, assumptions)
+            sensitivity_frame = pd.DataFrame(
+                sensitivity["values"],
+                index=[f"Terminal g {value:.2%}" for value in sensitivity["terminal_growth_values"]],
+                columns=[f"WACC {value:.2%}" for value in sensitivity["wacc_values"]],
+            )
+            st.markdown("#### Fair Value Sensitivity ($ / share)")
+            st.dataframe(sensitivity_frame.round(2), use_container_width=True)
+
+            with st.expander("WACC calculation and data-quality audit", expanded=False):
+                st.dataframe(pd.DataFrame([{
+                    "Risk-free rate": wacc_detail.get("risk_free_rate"),
+                    "Raw beta": wacc_detail.get("raw_beta"),
+                    "Adjusted beta": wacc_detail.get("adjusted_beta"),
+                    "Equity risk premium": wacc_detail.get("equity_risk_premium"),
+                    "Cost of equity": wacc_detail.get("cost_of_equity"),
+                    "Pre-tax cost of debt": wacc_detail.get("pre_tax_cost_of_debt"),
+                    "Tax rate": wacc_detail.get("tax_rate"),
+                    "Equity weight": wacc_detail.get("equity_weight"),
+                    "Debt weight": wacc_detail.get("debt_weight"),
+                    "Calculated WACC": wacc_detail.get("wacc"),
+                }]), use_container_width=True, hide_index=True)
+                st.write(f"FCFF normalization method: `{normalized.get('method', 'unavailable')}`")
+                st.write(f"Historical statement periods used: {quality.get('statement_periods', 0)}")
+
+            for warning in base_result.get("diagnostics", {}).get("warnings", []):
+                st.warning(str(warning))
+        else:
+            st.error(base_result.get("error", "Base DCF cannot be calculated from the available data."))
+        st.caption("DCF v2 is an auditable scenario model, not a price target or investment recommendation.")
 
     with metrics_tab:
         st.markdown(f"#### All Available Scalar Metrics ({len(snapshot.get('metrics', {}))})")
@@ -7608,19 +10237,40 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
 def _render_header(profile: dict[str, str | int]) -> None:
     username = escape(str(profile["username"]))
     role = escape(str(profile["role"]))
-    pm = escape(str(profile["primary_module"]))
-    st.markdown(f"""
-        <div class="wharton-hero">
-          <h1>Wharton Cockpit</h1>
-          <p>Production command center · Strategy · Quant · Research · Team</p>
-          <div class="wharton-badge-row">
-            <span class="wharton-badge"> {username}</span>
-            <span class="wharton-badge"> {role}</span>
-            <span class="wharton-badge"> {pm}</span>
-          </div>
-        </div>
-    """, unsafe_allow_html=True)
-    if st.sidebar.button(" Logout", use_container_width=True):
+    initial = username[:1].upper()
+    visibility_key = "wharton_show_profile_header"
+    if visibility_key not in st.session_state:
+        st.session_state[visibility_key] = True
+
+    show_profile = bool(st.session_state[visibility_key])
+    if show_profile:
+        profile_col, hide_col = st.columns([8.5, 1.5])
+        with profile_col:
+            st.markdown(f"""
+                <div class="wharton-profile-strip">
+                  <div class="wharton-profile-avatar">{initial}</div>
+                  <div class="wharton-profile-copy">
+                    <strong>{username}</strong>
+                    <span>{role}</span>
+                  </div>
+                </div>
+            """, unsafe_allow_html=True)
+        with hide_col:
+            if st.button("Hide profile", key="wharton_hide_profile", use_container_width=True):
+                st.session_state[visibility_key] = False
+                st.rerun()
+    else:
+        with st.sidebar:
+            st.caption("PROFILE")
+            if st.button(
+                "Show profile",
+                key="wharton_restore_profile",
+                use_container_width=True,
+            ):
+                st.session_state[visibility_key] = True
+                st.rerun()
+
+    if st.sidebar.button("Sign out", use_container_width=True):
         _logout()
 
 
@@ -7632,6 +10282,262 @@ def _render_custom_quant_context(result: dict[str, Any]) -> None:
             f"Context: latest manually configured Quant Sandbox run ({tickers}; generated {generated}). "
             "This is not automatically the live Portfolio Tracker."
         )
+
+
+def _render_cockpit_navigation(profile: dict[str, Any], visible_labels: list[str]) -> str:
+    """Render compact two-level navigation and return the selected panel."""
+    visible_set = set(visible_labels)
+    available_areas = [
+        area
+        for area, labels in COCKPIT_AREAS.items()
+        if any(label in visible_set for label in labels)
+    ]
+    area_key = "wharton_active_area_v2"
+    panel_key = "wharton_active_panel_v2"
+
+    if st.session_state.get(area_key) not in available_areas:
+        st.session_state[area_key] = available_areas[0]
+
+    area_col, panel_col = st.columns([1.0, 1.55])
+    with area_col:
+        active_area = st.selectbox(
+            "Workspace area",
+            options=available_areas,
+            key=area_key,
+            help="Choose a stage of the team's workflow.",
+        )
+
+    panels = [
+        label
+        for label in COCKPIT_AREAS[active_area]
+        if label in visible_set
+    ]
+    preferred_panel = str(profile.get("primary_module") or "")
+    if st.session_state.get(panel_key) not in panels:
+        st.session_state[panel_key] = (
+            preferred_panel if preferred_panel in panels else panels[0]
+        )
+
+    with panel_col:
+        active_panel = st.selectbox(
+            "Active panel",
+            options=panels,
+            key=panel_key,
+            help="Only the selected panel is loaded, keeping the cockpit focused and fast.",
+        )
+
+    area_description = COCKPIT_AREA_DESCRIPTIONS.get(active_area, "")
+    panel_description = COCKPIT_PANEL_DESCRIPTIONS.get(active_panel, area_description)
+    st.markdown(
+        (
+            '<div class="wharton-nav-panel">'
+            '<div>'
+            f'<div class="wharton-section-kicker">{escape(active_area)}</div>'
+            f'<strong>{escape(active_panel)}</strong>'
+            f'<span>{escape(panel_description)}</span>'
+            '</div>'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+    return active_panel
+
+
+def _render_competition_readiness(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.competition_audit import (
+        append_ai_usage,
+        append_red_team_review,
+        list_ai_usage,
+        list_red_team_reviews,
+    )
+    from src.portfolio_tracker.competition_readiness import (
+        build_competition_readiness,
+        build_pitch_question_bank,
+        generate_competition_brief,
+    )
+    from src.portfolio_tracker.governance_store import (
+        list_catalyst_events,
+        list_decision_reviews,
+        list_research_sources,
+        list_thesis_reviews,
+    )
+
+    data = _load_strategy_workspace_data()
+    with get_connection() as conn:
+        sources = list_research_sources(conn)
+        catalysts = list_catalyst_events(conn)
+        thesis_reviews = list_thesis_reviews(conn)
+        decision_reviews = list_decision_reviews(conn)
+        red_team_reviews = list_red_team_reviews(conn)
+        ai_usage = list_ai_usage(conn)
+        decisions = [dict(row) for row in conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()]
+
+    readiness = build_competition_readiness(
+        mandate=data.get("mandate_record"),
+        strategy=data.get("strategy_record"),
+        theses=data.get("theses", []),
+        sources=sources,
+        catalysts=catalysts,
+        decisions=decisions,
+        thesis_reviews=thesis_reviews,
+        decision_reviews=decision_reviews,
+        red_team_reviews=red_team_reviews,
+        ai_usage=ai_usage,
+    )
+
+    st.markdown("### Competition Readiness")
+    st.caption(
+        "A transparent process score for client fit, security-level evidence, governance, and oral defense. "
+        "Returns do not enter this score. It is a preparation diagnostic, not an official Wharton grade."
+    )
+    top = st.columns(4)
+    top[0].metric("Overall readiness", f"{readiness['overall_score']}/100")
+    top[1].metric("Strategy constitution", f"{readiness['constitution']['score']}/100")
+    top[2].metric("Security dossiers", f"{readiness['dossier_score']}/100")
+    top[3].metric("Governance trail", f"{readiness['governance']['score']}/100")
+    st.progress(float(readiness["overall_score"]) / 100.0, text=str(readiness["status"]))
+
+    gaps_tab, audit_tab, report_tab, quant_tab = st.tabs(
+        ["Priority Gaps", "Red Team & AI Audit", "Report & Pitch", "Quant Standard"]
+    )
+    with gaps_tab:
+        left, right = st.columns(2)
+        with left:
+            st.markdown("#### Strategy constitution")
+            missing = readiness["constitution"]["missing"]
+            if missing:
+                for item in missing:
+                    st.warning(item["label"])
+            else:
+                st.success("All strategy-constitution gates are documented.")
+        with right:
+            st.markdown("#### Governance")
+            missing = readiness["governance"]["missing"]
+            if missing:
+                for item in missing:
+                    st.warning(item["label"])
+            else:
+                st.success("All governance gates are documented.")
+        st.markdown("#### Security dossiers")
+        dossier_rows = [{
+            "Ticker": item["ticker"],
+            "Readiness": item["score"] / 100.0,
+            "Primary sources": item["primary_source_count"],
+            "Catalysts": item["catalyst_count"],
+            "Next gap": item["missing"][0]["label"] if item["missing"] else "Ready",
+        } for item in readiness["dossiers"]]
+        if dossier_rows:
+            st.dataframe(
+                pd.DataFrame(dossier_rows), hide_index=True, use_container_width=True,
+                column_config={"Readiness": st.column_config.ProgressColumn("Readiness", min_value=0.0, max_value=1.0, format="percent")},
+            )
+        else:
+            st.info("Create at least one holding thesis in Strategy & Decisions to start dossier scoring.")
+
+    with audit_tab:
+        st.markdown("#### Independent red-team review")
+        st.caption("Record the strongest case against a thesis before the team commits or doubles down.")
+        with st.form("competition_red_team_form"):
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                red_ticker = st.text_input("Ticker (or use decision ID)").strip().upper()
+            with r2:
+                red_decision_id = st.number_input("Decision ID (optional)", min_value=0, value=0, step=1)
+            with r3:
+                red_verdict = st.selectbox("Verdict", ["Monitor", "Proceed", "Revise", "Reject"])
+            strongest_counterargument = st.text_area("Strongest counterargument", height=85)
+            disconfirming_evidence = st.text_area("Disconfirming evidence to find or already observed", height=75)
+            rejected_alternative = st.text_area("Best rejected alternative and why", height=75)
+            save_red_team = st.form_submit_button("Append Red-Team Review", type="primary", use_container_width=True)
+        if save_red_team:
+            try:
+                with get_connection() as conn:
+                    append_red_team_review(
+                        conn,
+                        ticker=red_ticker or None,
+                        decision_id=int(red_decision_id) or None,
+                        strongest_counterargument=strongest_counterargument,
+                        disconfirming_evidence=disconfirming_evidence,
+                        rejected_alternative=rejected_alternative,
+                        verdict=red_verdict.lower(),
+                        reviewed_by=str(profile["username"]),
+                    )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("Red-team review appended; prior reviews remain unchanged.")
+                st.rerun()
+        if red_team_reviews:
+            st.dataframe(pd.DataFrame(red_team_reviews), hide_index=True, use_container_width=True)
+
+        st.markdown("#### AI usage disclosure")
+        st.caption("Record brainstorming or analytical assistance, what entered the work, and how it was verified.")
+        with st.form("competition_ai_usage_form"):
+            a1, a2 = st.columns(2)
+            with a1:
+                ai_tool = st.text_input("AI tool")
+                ai_purpose = st.text_input("Purpose")
+            with a2:
+                ai_citation = st.text_input("Works Cited / disclosure reference")
+                ai_output_used = st.text_input("What output was used")
+            ai_prompt_summary = st.text_area("Prompt summary", height=75)
+            ai_verification = st.text_area("Human verification and primary evidence checked", height=75)
+            save_ai_usage = st.form_submit_button("Append AI Usage", type="primary", use_container_width=True)
+        if save_ai_usage:
+            try:
+                with get_connection() as conn:
+                    append_ai_usage(
+                        conn, ai_purpose, ai_tool,
+                        prompt_summary=ai_prompt_summary,
+                        output_used=ai_output_used,
+                        verification_notes=ai_verification,
+                        citation=ai_citation,
+                        recorded_by=str(profile["username"]),
+                    )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("AI usage appended to the disclosure trail.")
+                st.rerun()
+        if ai_usage:
+            st.dataframe(pd.DataFrame(ai_usage), hide_index=True, use_container_width=True)
+
+    with report_tab:
+        brief = generate_competition_brief(
+            readiness,
+            mandate=data.get("mandate_record"),
+            strategy=data.get("strategy_record"),
+            sources=sources,
+            ai_usage=ai_usage,
+        )
+        st.markdown("#### Working report brief")
+        st.caption("Use this as an evidence checklist. The team must verify facts and write the final submission in its own voice.")
+        st.download_button(
+            "Download Readiness Brief (.md)",
+            data=brief.encode("utf-8"),
+            file_name="competition_readiness_brief.md",
+            mime="text/markdown",
+            type="primary",
+            use_container_width=True,
+        )
+        with st.expander("Preview brief"):
+            st.markdown(brief)
+        st.markdown("#### Pitch defense question bank")
+        for index, question in enumerate(build_pitch_question_bank(readiness), start=1):
+            st.write(f"{index}. {question}")
+
+    with quant_tab:
+        st.markdown("#### Quantitative evidence standard")
+        st.caption("The analytics library now includes auditable building blocks; each report run still needs frozen inputs and assumptions.")
+        quant_rows = [
+            {"Gate": "Policy benchmark", "Standard": "Explicit components and normalized weights", "Status": "Available"},
+            {"Gate": "Performance attribution", "Standard": "Brinson allocation, selection, interaction with reconciliation", "Status": "Available"},
+            {"Gate": "Out-of-sample process", "Standard": "Point-in-time scores are lagged before returns; costs charged on turnover", "Status": "Available"},
+            {"Gate": "Reproducibility", "Standard": "SHA-256 data snapshot and frozen configuration manifest", "Status": "Available"},
+            {"Gate": "Statistical claims", "Standard": "Confidence intervals, untouched holdout, multiple-testing control", "Status": "Required per research run"},
+        ]
+        st.dataframe(pd.DataFrame(quant_rows), hide_index=True, use_container_width=True)
+        st.info("Do not call a backtest competition-grade until its manifest, point-in-time inputs, costs, holdout, and benchmark comparison are attached.")
 
 
 def render_wharton_cockpit() -> None:
@@ -7657,10 +10563,17 @@ def render_wharton_cockpit() -> None:
 
     tab_renderers = [
         ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
+        ("Competition Readiness", lambda: _render_competition_readiness(profile)),
+        ("Assignment & Rules", lambda: _render_competition_rules(profile)),
         ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
-        ("Quant Engine", lambda: _render_quant_engine(profile)),
+        ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
+        ("Company Analysis", lambda: _render_company_analysis(profile)),
+        ("Bond Analysis", lambda: _render_bond_analysis(profile)),
+        ("Commodity Analysis", lambda: _render_commodity_analysis(profile)),
         ("Stock Screener", _render_stock_screener),
+        ("Quant Engine", lambda: _render_quant_engine(profile)),
         ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),
+        ("Currency Risk & Hedging", lambda: _render_currency_risk(profile)),
         ("Factor Exposure", _with_quant_context(_render_factor_exposure)),
         ("Regime Detection", _with_quant_context(_render_regime_detection)),
         ("Scenario Playground", _with_quant_context(_render_scenario_playground)),
@@ -7672,20 +10585,18 @@ def render_wharton_cockpit() -> None:
         ("Sub-Projects", lambda: _render_subprojects(profile)),
         ("War Room", lambda: _render_chat(profile)),
         ("File Vault", lambda: _render_file_center(profile)),
-        ("Assignment & Rules", lambda: _render_competition_rules(profile)),
-        ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
-        ("Company Analysis", lambda: _render_company_analysis(profile)),
     ]
-    visible_tab_renderers = [
+    visible_panel_renderers = [
         (label, renderer)
         for label, renderer in tab_renderers
         if label not in HIDDEN_COCKPIT_TABS
     ]
-
-    tabs = st.tabs([label for label, _ in visible_tab_renderers])
-    for tab, (_, renderer) in zip(tabs, visible_tab_renderers, strict=False):
-        with tab:
-            renderer()
+    renderer_by_label = dict(visible_panel_renderers)
+    active_panel = _render_cockpit_navigation(
+        profile,
+        [label for label, _ in visible_panel_renderers],
+    )
+    renderer_by_label[active_panel]()
 
 
 def main() -> None:

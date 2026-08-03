@@ -29,6 +29,58 @@ DEFAULT_CATEGORY_WEIGHTS: dict[str, float] = {
 }
 
 
+# Peer selection deliberately uses a small, provider-agnostic set of fields.  The
+# aliases cover both the snake_case records used by our analytics layer and the
+# camelCase names commonly returned by market-data providers.
+_PEER_MARKET_CAP_ALIASES: tuple[str, ...] = (
+    "market_cap",
+    "marketCap",
+    "market_capitalization",
+    "capitalization",
+    "equity_value",
+)
+
+_PEER_PROFITABILITY_FIELDS: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("gross_margin", ("grossMargins", "gross_profit_margin"), 0.20),
+    ("operating_margin", ("operatingMargins", "ebit_margin"), 0.15),
+    ("net_margin", ("profitMargins", "profit_margin", "net_profit_margin"), 0.15),
+    ("return_on_assets", ("returnOnAssets", "roa"), 0.10),
+    ("return_on_equity", ("returnOnEquity", "roe"), 0.25),
+    (
+        "return_on_invested_capital",
+        ("returnOnInvestedCapital", "roic"),
+        0.15,
+    ),
+)
+
+_PEER_GROWTH_FIELDS: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("revenue_growth", ("revenueGrowth", "sales_growth", "salesGrowth"), 0.25),
+    ("earnings_growth", ("earningsGrowth", "eps_growth", "net_income_growth"), 0.35),
+    ("ebitda_growth", ("ebitdaGrowth",), 0.30),
+    (
+        "free_cash_flow_growth",
+        ("freeCashFlowGrowth", "fcf_growth"),
+        0.40,
+    ),
+)
+
+_SECTOR_CANONICAL_ALIASES: dict[str, str] = {
+    "information_technology": "technology",
+    "technology": "technology",
+    "financial_services": "financials",
+    "financial": "financials",
+    "financials": "financials",
+    "health_care": "healthcare",
+    "healthcare": "healthcare",
+    "consumer_cyclical": "consumer_discretionary",
+    "consumer_discretionary": "consumer_discretionary",
+    "consumer_defensive": "consumer_staples",
+    "consumer_staples": "consumer_staples",
+    "basic_materials": "materials",
+    "materials": "materials",
+}
+
+
 @dataclass(frozen=True)
 class PeerMetricSpec:
     """Describe how one company metric should be compared with peers."""
@@ -305,6 +357,393 @@ def _normalise_peers(
             name = str(fallback_name).strip() or f"Peer {len(rows) + 1}"
         rows.append((name, _normalised_metric_mapping(raw_values)))
     return rows
+
+
+def _normalised_company_profile(values: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Flatten common company wrappers into one normalised field mapping.
+
+    The Company Analysis UI stores vendor data below ``info`` while standalone
+    analytics callers frequently pass the info mapping directly.  Supporting both
+    shapes here keeps peer selection independent of either caller.
+    """
+
+    if not isinstance(values, Mapping):
+        return {}
+
+    profile: dict[str, Any] = {}
+    nested_keys = {"info", "metrics", "profile", "fundamentals"}
+    for key, value in values.items():
+        if _normalise_key(key) in nested_keys and isinstance(value, Mapping):
+            profile.update({_normalise_key(item): content for item, content in value.items()})
+    for key, value in values.items():
+        if _normalise_key(key) not in nested_keys:
+            profile[_normalise_key(key)] = value
+    return profile
+
+
+def _first_profile_value(profile: Mapping[str, Any], aliases: Sequence[str]) -> Any:
+    for alias in aliases:
+        value = profile.get(_normalise_key(alias))
+        if value is not None and (not isinstance(value, str) or value.strip()):
+            return value
+    return None
+
+
+def _profile_number(profile: Mapping[str, Any], aliases: Sequence[str]) -> float | None:
+    return _coerce_number(_first_profile_value(profile, aliases))
+
+
+def _taxonomy_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = value.strip()
+    if not cleaned or cleaned.casefold() in {"n/a", "na", "none", "null", "unknown", "-", "--"}:
+        return ""
+    return cleaned
+
+
+def _canonical_sector(value: Any) -> str:
+    normalised = _normalise_key(_taxonomy_text(value))
+    return _SECTOR_CANONICAL_ALIASES.get(normalised, normalised)
+
+
+def _taxonomy_tokens(value: Any) -> set[str]:
+    stop_words = {"and", "the", "of", "other", "miscellaneous", "general", "diversified"}
+    tokens: set[str] = set()
+    for token in _normalise_key(_taxonomy_text(value)).split("_"):
+        if not token or token in stop_words:
+            continue
+        # Minimal plural handling is enough to align common labels such as
+        # "Banks" / "Regional Bank" and "Semiconductors" / "Semiconductor".
+        if token.endswith("ies") and len(token) > 4:
+            token = f"{token[:-3]}y"
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 4:
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _industry_similarity(first: Any, second: Any) -> float:
+    first_key = _normalise_key(_taxonomy_text(first))
+    second_key = _normalise_key(_taxonomy_text(second))
+    if not first_key or not second_key:
+        return 0.0
+    if first_key == second_key:
+        return 1.0
+    first_tokens = _taxonomy_tokens(first)
+    second_tokens = _taxonomy_tokens(second)
+    if not first_tokens or not second_tokens:
+        return 0.0
+    # The overlap coefficient recognises a specific sub-industry as related to a
+    # shorter industry label without allowing unrelated sectors to outrank an
+    # exact sector match.
+    return len(first_tokens & second_tokens) / min(len(first_tokens), len(second_tokens))
+
+
+def _rate_group_similarity(
+    target: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    fields: Sequence[tuple[str, tuple[str, ...], float]],
+) -> tuple[float | None, float, list[str]]:
+    target_values: list[tuple[str, float, tuple[str, ...], float]] = []
+    for key, aliases, scale in fields:
+        value = _profile_number(target, (key, *aliases))
+        if value is not None:
+            target_values.append((key, value, aliases, scale))
+    if not target_values:
+        return None, 0.0, []
+
+    scores: list[float] = []
+    matched: list[str] = []
+    for key, target_value, aliases, scale in target_values:
+        candidate_value = _profile_number(candidate, (key, *aliases))
+        if candidate_value is None:
+            continue
+        difference = abs(candidate_value - target_value)
+        scores.append(100.0 / (1.0 + difference / scale))
+        matched.append(key)
+    coverage = len(scores) / len(target_values)
+    return (sum(scores) / len(scores) if scores else None), coverage, matched
+
+
+def _market_cap_similarity(target: Mapping[str, Any], candidate: Mapping[str, Any]) -> float | None:
+    target_cap = _profile_number(target, _PEER_MARKET_CAP_ALIASES)
+    candidate_cap = _profile_number(candidate, _PEER_MARKET_CAP_ALIASES)
+    if target_cap is None or candidate_cap is None or target_cap <= 0 or candidate_cap <= 0:
+        return None
+    log_distance = abs(math.log10(candidate_cap / target_cap))
+    # A 2x size difference scores about 85, a 10x difference scores 50, and a
+    # 100x difference scores zero.  Log distance makes the measure symmetric.
+    return max(0.0, 100.0 * (1.0 - log_distance / 2.0))
+
+
+def _financial_similarity(
+    target: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    market_cap = _market_cap_similarity(target, candidate)
+    target_market_cap = _profile_number(target, _PEER_MARKET_CAP_ALIASES)
+    profitability, profitability_coverage, profitability_metrics = _rate_group_similarity(
+        target,
+        candidate,
+        _PEER_PROFITABILITY_FIELDS,
+    )
+    growth, growth_coverage, growth_metrics = _rate_group_similarity(
+        target,
+        candidate,
+        _PEER_GROWTH_FIELDS,
+    )
+
+    target_has_market_cap = target_market_cap is not None and target_market_cap > 0
+    target_has_profitability = any(
+        _profile_number(target, (key, *aliases)) is not None
+        for key, aliases, _ in _PEER_PROFITABILITY_FIELDS
+    )
+    target_has_growth = any(
+        _profile_number(target, (key, *aliases)) is not None
+        for key, aliases, _ in _PEER_GROWTH_FIELDS
+    )
+    possible_weight = (
+        (0.50 if target_has_market_cap else 0.0)
+        + (0.30 if target_has_profitability else 0.0)
+        + (0.20 if target_has_growth else 0.0)
+    )
+    observed_weight = 0.0
+    weighted_score = 0.0
+    components = (
+        (market_cap, 0.50, 1.0 if target_has_market_cap else 0.0),
+        (profitability, 0.30, profitability_coverage),
+        (growth, 0.20, growth_coverage),
+    )
+    for score, weight, coverage in components:
+        if score is None or coverage <= 0:
+            continue
+        effective_weight = weight * coverage
+        observed_weight += effective_weight
+        weighted_score += score * effective_weight
+
+    coverage = observed_weight / possible_weight if possible_weight else 0.0
+    raw_score = weighted_score / observed_weight if observed_weight else 50.0
+    adjusted_score = 50.0 + (raw_score - 50.0) * coverage
+    return {
+        "score": max(0.0, min(100.0, adjusted_score)),
+        "coverage": max(0.0, min(1.0, coverage)),
+        "market_cap_similarity": market_cap,
+        "profitability_similarity": profitability,
+        "growth_similarity": growth,
+        "matched_profitability_metrics": profitability_metrics,
+        "matched_growth_metrics": growth_metrics,
+    }
+
+
+def _peer_classification(
+    target_sector: str,
+    target_industry: str,
+    candidate_sector: str,
+    candidate_industry: str,
+) -> tuple[str, int, float]:
+    industry_similarity = _industry_similarity(target_industry, candidate_industry)
+    target_industry_tokens = _taxonomy_tokens(target_industry)
+    candidate_industry_tokens = _taxonomy_tokens(candidate_industry)
+    same_industry = (
+        bool(target_industry and candidate_industry)
+        and (
+            _normalise_key(target_industry) == _normalise_key(candidate_industry)
+            or (
+                bool(target_industry_tokens)
+                and target_industry_tokens == candidate_industry_tokens
+            )
+        )
+    )
+    if same_industry:
+        return "same_industry", 0, industry_similarity
+
+    target_sector_key = _canonical_sector(target_sector)
+    candidate_sector_key = _canonical_sector(candidate_sector)
+    if target_sector_key and candidate_sector_key and target_sector_key == candidate_sector_key:
+        return "same_sector", 1, industry_similarity
+
+    sectors_conflict = (
+        bool(target_sector_key)
+        and bool(candidate_sector_key)
+        and target_sector_key != candidate_sector_key
+    )
+    if industry_similarity >= 0.5 and not sectors_conflict:
+        return "related_industry", 2, industry_similarity
+    if not target_sector and not target_industry:
+        return "metrics_only", 3, industry_similarity
+    if not candidate_sector and not candidate_industry:
+        return "classification_missing", 4, industry_similarity
+    return "different_sector", 5, industry_similarity
+
+
+def select_similar_peers(
+    target_company: Mapping[str, Any] | None,
+    candidate_universe: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None,
+    *,
+    target_ticker: str | None = None,
+    max_peers: int | None = 8,
+    include_out_of_sector: bool = False,
+) -> list[dict[str, Any]]:
+    """Select and rank relevant peer companies without fetching external data.
+
+    Classification is intentionally hierarchical: an exact industry match always
+    ranks before a same-sector match, which always ranks before a textually related
+    industry.  Market capitalisation (50%), profitability (30%), and growth (20%)
+    rank candidates *within* those tiers.  Missing financial fields are not imputed;
+    their score is shrunk toward neutral and ``financial_coverage_pct`` makes that
+    uncertainty visible.
+
+    By default, candidates outside the target's industry/sector are excluded.  If
+    the target has no classification, the function falls back to financial
+    similarity.  Both direct provider ``info`` mappings and ``{"info": ...}``
+    wrappers are accepted.
+    """
+
+    if max_peers is not None and (
+        isinstance(max_peers, bool) or not isinstance(max_peers, int) or max_peers < 0
+    ):
+        raise ValueError("max_peers must be a non-negative integer or None.")
+    if max_peers == 0 or not isinstance(target_company, Mapping):
+        return []
+
+    target = _normalised_company_profile(target_company)
+    target_identifier = str(
+        target_ticker
+        or _first_profile_value(target, ("ticker", "symbol"))
+        or ""
+    ).strip().upper()
+    target_name = str(
+        _first_profile_value(target, ("short_name", "long_name", "company_name", "name"))
+        or ""
+    ).strip()
+    target_sector = _taxonomy_text(
+        _first_profile_value(target, ("sector", "sector_name", "gics_sector", "sector_key", "sectorDisp"))
+    )
+    target_industry = _taxonomy_text(
+        _first_profile_value(
+            target,
+            ("industry", "industry_name", "gics_industry", "gics_sub_industry", "industry_key", "industryDisp"),
+        )
+    )
+
+    has_target_financials = any(
+        _profile_number(target, aliases) is not None
+        for aliases in (
+            _PEER_MARKET_CAP_ALIASES,
+            *((key, *aliases) for key, aliases, _ in _PEER_PROFITABILITY_FIELDS),
+            *((key, *aliases) for key, aliases, _ in _PEER_GROWTH_FIELDS),
+        )
+    )
+    if not target_sector and not target_industry and not has_target_financials:
+        return []
+
+    if isinstance(candidate_universe, Mapping):
+        iterator: Sequence[tuple[Any, Any]] = list(candidate_universe.items())
+        mapping_input = True
+    elif isinstance(candidate_universe, Sequence) and not isinstance(candidate_universe, (str, bytes)):
+        iterator = list(enumerate(candidate_universe, start=1))
+        mapping_input = False
+    else:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    target_has_classification = bool(target_sector or target_industry)
+    for fallback_identifier, raw_candidate in iterator:
+        if not isinstance(raw_candidate, Mapping) or raw_candidate is target_company:
+            continue
+        candidate = _normalised_company_profile(raw_candidate)
+        supplied_identifier = _first_profile_value(candidate, ("ticker", "symbol"))
+        identifier = str(
+            fallback_identifier if mapping_input else supplied_identifier or ""
+        ).strip().upper()
+        if not identifier:
+            continue
+        candidate_name = str(
+            _first_profile_value(candidate, ("short_name", "long_name", "company_name", "name"))
+            or identifier
+        ).strip()
+        if target_identifier and identifier.casefold() == target_identifier.casefold():
+            continue
+        if (
+            not target_identifier
+            and target_name
+            and candidate_name.casefold() == target_name.casefold()
+        ):
+            continue
+
+        candidate_sector = _taxonomy_text(
+            _first_profile_value(candidate, ("sector", "sector_name", "gics_sector", "sector_key", "sectorDisp"))
+        )
+        candidate_industry = _taxonomy_text(
+            _first_profile_value(
+                candidate,
+                ("industry", "industry_name", "gics_industry", "gics_sub_industry", "industry_key", "industryDisp"),
+            )
+        )
+        classification, classification_rank, industry_similarity = _peer_classification(
+            target_sector,
+            target_industry,
+            candidate_sector,
+            candidate_industry,
+        )
+        if (
+            target_has_classification
+            and not include_out_of_sector
+            and classification_rank > 2
+        ):
+            continue
+
+        financial = _financial_similarity(target, candidate)
+        band_base, band_width = {
+            "same_industry": (80.0, 20.0),
+            "same_sector": (55.0, 20.0),
+            "related_industry": (35.0, 15.0),
+            "metrics_only": (15.0, 15.0),
+            "classification_missing": (10.0, 10.0),
+            "different_sector": (0.0, 10.0),
+        }[classification]
+        similarity_score = band_base + band_width * float(financial["score"]) / 100.0
+        rows.append(
+            {
+                "ticker": identifier,
+                "name": candidate_name,
+                "sector": candidate_sector or None,
+                "industry": candidate_industry or None,
+                "classification_match": classification,
+                "score": round(similarity_score, 2),
+                "financial_similarity": round(float(financial["score"]), 2),
+                "financial_coverage_pct": round(float(financial["coverage"]) * 100.0, 1),
+                "market_cap_similarity": _round_optional(financial["market_cap_similarity"], 2),
+                "profitability_similarity": _round_optional(financial["profitability_similarity"], 2),
+                "growth_similarity": _round_optional(financial["growth_similarity"], 2),
+                "industry_similarity": round(industry_similarity * 100.0, 1),
+                "matched_profitability_metrics": financial["matched_profitability_metrics"],
+                "matched_growth_metrics": financial["matched_growth_metrics"],
+                "_classification_rank": classification_rank,
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            int(row["_classification_rank"]),
+            -float(row["financial_similarity"]),
+            -float(row["financial_coverage_pct"]),
+            str(row["ticker"]).casefold(),
+        )
+    )
+    deduplicated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        identifier_key = str(row["ticker"]).casefold()
+        if identifier_key in seen:
+            continue
+        seen.add(identifier_key)
+        row.pop("_classification_rank", None)
+        deduplicated.append(row)
+        if max_peers is not None and len(deduplicated) >= max_peers:
+            break
+    return deduplicated
 
 
 def _quantile(values: Sequence[float], probability: float) -> float:
@@ -881,6 +1320,7 @@ __all__ = [
     "analyze_peer_comparison",
     "build_industry_analysis",
     "compare_company_to_peers",
+    "select_similar_peers",
     "synthesize_porter_five_forces",
     "synthesize_swot",
 ]

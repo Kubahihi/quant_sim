@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
+from .commodity_analysis import COMMODITY_SYMBOLS as RESEARCH_COMMODITY_SYMBOLS
 from .portfolio_metrics import calculate_portfolio_core_metrics
 
 
@@ -25,7 +26,7 @@ BOND_SYMBOLS = {
     "IEI",
 }
 GOLD_SYMBOLS = {"GLD", "IAU", "GLDM", "PHYS", "SGOL", "GOLD"}
-COMMODITY_SYMBOLS = {"DBC", "GSG", "PDBC", "USO", "DBA", "XLE", "XOP"}
+COMMODITY_SYMBOLS = set(RESEARCH_COMMODITY_SYMBOLS) | {"XLE", "XOP"}
 CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "MSTR", "COIN", "IBIT", "FBTC", "ARKB", "BITB"}
 TECH_TICKERS = {
     "AAPL",
@@ -479,8 +480,17 @@ SCENARIO_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def classify_asset_role(symbol: str) -> str:
+def classify_asset_role(symbol: str, security_type: str | None = None) -> str:
     sym = str(symbol or "").upper().strip()
+    type_key = str(security_type or "").strip().casefold()
+    if type_key in {"bond", "bonds", "fixed income", "fixed income security"}:
+        return "bond"
+    if type_key in {"commodity", "commodities", "commodity etf", "commodity future", "futures"}:
+        return "commodity"
+    if type_key in {"gold", "precious metal", "precious metals"}:
+        return "gold"
+    if type_key in {"cash", "cash equivalent", "money market"}:
+        return "cash"
     if sym in CASH_SYMBOLS:
         return "cash"
     if sym in BOND_SYMBOLS:
@@ -508,16 +518,34 @@ def list_scenario_presets() -> List[Dict[str, Any]]:
     ]
 
 
-def build_role_exposure_table(tickers: List[str], weights: np.ndarray) -> pd.DataFrame:
+def _security_type_for(
+    security_types: Mapping[str, str] | Sequence[str] | None,
+    ticker: str,
+    index: int,
+) -> str | None:
+    if isinstance(security_types, Mapping):
+        return security_types.get(ticker) or security_types.get(ticker.upper())
+    if isinstance(security_types, Sequence) and not isinstance(security_types, (str, bytes)):
+        return str(security_types[index]) if index < len(security_types) else None
+    return None
+
+
+def build_role_exposure_table(
+    tickers: List[str],
+    weights: np.ndarray,
+    security_types: Mapping[str, str] | Sequence[str] | None = None,
+) -> pd.DataFrame:
     weight_array = np.asarray(weights, dtype=float)
     if weight_array.size == 0:
         weight_array = np.zeros(len(tickers), dtype=float)
     rows = []
-    for ticker, weight in zip(tickers, weight_array, strict=False):
+    for index, (ticker, weight) in enumerate(zip(tickers, weight_array, strict=False)):
         rows.append(
             {
                 "Ticker": str(ticker),
-                "Role": classify_asset_role(str(ticker)),
+                "Role": classify_asset_role(
+                    str(ticker), _security_type_for(security_types, str(ticker), index)
+                ),
                 "Weight": float(weight),
                 "Tech Bucket": bool(str(ticker).upper() in TECH_TICKERS),
             }
@@ -600,6 +628,7 @@ def run_scenario_preset(
     severity: float = 1.0,
     initial_value: float = 100_000.0,
     horizon_override: int | None = None,
+    security_types: Mapping[str, str] | Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     if preset_name not in SCENARIO_PRESETS:
         raise KeyError(f"Unknown scenario preset: {preset_name}")
@@ -614,7 +643,10 @@ def run_scenario_preset(
         raise ValueError("Scenario engine requires asset return columns.")
 
     weight_array = _normalized_weights(weights, returns_df.shape[1])
-    roles = [classify_asset_role(ticker) for ticker in tickers_list]
+    roles = [
+        classify_asset_role(ticker, _security_type_for(security_types, ticker, index))
+        for index, ticker in enumerate(tickers_list)
+    ]
     group_map = _group_indices(tickers_list)
     phase_rows: List[Dict[str, Any]] = []
     shock_rows: List[Dict[str, Any]] = []
@@ -714,7 +746,7 @@ def run_scenario_preset(
         "asset_impact_proxy": impact_series.sort_values(),
         "baseline_stats": baseline_stats,
         "stressed_stats": stressed_stats,
-        "role_exposures": build_role_exposure_table(tickers_list, weight_array),
+        "role_exposures": build_role_exposure_table(tickers_list, weight_array, security_types),
         "action_cue": _action_cue(
             total_return=float(stressed_stats["total_return"]),
             max_drawdown=float(stressed_stats["max_drawdown"]),
@@ -730,6 +762,7 @@ def build_scenario_suite(
     severity: float = 1.0,
     initial_value: float = 100_000.0,
     horizon_override: int | None = None,
+    security_types: Mapping[str, str] | Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     scenarios: Dict[str, Dict[str, Any]] = {}
     rows: List[Dict[str, Any]] = []
@@ -743,6 +776,7 @@ def build_scenario_suite(
             severity=severity,
             initial_value=initial_value,
             horizon_override=horizon_override,
+            security_types=security_types,
         )
         scenarios[preset_name] = scenario
 
