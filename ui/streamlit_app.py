@@ -276,6 +276,8 @@ with st.sidebar:
                 --qp-muted: #64748b !important;
                 --qp-soft: #f1f5f9 !important;
                 --qp-navy: #0f172a !important;
+                --qp-accent: #167d78 !important;
+                --qp-accent-text: #167d78 !important;
                 --qp-accent-soft: #eaf7f5 !important;
                 --qp-shadow: 0 10px 30px rgba(15, 23, 42, 0.05) !important;
             }
