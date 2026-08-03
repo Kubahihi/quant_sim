@@ -309,7 +309,9 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
     area_selector.set_value("Research").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == ["Company Analysis", "Stock Screener"]
+    assert panel_selector.options == [
+        "Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"
+    ]
     assert any("Company Analysis" in item.value for item in at.markdown)
 
     region_view = next(item for item in at.radio if item.label == "Regional analysis view")
@@ -333,6 +335,21 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert len(at.exception) == 0
     assert any("Regional Macro Drill-down" in item.value for item in at.markdown)
     assert any(item.label == "Macro resilience (2024)" for item in at.metric)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Risk & Quant").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == [
+        "Quant Engine",
+        "Risk Cockpit",
+        "Currency Risk & Hedging",
+        "Factor Exposure",
+        "Regime Detection",
+    ]
+    panel_selector.set_value("Currency Risk & Hedging").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Currency Risk & Hedging" in item.value for item in at.markdown)
+    assert any(item.label == "Reporting currency" for item in at.selectbox)
 
 
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):

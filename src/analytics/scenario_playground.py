@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from .commodity_analysis import COMMODITY_SYMBOLS as RESEARCH_COMMODITY_SYMBOLS
 from .portfolio_metrics import calculate_portfolio_core_metrics
 
 
@@ -25,7 +26,7 @@ BOND_SYMBOLS = {
     "IEI",
 }
 GOLD_SYMBOLS = {"GLD", "IAU", "GLDM", "PHYS", "SGOL", "GOLD"}
-COMMODITY_SYMBOLS = {"DBC", "GSG", "PDBC", "USO", "DBA", "XLE", "XOP"}
+COMMODITY_SYMBOLS = set(RESEARCH_COMMODITY_SYMBOLS) | {"XLE", "XOP"}
 CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "MSTR", "COIN", "IBIT", "FBTC", "ARKB", "BITB"}
 TECH_TICKERS = {
     "AAPL",
@@ -484,6 +485,10 @@ def classify_asset_role(symbol: str, security_type: str | None = None) -> str:
     type_key = str(security_type or "").strip().casefold()
     if type_key in {"bond", "bonds", "fixed income", "fixed income security"}:
         return "bond"
+    if type_key in {"commodity", "commodities", "commodity etf", "commodity future", "futures"}:
+        return "commodity"
+    if type_key in {"gold", "precious metal", "precious metals"}:
+        return "gold"
     if type_key in {"cash", "cash equivalent", "money market"}:
         return "cash"
     if sym in CASH_SYMBOLS:

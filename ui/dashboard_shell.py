@@ -237,6 +237,8 @@ def inject_dashboard_styles() -> None:
 
         .stButton > button,
         .stDownloadButton > button,
+        .stFormSubmitButton > button,
+        .stLinkButton > a,
         button[kind="secondary"] {
             min-height: 2.65rem;
             border-radius: 10px;
@@ -247,18 +249,58 @@ def inject_dashboard_styles() -> None:
             transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
         }
 
+        /* Streamlit renders the label in nested text elements. Keep those from
+           inheriting the global muted paragraph colour. */
+        .stButton > button :is(p, span),
+        .stDownloadButton > button :is(p, span),
+        .stFormSubmitButton > button :is(p, span),
+        .stLinkButton > a :is(p, span) {
+            color: inherit !important;
+        }
+
+        .stButton > button svg,
+        .stDownloadButton > button svg,
+        .stFormSubmitButton > button svg,
+        .stLinkButton > a svg {
+            color: inherit !important;
+            fill: currentColor;
+        }
+
         .stButton > button:hover,
-        .stDownloadButton > button:hover {
+        .stDownloadButton > button:hover,
+        .stFormSubmitButton > button:hover,
+        .stLinkButton > a:hover {
             border-color: var(--qp-accent);
+            color: #0f625e !important;
+            background: var(--qp-accent-soft);
             transform: translateY(-1px);
             box-shadow: 0 7px 16px rgba(22, 125, 120, 0.12);
         }
 
         .stButton > button[kind="primary"],
+        .stFormSubmitButton > button[kind="primaryFormSubmit"],
         button[kind="primaryFormSubmit"] {
             color: #ffffff !important;
             background: var(--qp-accent) !important;
             border-color: var(--qp-accent) !important;
+            box-shadow: 0 5px 14px rgba(22, 125, 120, 0.2);
+        }
+
+        .stButton > button[kind="primary"]:hover,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover,
+        button[kind="primaryFormSubmit"]:hover {
+            color: #ffffff !important;
+            background: #106b67;
+            border-color: #106b67;
+            box-shadow: 0 8px 18px rgba(16, 107, 103, 0.26);
+        }
+
+        .stButton > button:focus-visible,
+        .stDownloadButton > button:focus-visible,
+        .stFormSubmitButton > button:focus-visible,
+        .stLinkButton > a:focus-visible {
+            outline: 3px solid rgba(22, 125, 120, 0.3);
+            outline-offset: 2px;
         }
 
         .stTextInput > div > div > div, 

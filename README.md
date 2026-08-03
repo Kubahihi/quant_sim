@@ -10,9 +10,14 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - export vsech vysledku do vice-strankoveho PDF + CSV + JSON
 - portfolio tracker pro dluhopisova ETF i jednotlive dluhopisy vcetne kuponu, FX, YTM, durace, DV01 a cash-flow kalendare
 - samostatny panel Research -> Bond Analysis pro analyzu navrhovane emise, YTW/call risk, benchmark spread, kreditni ocekavanou ztratu, kombinovane rate/spread scenare a porovnani s ulozenym dluhopisovym portfoliem
+- samostatny panel Research -> Commodity Analysis pro ETF a futures proxy, s momentum/risk prehledem, korelacemi a transparentnim stresem pozice
+- panel Risk & Quant -> Currency Risk & Hedging pro vice-menove expozice, FX VaR/expected shortfall, stresy a nakladove optimalizovane forwardove zajisteni
 - Wharton bond case s kontrolou zpusobilosti ve WInS, vazbou na cil klienta, position-sizing limitem, pitch-defense otazkami, relative-value shortlistem a exportem pracovniho investicniho memo
+- rucni jednotlive dluhopisy primo v Quant Enginu: smluvni parametry, YTW/durace/DV01 a transparentni ETF proxy pro kovarianci, optimalizaci, Monte Carlo a stresove scenare
 
 Konvence oceneni a prace s dluhopisovymi daty jsou popsane v [docs/FIXED_INCOME.md](docs/FIXED_INCOME.md).
+Metodika komoditnich proxy, stresu pozice a jejich omezeni je popsana v [docs/COMMODITIES.md](docs/COMMODITIES.md).
+Metodika menovych expozic, rizikovych metrik, stresu a optimalizace hedge je popsana v [docs/CURRENCY_RISK.md](docs/CURRENCY_RISK.md).
 
 ## 1) Jak projekt spustit lokalne
 

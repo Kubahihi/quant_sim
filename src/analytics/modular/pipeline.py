@@ -46,8 +46,9 @@ def run_quant_stack(
     start_dt = datetime.combine(start_date, datetime.min.time()) if hasattr(start_date, "year") else utc_now_naive
     end_dt = datetime.combine(end_date, datetime.min.time()) if hasattr(end_date, "year") else utc_now_naive
 
+    news_tickers = config.get("news_tickers", config.get("tickers", []))
     news_context = {
-        "tickers": config.get("tickers", []),
+        "tickers": news_tickers,
         "sector_keywords": config.get("sector_keywords", []),
         "news_api_key": config.get("news_api_key", ""),
         "regime_label": "risk_on" if pre_risk > 0.2 else "risk_off" if pre_risk < -0.2 else "neutral",
@@ -55,7 +56,7 @@ def run_quant_stack(
         "active_signals": [name for name, signal in preliminary_signals.items() if signal.available],
     }
     news = build_news_analysis(
-        tickers=config.get("tickers", []),
+        tickers=news_tickers,
         start_date=start_dt,
         end_date=end_dt,
         context=news_context,

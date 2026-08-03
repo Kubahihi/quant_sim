@@ -98,6 +98,8 @@ def test_scenario_suite_builds_extreme_playground_outputs():
 def test_asset_role_classification_and_exposure_table():
     assert classify_asset_role("BND") == "bond"
     assert classify_asset_role("GLD") == "gold"
+    assert classify_asset_role("CL=F") == "commodity"
+    assert classify_asset_role("CUSTOM-COMMODITY", "Commodity") == "commodity"
     assert classify_asset_role("BTC") == "crypto"
     assert classify_asset_role("AAPL") == "equity"
     assert classify_asset_role("CUSTOM-ISIN", "Bond") == "bond"

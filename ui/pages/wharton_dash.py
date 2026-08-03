@@ -78,14 +78,22 @@ QUANT_ERROR_KEY = "wharton_quant_error"
 QUANT_STACK_RESULT_KEY = "wharton_quant_stack_result"
 COMPANY_ANALYSIS_KEY = "wharton_company_analysis_v1"
 BOND_ANALYSIS_KEY = "wharton_bond_analysis_v1"
+COMMODITY_ANALYSIS_KEY = "wharton_commodity_analysis_v1"
+CURRENCY_RISK_KEY = "wharton_currency_risk_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
 HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
 
 COCKPIT_AREAS = {
     "Home": ("Overview & Tasks", "Competition Readiness", "Assignment & Rules"),
     "Portfolio": ("Strategy & Decisions", "Portfolio Tracker"),
-    "Research": ("Company Analysis", "Bond Analysis", "Stock Screener"),
-    "Risk & Quant": ("Quant Engine", "Risk Cockpit", "Factor Exposure", "Regime Detection"),
+    "Research": ("Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"),
+    "Risk & Quant": (
+        "Quant Engine",
+        "Risk Cockpit",
+        "Currency Risk & Hedging",
+        "Factor Exposure",
+        "Regime Detection",
+    ),
     "Scenarios": (
         "Scenario Playground",
         "Efficient Frontier",
@@ -113,9 +121,11 @@ COCKPIT_PANEL_DESCRIPTIONS = {
     "Portfolio Tracker": "Track positions, performance, ownership, and reconciliation.",
     "Company Analysis": "Review company evidence, regions, financials, management, moat, and valuation.",
     "Bond Analysis": "Value a bond or bond ETF and inspect yield, cash flows, duration, and rate sensitivity.",
+    "Commodity Analysis": "Compare commodity proxies, inspect diversification, and stress a proposed position.",
     "Stock Screener": "Filter and rank the investable universe before deeper research.",
     "Quant Engine": "Configure and run the shared analytical pipeline.",
     "Risk Cockpit": "Inspect portfolio-level risk signals and concentrations.",
+    "Currency Risk & Hedging": "Measure FX exposure, stress exchange rates, and optimize hedge ratios after costs.",
     "Factor Exposure": "Understand systematic drivers behind portfolio behavior.",
     "Regime Detection": "Review the current market-state classification and evidence.",
     "Scenario Playground": "Apply explicit shocks and compare portfolio responses.",
@@ -1605,14 +1615,14 @@ def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date)
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
 
-def _parse_tickers(raw: str) -> list[str]:
+def _parse_tickers(raw: str, *, allow_empty: bool = False) -> list[str]:
     tickers, seen = [], set()
     for chunk in raw.replace(",", "\n").splitlines():
         t = chunk.strip().upper()
         if t and t not in seen:
             tickers.append(t)
             seen.add(t)
-    if not tickers: raise ValueError("Enter at least one ticker.")
+    if not tickers and not allow_empty: raise ValueError("Enter at least one ticker.")
     return tickers
 
 
@@ -1656,21 +1666,47 @@ def _compute_quant_run(
     risk_free_rate, current_value, max_weight, turnover_limit,
     transaction_cost_bps, risk_aversion, simulation_days, n_simulations, random_seed,
     jump_intensity, jump_mean, jump_volatility,
+    manual_bonds=None,
 ) -> dict[str, Any]:
     modules = _load_quant_modules()
     analytics, optimization, simulation = modules["analytics"], modules["optimization"], modules["simulation"]
 
-    prices = _fetch_close_prices_cached(tuple(tickers), start_date, end_date)
+    from src.portfolio_tracker.manual_bond_quant import (
+        build_manual_bond_metrics_table,
+        build_manual_bond_proxy_returns,
+        combine_hybrid_weights,
+    )
+
+    manual_bonds = [dict(item) for item in (manual_bonds or [])]
+    proxy_tickers = sorted({
+        str(item.get("proxy_ticker") or "").strip().upper()
+        for item in manual_bonds if str(item.get("proxy_ticker") or "").strip()
+    })
+    data_symbols = list(dict.fromkeys([*tickers, *proxy_tickers]))
+    if not data_symbols:
+        raise ValueError("Enter at least one market ticker or manual individual bond.")
+    prices = _fetch_close_prices_cached(tuple(data_symbols), start_date, end_date)
     if prices.empty: raise ValueError("No price data returned.")
     prices = prices.sort_index().ffill().dropna(how="all")
-    available = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
-    prices = prices[available].dropna(how="any")
+    available_data = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
+    prices = prices[available_data].dropna(how="any")
     if prices.empty: raise ValueError("Not enough aligned data.")
 
-    returns = prices.pct_change().dropna(how="any")
+    data_returns = prices.pct_change().dropna(how="any")
+    available_market = [ticker for ticker in tickers if ticker in data_returns.columns]
+    return_parts = [data_returns[available_market]] if available_market else []
+    if manual_bonds:
+        return_parts.append(
+            build_manual_bond_proxy_returns(
+                manual_bonds, data_returns, as_of=end_date,
+            )
+        )
+    returns = pd.concat(return_parts, axis=1, join="inner").dropna(how="any") if return_parts else pd.DataFrame()
     if returns.empty: raise ValueError("Return series is empty.")
 
-    aligned_w = _align_weights(tickers, weights, list(returns.columns))
+    aligned_w = combine_hybrid_weights(
+        tickers, weights, manual_bonds, list(returns.columns),
+    )
     portfolio_returns = analytics.calculate_portfolio_daily_returns(returns, aligned_w)
     core_metrics = analytics.calculate_portfolio_core_metrics(portfolio_returns, risk_free_rate)
     concentration = analytics.calculate_concentration_metrics(aligned_w)
@@ -1680,8 +1716,8 @@ def _compute_quant_run(
     benchmark_symbol = benchmark_ticker.strip().upper()
     benchmark_returns = pd.Series(dtype=float)
     if benchmark_symbol:
-        if benchmark_symbol in returns.columns:
-            benchmark_returns = returns[benchmark_symbol]
+        if benchmark_symbol in data_returns.columns:
+            benchmark_returns = data_returns[benchmark_symbol]
         else:
             bp = _fetch_close_prices_cached((benchmark_symbol,), start_date, end_date)
             if benchmark_symbol in bp.columns:
@@ -1695,11 +1731,12 @@ def _compute_quant_run(
     )
     return_contribution = analytics.calculate_return_contribution(returns, aligned_w)
     risk_contribution = analytics.calculate_risk_contribution(returns, aligned_w)
-    min_variance = optimization.optimize_minimum_variance(returns, max_weight=max_weight)
-    max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=max_weight)
+    effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
+    min_variance = optimization.optimize_minimum_variance(returns, max_weight=effective_max_weight)
+    max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
     cost_aware = optimization.optimize_cost_aware_rebalance(
         returns=returns, current_weights=aligned_w, risk_free_rate=risk_free_rate,
-        max_weight=max_weight, turnover_limit=turnover_limit,
+        max_weight=effective_max_weight, turnover_limit=turnover_limit,
         transaction_cost_bps=transaction_cost_bps, risk_aversion=risk_aversion,
     )
     portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
@@ -1720,12 +1757,33 @@ def _compute_quant_run(
         jump_intensity=jump_intensity, jump_mean=jump_mean, jump_volatility=jump_volatility,
     )
 
+    from src.analytics.scenario_playground import classify_asset_role
+
+    role_security_labels = {
+        "bond": "Bond",
+        "commodity": "Commodity",
+        "gold": "Gold",
+        "crypto": "Crypto",
+        "cash": "Cash",
+        "equity": "Market",
+    }
+    security_types = {
+        column: (
+            "Bond"
+            if str(column).startswith("BOND:")
+            else role_security_labels[classify_asset_role(str(column))]
+        )
+        for column in returns.columns
+    }
+
     # Run full modular quant stack (models, signals, news, backtest, history)
     quant_stack_result = None
     try:
         pipeline = _load_modular_pipeline()
         config = {
             "tickers": list(returns.columns),
+            "news_tickers": available_market,
+            "security_types": security_types,
             "weights": aligned_w.tolist(),
             "start_date": start_date,
             "end_date": end_date,
@@ -1768,10 +1826,24 @@ def _compute_quant_run(
         "avg_correlation": avg_corr,
         "observations": int(returns.shape[0]),
     }
+    manual_bond_metrics = build_manual_bond_metrics_table(manual_bonds, as_of=end_date)
+    if not manual_bond_metrics.empty:
+        manual_bond_metrics["AllocatedMarketValueUSD"] = (
+            pd.to_numeric(manual_bond_metrics["Weight"], errors="coerce").fillna(0.0)
+            * float(current_value)
+        )
+        manual_bond_metrics["DV01USD"] = (
+            manual_bond_metrics["AllocatedMarketValueUSD"]
+            * pd.to_numeric(manual_bond_metrics["ModifiedDuration"], errors="coerce")
+            * 0.0001
+        )
     return {
         "generated_at": _now_iso(),
         "tickers": list(returns.columns),
         "requested_tickers": tickers,
+        "manual_bonds": manual_bonds,
+        "manual_bond_metrics": manual_bond_metrics,
+        "security_types": security_types,
         "weights": aligned_w,
         "benchmark_ticker": benchmark_symbol,
         "prices": prices,
@@ -1795,10 +1867,13 @@ def _compute_quant_run(
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
             "risk_free_rate": risk_free_rate, "current_value": current_value,
-            "max_weight": max_weight, "turnover_limit": turnover_limit,
+            "max_weight": effective_max_weight, "requested_max_weight": max_weight,
+            "turnover_limit": turnover_limit,
             "transaction_cost_bps": transaction_cost_bps, "risk_aversion": risk_aversion,
             "simulation_days": simulation_days, "n_simulations": n_simulations,
             "random_seed": random_seed,
+            "manual_bond_count": len(manual_bonds),
+            "manual_bond_proxy_method": "Proxy returns rescaled to entered annual volatility and shifted to yield to worst less entered expected credit loss",
         },
     }
 
@@ -1811,8 +1886,18 @@ def _render_quant_configuration() -> None:
         with st.form("wharton_quant_config_form"):
             col_in, col_risk = st.columns([1, 1], gap="large")
             with col_in:
-                tickers_text = st.text_area("Portfolio Tickers", value="\n".join(DEFAULT_QUANT_TICKERS), height=145)
-                weights_text = st.text_area("Weights (leave empty = equal)", value="", height=115)
+                tickers_text = st.text_area(
+                    "Market Tickers",
+                    value="\n".join(DEFAULT_QUANT_TICKERS),
+                    height=145,
+                    help="Stocks and traded ETFs. Leave empty for a manual-bond-only portfolio.",
+                )
+                weights_text = st.text_area(
+                    "Market Sleeve Weights (leave empty = equal)",
+                    value="",
+                    height=115,
+                    help="Relative weights inside the portion left after explicit manual-bond weights.",
+                )
                 benchmark_ticker = st.text_input("Benchmark Ticker", value="SPY").strip().upper()
                 current_value = st.number_input("Portfolio Value ($)", min_value=1_000.0, value=100_000.0, step=5_000.0)
             with col_risk:
@@ -1830,14 +1915,58 @@ def _render_quant_configuration() -> None:
                 jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
                 jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
                 jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
+            st.markdown("#### Manual Individual Bonds")
+            st.caption(
+                "Add bonds without exchange tickers. Their explicit weights reduce the market sleeve. "
+                "The selected traded bond ETF proxy supplies covariance; YTW and the entered annual volatility set the proxy series' mean and risk."
+            )
+            manual_bond_rows = st.data_editor(
+                pd.DataFrame([{
+                    "Identifier": "",
+                    "Weight %": 10.0,
+                    "Clean Price": 100.0,
+                    "Face Value": 1000.0,
+                    "Quantity": 1.0,
+                    "Coupon %": 5.0,
+                    "Maturity": date.today() + timedelta(days=365 * 5),
+                    "Coupon Frequency": 2,
+                    "YTM %": 5.0,
+                    "Modified Duration": 4.0,
+                    "Convexity": 20.0,
+                    "Annual Volatility %": 5.0,
+                    "Proxy Ticker": "IEF",
+                    "Issuer": "",
+                    "Credit Rating": "",
+                    "Callable": False,
+                    "First Call Date": None,
+                    "Call Price": 100.0,
+                    "Default Probability %": 0.0,
+                    "Recovery Rate %": 40.0,
+                }]),
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key="wharton_quant_manual_bonds",
+                column_config={
+                    "Maturity": st.column_config.DateColumn("Maturity", format="YYYY-MM-DD"),
+                    "Weight %": st.column_config.NumberColumn("Weight %", min_value=0.0, max_value=100.0, format="%.2f"),
+                    "Coupon Frequency": st.column_config.SelectboxColumn("Coupon Frequency", options=[1, 2, 4, 12]),
+                    "Proxy Ticker": st.column_config.TextColumn("Proxy Ticker", help="Tradable bond ETF used only as a historical covariance proxy."),
+                    "Callable": st.column_config.CheckboxColumn("Callable"),
+                    "First Call Date": st.column_config.DateColumn("First Call Date", format="YYYY-MM-DD"),
+                },
+            )
             run_clicked = st.form_submit_button(" Run Full Quant Engine", type="primary")
 
     if run_clicked:
         st.session_state.pop(QUANT_ERROR_KEY, None)
         try:
-            tickers = _parse_tickers(tickers_text)
-            weights = _parse_weights(weights_text, tickers)
             if start_date >= end_date: raise ValueError("Start Date must be before End Date.")
+            from src.portfolio_tracker.manual_bond_quant import parse_manual_bond_rows
+
+            manual_bonds = parse_manual_bond_rows(manual_bond_rows, as_of=end_date)
+            tickers = _parse_tickers(tickers_text, allow_empty=bool(manual_bonds))
+            weights = _parse_weights(weights_text, tickers) if tickers else np.asarray([], dtype=float)
             with st.spinner("Fetching data and running full quant stack..."):
                 st.session_state[QUANT_RESULT_KEY] = _compute_quant_run(
                     tickers=tickers, weights=weights, benchmark_ticker=benchmark_ticker,
@@ -1848,6 +1977,7 @@ def _render_quant_configuration() -> None:
                     simulation_days=int(simulation_days), n_simulations=int(n_simulations),
                     random_seed=int(random_seed),
                     jump_intensity=float(jump_intensity), jump_mean=float(jump_mean), jump_volatility=float(jump_volatility),
+                    manual_bonds=manual_bonds,
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -3566,7 +3696,8 @@ def _render_scenario_playground(result: dict) -> None:
         run_suite = st.button(" Run Full Stress Suite", key="wharton_run_suite", type="primary")
 
     # Role exposure table
-    role_df = scenario_mod.build_role_exposure_table(tickers, weights)
+    security_types = result.get("security_types", {})
+    role_df = scenario_mod.build_role_exposure_table(tickers, weights, security_types)
     with st.expander(" Role Exposure Breakdown"):
         st.dataframe(role_df, use_container_width=True, hide_index=True)
 
@@ -3579,6 +3710,7 @@ def _render_scenario_playground(result: dict) -> None:
                         returns_df=returns_df, tickers=tickers, weights=weights,
                         severity=severity, initial_value=initial_value,
                         horizon_override=horizon,
+                        security_types=security_types,
                     )
                     st.session_state["wharton_scenario_suite_result"] = suite
                 except Exception as e:
@@ -3912,6 +4044,35 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
 
     st.success(f"Latest run: {result.get('generated_at', 'unknown')}")
     advanced = st.checkbox("Show advanced diagnostics", key=diag_key)
+    requested_max = float(result.get("inputs", {}).get("requested_max_weight", result.get("inputs", {}).get("max_weight", 1.0)))
+    effective_max = float(result.get("inputs", {}).get("max_weight", requested_max))
+    if effective_max > requested_max + 1e-12:
+        st.info(
+            f"Optimizer max weight was raised from {requested_max:.1%} to {effective_max:.1%}; "
+            "the requested cap was infeasible for the number of assets in this run."
+        )
+
+    manual_bond_metrics = result.get("manual_bond_metrics")
+    if isinstance(manual_bond_metrics, pd.DataFrame) and not manual_bond_metrics.empty:
+        with st.expander(f"Manual Individual Bonds ({len(manual_bond_metrics)})", expanded=True):
+            st.dataframe(
+                manual_bond_metrics,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Weight": st.column_config.NumberColumn("Weight", format="percent"),
+                    "YieldToWorst": st.column_config.NumberColumn("Yield to Worst", format="percent"),
+                    "ExpectedLossRate": st.column_config.NumberColumn("Expected Credit Loss", format="percent"),
+                    "ProxyExpectedReturn": st.column_config.NumberColumn("Proxy Expected Return", format="percent"),
+                    "AnnualVolatilityAssumption": st.column_config.NumberColumn("Annual Volatility", format="percent"),
+                    "AllocatedMarketValueUSD": st.column_config.NumberColumn("Allocated Value (USD)", format="$%.2f"),
+                    "DV01USD": st.column_config.NumberColumn("DV01 (USD)", format="$%.2f"),
+                },
+            )
+            st.warning(
+                "Manual-bond historical returns are proxy estimates, not observed bond prices. "
+                "The selected ETF determines covariance; entered volatility and YTW less expected credit loss determine scale and mean."
+            )
 
     nav_col, content_col = st.columns([0.18, 0.82], gap="large")
     with nav_col:
@@ -4436,7 +4597,7 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             "Require every holding to be on the loaded Approved Universe",
             value=bool(current.get("require_approved")),
         )
-        allowed_type_options = ["Stock", "ETF", "Bond", "Other"]
+        allowed_type_options = ["Stock", "ETF", "Bond", "Commodity", "Other"]
         saved_allowed_types = {str(item).casefold() for item in current.get("allowed_asset_types", [])}
         default_allowed_types = [
             item for item in allowed_type_options if item.casefold() in saved_allowed_types
@@ -5166,7 +5327,7 @@ def _render_pretrade_lab(data: dict[str, Any]) -> None:
                 "Execution price (optional)": st.column_config.NumberColumn(
                     "Execution price (optional)", min_value=0.0, format="$%.2f",
                 ),
-                "Type": st.column_config.SelectboxColumn("Type", options=["Stock", "ETF", "Bond", "Other"]),
+                "Type": st.column_config.SelectboxColumn("Type", options=["Stock", "ETF", "Bond", "Commodity", "Other"]),
             },
         )
         analyze_plan = st.form_submit_button("Analyze Trade Plan", type="primary", use_container_width=True)
@@ -6665,6 +6826,649 @@ def _render_fixed_income_dashboard(
             st.caption("Deterministic duration-convexity estimate; it is a sensitivity, not a forecast.")
 
 
+def _render_currency_risk(profile: dict[str, str | int]) -> None:
+    from src.analytics.currency_risk import (
+        SUPPORTED_CURRENCIES,
+        aggregate_currency_exposure,
+        build_fx_rate_history,
+        build_fx_stress_table,
+        calculate_fx_risk,
+        optimize_currency_hedges,
+        required_fx_symbols,
+    )
+
+    del profile  # The result is session-scoped; shared persistence can be added later.
+    st.markdown("### Currency Risk & Hedging")
+    st.caption(
+        "Translate every local-currency position into one reporting currency, measure standalone FX risk, "
+        "and size transparent forward hedges after estimated carry and execution cost."
+    )
+
+    with st.form("currency_risk_configuration_form"):
+        settings_col, exposure_col = st.columns([0.32, 0.68], gap="large")
+        with settings_col:
+            base_currency = st.selectbox(
+                "Reporting currency",
+                options=list(SUPPORTED_CURRENCIES),
+                index=list(SUPPORTED_CURRENCIES).index("USD"),
+                help="All exposures, risk estimates, and hedge notionals are reported in this currency.",
+            )
+            fx_start = st.date_input(
+                "History start",
+                value=date.today() - timedelta(days=365 * 3),
+                key="currency_risk_start",
+            )
+            fx_end = st.date_input(
+                "History end",
+                value=date.today(),
+                key="currency_risk_end",
+            )
+            confidence_pct = st.select_slider(
+                "One-day risk confidence",
+                options=[90, 95, 97.5, 99],
+                value=95,
+                format_func=lambda value: f"{value}%",
+            )
+            annual_cost_bps = st.number_input(
+                "Estimated annual hedge cost (bp)",
+                min_value=0.0,
+                max_value=2_000.0,
+                value=15.0,
+                step=1.0,
+                help="Indicative carry, spread, and rollover cost applied to hedged notional.",
+            )
+            risk_aversion = st.number_input(
+                "FX risk aversion",
+                min_value=0.0,
+                max_value=100.0,
+                value=1.0,
+                step=0.25,
+                help="Higher values favor more risk reduction relative to hedge cost.",
+            )
+            max_hedge_pct = st.slider(
+                "Maximum hedge ratio",
+                min_value=0,
+                max_value=100,
+                value=100,
+                step=5,
+            )
+        with exposure_col:
+            st.markdown("##### Asset and liability exposures")
+            st.caption(
+                "Enter current market values in each instrument's local currency. "
+                "Use negative values for liabilities or short positions."
+            )
+            edited_positions = st.data_editor(
+                pd.DataFrame(
+                    [
+                        {"Asset": "US sleeve", "Currency": "USD", "MarketValueLocal": 300_000.0},
+                        {"Asset": "European equities", "Currency": "EUR", "MarketValueLocal": 150_000.0},
+                        {"Asset": "UK equities", "Currency": "GBP", "MarketValueLocal": 75_000.0},
+                        {"Asset": "Japan equities", "Currency": "JPY", "MarketValueLocal": 12_000_000.0},
+                    ]
+                ),
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key="currency_risk_position_editor",
+                column_config={
+                    "Asset": st.column_config.TextColumn("Asset / sleeve", required=True),
+                    "Currency": st.column_config.SelectboxColumn(
+                        "Currency", options=list(SUPPORTED_CURRENCIES), required=True
+                    ),
+                    "MarketValueLocal": st.column_config.NumberColumn(
+                        "Market value (local)", required=True, format="%.2f"
+                    ),
+                },
+            )
+        run_currency = st.form_submit_button(
+            "Run FX Risk & Hedge Optimization", type="primary", use_container_width=True
+        )
+
+    if run_currency:
+        try:
+            if fx_start >= fx_end:
+                raise ValueError("History start must be before history end.")
+            positions = edited_positions.copy()
+            positions = positions[
+                positions["Currency"].notna() & positions["MarketValueLocal"].notna()
+            ].copy()
+            if positions.empty:
+                raise ValueError("Enter at least one currency exposure.")
+            positions["Asset"] = positions["Asset"].fillna("Unlabelled exposure").astype(str)
+            currencies = positions["Currency"].astype(str).str.upper().tolist()
+            symbols = required_fx_symbols(currencies, base_currency)
+            if symbols:
+                with st.spinner("Fetching FX history and solving hedge ratios..."):
+                    market_prices = _fetch_close_prices_cached(symbols, fx_start, fx_end)
+                rate_history = build_fx_rate_history(
+                    market_prices,
+                    currencies,
+                    base_currency=base_currency,
+                )
+            else:
+                rate_history = pd.DataFrame(
+                    {base_currency: [1.0, 1.0]},
+                    index=pd.bdate_range(end=pd.Timestamp(fx_end), periods=2),
+                )
+            if any(currency != base_currency for currency in currencies) and len(rate_history) < 30:
+                raise ValueError("At least 30 aligned FX observations are required for a useful risk estimate.")
+            exposure = aggregate_currency_exposure(
+                positions,
+                rate_history.iloc[-1],
+                base_currency=base_currency,
+            )
+            risk = calculate_fx_risk(
+                exposure,
+                rate_history,
+                confidence=float(confidence_pct) / 100.0,
+            )
+            optimizer = optimize_currency_hedges(
+                exposure,
+                rate_history,
+                annual_cost_bps=float(annual_cost_bps),
+                risk_aversion=float(risk_aversion),
+                max_hedge_ratio=float(max_hedge_pct) / 100.0,
+            )
+            st.session_state[CURRENCY_RISK_KEY] = {
+                "generated_at": _now_iso(),
+                "base_currency": base_currency,
+                "start_date": fx_start.isoformat(),
+                "end_date": fx_end.isoformat(),
+                "confidence": float(confidence_pct) / 100.0,
+                "annual_cost_bps": float(annual_cost_bps),
+                "positions": positions,
+                "rate_history": rate_history,
+                "exposure": exposure,
+                "risk": risk,
+                "optimizer": optimizer,
+            }
+            st.session_state.pop("wharton_fx_stress_v1", None)
+            st.session_state.pop("wharton_fx_stress_editor", None)
+        except (TypeError, ValueError) as exc:
+            st.error(str(exc))
+        else:
+            st.success("Currency risk analysis and hedge optimization complete.")
+
+    result = st.session_state.get(CURRENCY_RISK_KEY)
+    if not isinstance(result, dict):
+        st.info("Enter the portfolio's local-currency market values to create the first FX risk report.")
+        return
+
+    base = str(result.get("base_currency") or "USD")
+    exposure = result.get("exposure")
+    rate_history = result.get("rate_history")
+    risk = result.get("risk")
+    optimizer = result.get("optimizer")
+    if not isinstance(exposure, pd.DataFrame) or not isinstance(risk, dict) or not isinstance(optimizer, dict):
+        st.warning("The saved currency result is incomplete. Run the analysis again.")
+        return
+
+    exposure_tab, optimizer_tab, stress_tab, methodology_tab = st.tabs(
+        ["Exposure & Risk", "Hedge Optimizer", "FX Stress", "Data & Methodology"]
+    )
+
+    with exposure_tab:
+        foreign_mask = exposure["Currency"].astype(str) != base
+        gross_foreign = float(exposure.loc[foreign_mask, "GrossExposureBase"].sum())
+        total_gross = float(exposure["GrossExposureBase"].sum())
+        foreign_share = gross_foreign / total_gross if total_gross > 0 else 0.0
+        kpis = st.columns(5)
+        kpis[0].metric("Gross FX exposure", f"{gross_foreign:,.0f} {base}")
+        kpis[1].metric("Foreign share", f"{foreign_share:.1%}")
+        kpis[2].metric("Annual FX volatility", f"{float(risk['AnnualizedVolatilityBase']):,.0f} {base}")
+        kpis[3].metric(
+            f"1-day VaR ({float(result.get('confidence', 0.95)):.1%})",
+            f"{float(risk['HistoricalVaRBase']):,.0f} {base}",
+        )
+        kpis[4].metric("Expected shortfall", f"{float(risk['ExpectedShortfallBase']):,.0f} {base}")
+
+        st.markdown("#### Currency exposure map")
+        st.dataframe(
+            exposure,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "LocalMarketValue": st.column_config.NumberColumn("Net value (local)", format="%.2f"),
+                "RateToBase": st.column_config.NumberColumn(f"{base} per currency unit", format="%.6f"),
+                "NetExposureBase": st.column_config.NumberColumn(f"Net exposure ({base})", format="%.2f"),
+                "GrossExposureBase": st.column_config.NumberColumn(f"Gross exposure ({base})", format="%.2f"),
+                "GrossShare": st.column_config.NumberColumn("Gross share", format="percent"),
+            },
+        )
+        contributions = risk.get("Contributions")
+        if isinstance(contributions, pd.DataFrame) and not contributions.empty:
+            chart_col, table_col = st.columns([0.48, 0.52], gap="large")
+            with chart_col:
+                st.markdown("#### FX risk contribution")
+                chart_data = contributions.set_index("Currency")[["AnnualizedRiskContributionBase"]]
+                st.bar_chart(chart_data, use_container_width=True)
+            with table_col:
+                st.markdown("#### Contribution detail")
+                st.dataframe(
+                    contributions,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "NetExposureBase": st.column_config.NumberColumn(f"Exposure ({base})", format="%.2f"),
+                        "AnnualizedRiskContributionBase": st.column_config.NumberColumn(
+                            f"Risk contribution ({base})", format="%.2f"
+                        ),
+                        "RiskContributionPct": st.column_config.NumberColumn("Share of risk", format="percent"),
+                    },
+                )
+        st.download_button(
+            "Download Currency Exposure (CSV)",
+            data=exposure.to_csv(index=False).encode("utf-8"),
+            file_name=f"currency_exposure_{base}_{result.get('end_date', 'latest')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with optimizer_tab:
+        plan = optimizer.get("Plan")
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("FX volatility before", f"{float(optimizer['BeforeAnnualVolatilityBase']):,.0f} {base}")
+        o2.metric("FX volatility after", f"{float(optimizer['AfterAnnualVolatilityBase']):,.0f} {base}")
+        o3.metric("Estimated risk reduction", f"{float(optimizer['RiskReductionPct']):.1%}")
+        o4.metric("Estimated annual cost", f"{float(optimizer['EstimatedAnnualCostBase']):,.0f} {base}")
+        if not isinstance(plan, pd.DataFrame) or plan.empty:
+            st.success("The portfolio has no non-base-currency exposure to hedge.")
+        else:
+            st.markdown("#### Indicative hedge plan")
+            st.dataframe(
+                plan,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "NetExposureBase": st.column_config.NumberColumn(f"Exposure ({base})", format="%.2f"),
+                    "HedgeRatio": st.column_config.NumberColumn("Hedge ratio", format="percent"),
+                    "HedgeNotionalBase": st.column_config.NumberColumn(f"Hedge notional ({base})", format="%.2f"),
+                    "HedgeNotionalLocal": st.column_config.NumberColumn("Hedge notional (local)", format="%.2f"),
+                    "ResidualExposureBase": st.column_config.NumberColumn(f"Residual ({base})", format="%.2f"),
+                    "AnnualCostBps": st.column_config.NumberColumn("Annual cost", format="%.1f bp"),
+                    "EstimatedAnnualCostBase": st.column_config.NumberColumn(f"Est. cost ({base})", format="%.2f"),
+                },
+            )
+            st.download_button(
+                "Download Hedge Plan (CSV)",
+                data=plan.to_csv(index=False).encode("utf-8"),
+                file_name=f"fx_hedge_plan_{base}_{result.get('end_date', 'latest')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.warning(
+                "Directions and notionals are indicative. Before execution, verify forward points, tenor, "
+                "counterparty limits, collateral, lot sizes, and whether the mandate permits derivatives."
+            )
+
+    with stress_tab:
+        st.markdown("#### Deterministic currency shock")
+        st.caption(
+            f"A positive shock means the currency strengthens against {base}; a negative shock means it weakens."
+        )
+        stress_inputs = exposure[["Currency"]].copy()
+        stress_inputs["Shock %"] = np.where(stress_inputs["Currency"] == base, 0.0, -10.0)
+        edited_shocks = st.data_editor(
+            stress_inputs,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Currency"],
+            key="wharton_fx_stress_editor",
+            column_config={
+                "Currency": st.column_config.TextColumn("Currency"),
+                "Shock %": st.column_config.NumberColumn("Shock vs reporting currency (%)", format="%.2f"),
+            },
+        )
+        if st.button("Run FX Stress", type="primary", use_container_width=True):
+            try:
+                shock_map = {
+                    str(row["Currency"]): float(row["Shock %"]) / 100.0
+                    for _, row in edited_shocks.iterrows()
+                }
+                st.session_state["wharton_fx_stress_v1"] = build_fx_stress_table(
+                    exposure,
+                    shock_map,
+                    hedge_plan=optimizer.get("Plan"),
+                )
+            except (TypeError, ValueError) as exc:
+                st.error(str(exc))
+        stress = st.session_state.get("wharton_fx_stress_v1")
+        if isinstance(stress, pd.DataFrame) and not stress.empty:
+            s1, s2, s3 = st.columns(3)
+            unhedged_pnl = float(stress["UnhedgedPnLBase"].sum())
+            hedged_pnl = float(stress["HedgedPnLBase"].sum())
+            s1.metric("Unhedged FX P/L", f"{unhedged_pnl:+,.0f} {base}")
+            s2.metric("Hedged FX P/L", f"{hedged_pnl:+,.0f} {base}")
+            s3.metric("P/L difference", f"{hedged_pnl - unhedged_pnl:+,.0f} {base}")
+            st.dataframe(
+                stress,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Shock": st.column_config.NumberColumn("FX shock", format="percent"),
+                    "NetExposureBase": st.column_config.NumberColumn(f"Exposure ({base})", format="%.2f"),
+                    "UnhedgedPnLBase": st.column_config.NumberColumn(f"Unhedged P/L ({base})", format="%.2f"),
+                    "ResidualExposureBase": st.column_config.NumberColumn(f"Residual ({base})", format="%.2f"),
+                    "HedgedPnLBase": st.column_config.NumberColumn(f"Hedged P/L ({base})", format="%.2f"),
+                    "HedgeBenefitBase": st.column_config.NumberColumn(f"Hedge effect ({base})", format="%.2f"),
+                },
+            )
+
+    with methodology_tab:
+        st.markdown("#### Historical exchange-rate monitor")
+        if isinstance(rate_history, pd.DataFrame) and not rate_history.empty:
+            indexed_rates = rate_history.div(rate_history.iloc[0]).mul(100.0)
+            non_base_columns = [column for column in indexed_rates.columns if column != base]
+            if non_base_columns:
+                st.line_chart(indexed_rates[non_base_columns], use_container_width=True)
+                correlations = rate_history[non_base_columns].pct_change(fill_method=None).corr()
+                st.markdown("#### Daily FX return correlation")
+                st.dataframe(
+                    correlations.style.format("{:.2f}").background_gradient(
+                        cmap="RdYlGn", vmin=-1.0, vmax=1.0, axis=None
+                    ),
+                    use_container_width=True,
+                )
+        st.markdown("#### Model boundaries")
+        st.info(
+            "Rates are converted to a consistent base-per-foreign convention. Historical VaR and expected "
+            "shortfall use daily close-to-close returns; the optimizer uses the historical covariance matrix."
+        )
+        st.markdown(
+            "- FX risk is isolated from the underlying asset's local-market return; joint asset/FX moves are not modeled.\n"
+            "- Hedge cost is an annual estimate, not a live executable forward quote.\n"
+            "- The optimizer cannot hedge beyond the exposure or create a speculative reverse position.\n"
+            "- VaR is a loss threshold, not a maximum possible loss; stressed gaps and liquidity can be worse.\n"
+            "- Re-run after trades, cash flows, valuation changes, or material exchange-rate moves."
+        )
+        st.caption(
+            f"Generated {result.get('generated_at', 'n/a')} · FX history: Yahoo Finance · "
+            f"{int(risk.get('Observations', 0))} aligned daily returns"
+        )
+
+
+def _render_commodity_analysis(profile: dict[str, str | int]) -> None:
+    from src.analytics.commodity_analysis import (
+        COMMODITY_CATALOG,
+        build_cumulative_index,
+        build_price_shock_table,
+        build_return_correlation,
+        calculate_commodity_metrics,
+        commodity_catalog_frame,
+    )
+
+    del profile  # Reserved for future per-user research persistence.
+    st.markdown("### Commodity Analysis")
+    st.caption(
+        "Compare exchange-traded commodity vehicles and continuous-futures proxies, "
+        "then translate an explicit price shock into position P/L."
+    )
+    monitor_tab, stress_tab, universe_tab = st.tabs(
+        ["Market Monitor", "Position Stress", "Universe & Methodology"]
+    )
+
+    catalog_by_ticker = {item["ticker"]: item for item in COMMODITY_CATALOG}
+    catalog_tickers = list(catalog_by_ticker)
+
+    with monitor_tab:
+        with st.form("commodity_market_monitor_form"):
+            left, right = st.columns([1.35, 1.0], gap="large")
+            with left:
+                selected = st.multiselect(
+                    "Starter universe",
+                    options=catalog_tickers,
+                    default=["DBC", "GLD", "USO", "DBA", "CPER"],
+                    format_func=lambda ticker: (
+                        f"{ticker} - {catalog_by_ticker[ticker]['name']}"
+                    ),
+                    help="ETF rows are investable vehicles; =F rows are continuous-futures research proxies.",
+                )
+                custom_tickers = st.text_area(
+                    "Additional Yahoo tickers",
+                    value="",
+                    height=80,
+                    placeholder="One ticker per line",
+                )
+            with right:
+                commodity_start = st.date_input(
+                    "Start date",
+                    value=date.today() - timedelta(days=365 * 3),
+                    key="commodity_analysis_start",
+                )
+                commodity_end = st.date_input(
+                    "End date",
+                    value=date.today(),
+                    key="commodity_analysis_end",
+                )
+                commodity_risk_free = st.number_input(
+                    "Annual risk-free rate (%)",
+                    min_value=-10.0,
+                    max_value=30.0,
+                    value=0.0,
+                    step=0.25,
+                )
+            run_monitor = st.form_submit_button(
+                "Run Commodity Analysis", type="primary", use_container_width=True
+            )
+
+        if run_monitor:
+            try:
+                if commodity_start >= commodity_end:
+                    raise ValueError("Start date must be before end date.")
+                requested = list(
+                    dict.fromkeys(
+                        [*selected, *_parse_tickers(custom_tickers, allow_empty=True)]
+                    )
+                )
+                if not requested:
+                    raise ValueError("Select or enter at least one commodity ticker.")
+                with st.spinner("Fetching commodity histories..."):
+                    fetched = _fetch_close_prices_cached(
+                        tuple(requested), commodity_start, commodity_end
+                    )
+                available = [
+                    ticker
+                    for ticker in requested
+                    if ticker in fetched.columns and fetched[ticker].notna().sum() >= 2
+                ]
+                if not available:
+                    raise ValueError("No usable commodity price history was returned.")
+                prices = fetched[available].sort_index().ffill().dropna(how="all")
+                metrics = calculate_commodity_metrics(
+                    prices,
+                    annual_risk_free_rate=float(commodity_risk_free) / 100.0,
+                )
+                st.session_state[COMMODITY_ANALYSIS_KEY] = {
+                    "generated_at": _now_iso(),
+                    "start_date": commodity_start.isoformat(),
+                    "end_date": commodity_end.isoformat(),
+                    "requested": requested,
+                    "missing": [ticker for ticker in requested if ticker not in available],
+                    "prices": prices,
+                    "metrics": metrics,
+                    "cumulative": build_cumulative_index(prices),
+                    "correlation": build_return_correlation(prices),
+                }
+            except (TypeError, ValueError) as exc:
+                st.error(str(exc))
+            else:
+                st.success("Commodity analysis complete.")
+
+        commodity_result = st.session_state.get(COMMODITY_ANALYSIS_KEY)
+        if not isinstance(commodity_result, dict):
+            st.info("Choose commodity proxies above to build a comparable risk and return monitor.")
+        else:
+            metrics = commodity_result.get("metrics")
+            prices = commodity_result.get("prices")
+            cumulative = commodity_result.get("cumulative")
+            correlation = commodity_result.get("correlation")
+            missing = commodity_result.get("missing", [])
+            if missing:
+                st.warning(f"No usable history for: {', '.join(str(item) for item in missing)}")
+            if isinstance(metrics, pd.DataFrame) and not metrics.empty:
+                return_12m = pd.to_numeric(metrics["Return12M"], errors="coerce")
+                volatility = pd.to_numeric(metrics["AnnualizedVolatility"], errors="coerce")
+                best_index = return_12m.idxmax() if return_12m.notna().any() else None
+                low_vol_index = volatility.idxmin() if volatility.notna().any() else None
+                average_corr = np.nan
+                if isinstance(correlation, pd.DataFrame) and correlation.shape[0] > 1:
+                    corr_values = correlation.to_numpy(dtype=float)
+                    upper = corr_values[np.triu_indices_from(corr_values, k=1)]
+                    finite_upper = upper[np.isfinite(upper)]
+                    if finite_upper.size:
+                        average_corr = float(finite_upper.mean())
+                kpis = st.columns(4)
+                kpis[0].metric("Instruments", str(len(metrics)))
+                kpis[1].metric(
+                    "Best 12M return",
+                    str(metrics.loc[best_index, "Ticker"]) if best_index is not None else "n/a",
+                    _fmt_pct(return_12m.loc[best_index]) if best_index is not None else None,
+                )
+                kpis[2].metric(
+                    "Lowest volatility",
+                    str(metrics.loc[low_vol_index, "Ticker"]) if low_vol_index is not None else "n/a",
+                    _fmt_pct(volatility.loc[low_vol_index]) if low_vol_index is not None else None,
+                )
+                kpis[3].metric("Average pair correlation", _fmt_float(average_corr, 2))
+
+                st.markdown("#### Risk and return snapshot")
+                st.dataframe(
+                    metrics,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "LastPrice": st.column_config.NumberColumn("Last price", format="%.3f"),
+                        "Return1M": st.column_config.NumberColumn("1M return", format="percent"),
+                        "Return3M": st.column_config.NumberColumn("3M return", format="percent"),
+                        "Return12M": st.column_config.NumberColumn("12M return", format="percent"),
+                        "AnnualizedReturn": st.column_config.NumberColumn("Ann. return", format="percent"),
+                        "AnnualizedVolatility": st.column_config.NumberColumn("Ann. volatility", format="percent"),
+                        "Sharpe": st.column_config.NumberColumn("Sharpe", format="%.2f"),
+                        "MaxDrawdown": st.column_config.NumberColumn("Max drawdown", format="percent"),
+                    },
+                )
+                st.download_button(
+                    "Download Snapshot (CSV)",
+                    data=metrics.to_csv(index=False).encode("utf-8"),
+                    file_name=f"commodity_snapshot_{commodity_result.get('end_date', 'latest')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+            if isinstance(cumulative, pd.DataFrame) and not cumulative.empty:
+                st.markdown("#### Rebased performance (start = 100)")
+                st.line_chart(cumulative, use_container_width=True)
+            if isinstance(correlation, pd.DataFrame) and not correlation.empty:
+                st.markdown("#### Daily-return correlation")
+                st.dataframe(
+                    correlation.style.format("{:.2f}").background_gradient(
+                        cmap="RdYlGn", vmin=-1.0, vmax=1.0, axis=None
+                    ),
+                    use_container_width=True,
+                )
+            st.caption(
+                "The same ETF and futures-proxy tickers can be entered under Market Tickers in Quant Engine."
+            )
+
+    with stress_tab:
+        commodity_result = st.session_state.get(COMMODITY_ANALYSIS_KEY)
+        prices = commodity_result.get("prices") if isinstance(commodity_result, dict) else None
+        available_tickers = list(prices.columns) if isinstance(prices, pd.DataFrame) else []
+        if not available_tickers:
+            st.info("Run Market Monitor first; its latest prices will prefill the position stress test.")
+        else:
+            with st.form("commodity_position_stress_form"):
+                s1, s2, s3, s4 = st.columns(4)
+                with s1:
+                    stress_ticker = st.selectbox("Instrument", available_tickers)
+                    observed_price = float(prices[stress_ticker].dropna().iloc[-1])
+                with s2:
+                    stress_price = st.number_input(
+                        "Current price", min_value=0.000001, value=observed_price, format="%.4f"
+                    )
+                with s3:
+                    stress_units = st.number_input(
+                        "Units / contracts", min_value=0.000001, value=1.0, format="%.4f"
+                    )
+                with s4:
+                    stress_multiplier = st.number_input(
+                        "Contract multiplier",
+                        min_value=0.000001,
+                        value=1.0,
+                        format="%.4f",
+                        help="Use 1 for ETF shares. Verify the exchange specification for futures.",
+                    )
+                p1, p2 = st.columns(2)
+                with p1:
+                    stress_fx = st.number_input(
+                        "FX rate to USD", min_value=0.000001, value=1.0, format="%.6f"
+                    )
+                with p2:
+                    stress_shocks = st.text_input(
+                        "Price shocks (%)", value="-20, -10, -5, 5, 10, 20"
+                    )
+                run_stress = st.form_submit_button(
+                    "Run Position Stress", type="primary", use_container_width=True
+                )
+            if run_stress:
+                try:
+                    shock_values = [
+                        float(value.strip().replace("%", "")) / 100.0
+                        for value in stress_shocks.replace(";", ",").split(",")
+                        if value.strip()
+                    ]
+                    stress_table = build_price_shock_table(
+                        stress_price,
+                        stress_units,
+                        contract_multiplier=stress_multiplier,
+                        fx_to_usd=stress_fx,
+                        shocks=shock_values,
+                    )
+                    st.session_state["wharton_commodity_stress_v1"] = {
+                        "ticker": stress_ticker,
+                        "notional": float(stress_price * stress_units * stress_multiplier * stress_fx),
+                        "table": stress_table,
+                    }
+                except ValueError as exc:
+                    st.error(str(exc))
+            stress_result = st.session_state.get("wharton_commodity_stress_v1")
+            if isinstance(stress_result, dict):
+                st.metric(
+                    f"{stress_result.get('ticker', 'Position')} notional",
+                    f"${float(stress_result.get('notional') or 0):,.2f}",
+                )
+                stress_table = stress_result.get("table")
+                if isinstance(stress_table, pd.DataFrame):
+                    st.dataframe(
+                        stress_table,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Shock": st.column_config.NumberColumn("Price shock", format="percent"),
+                            "StressedPrice": st.column_config.NumberColumn("Stressed price", format="%.4f"),
+                            "PositionValueUSD": st.column_config.NumberColumn("Position value (USD)", format="$%.2f"),
+                            "PnLUSD": st.column_config.NumberColumn("P/L (USD)", format="$%.2f"),
+                        },
+                    )
+                st.caption("Direct mark-to-market sensitivity only; margin, carry, fees, and liquidity are excluded.")
+
+    with universe_tab:
+        st.markdown("#### Starter universe")
+        st.dataframe(commodity_catalog_frame(), use_container_width=True, hide_index=True)
+        st.markdown("#### Interpretation limits")
+        st.info(
+            "Continuous-futures tickers are research proxies, not executable contracts. "
+            "Their history can embed contract rolls and may not match a specific expiry."
+        )
+        st.markdown(
+            "- Commodity ETFs can differ from spot returns because of roll yield, fees, collateral, and tracking.\n"
+            "- Futures sizing requires a verified contract multiplier, currency, expiry, and margin policy.\n"
+            "- Historical correlation can change sharply across inflation, growth, supply, and liquidity regimes.\n"
+            "- The stress table is a transparent price sensitivity, not a forecast or a VaR model."
+        )
+
+
 def _render_bond_analysis(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.bond_analytics import (
         assess_bond_data_quality,
@@ -7100,7 +7904,7 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
             p1, p2, p3 = st.columns(3)
             with p1:
                 ticker = st.text_input("Ticker / internal identifier", placeholder="e.g. MSFT or bond code")
-                security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Other"])
+                security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Commodity", "Other"])
             with p2:
                 quantity = st.number_input("Quantity", min_value=0.0, value=0.0, step=1.0)
                 entry_price = st.number_input(
@@ -9448,9 +10252,11 @@ def render_wharton_cockpit() -> None:
         ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
         ("Company Analysis", lambda: _render_company_analysis(profile)),
         ("Bond Analysis", lambda: _render_bond_analysis(profile)),
+        ("Commodity Analysis", lambda: _render_commodity_analysis(profile)),
         ("Stock Screener", _render_stock_screener),
         ("Quant Engine", lambda: _render_quant_engine(profile)),
         ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),
+        ("Currency Risk & Hedging", lambda: _render_currency_risk(profile)),
         ("Factor Exposure", _with_quant_context(_render_factor_exposure)),
         ("Regime Detection", _with_quant_context(_render_regime_detection)),
         ("Scenario Playground", _with_quant_context(_render_scenario_playground)),

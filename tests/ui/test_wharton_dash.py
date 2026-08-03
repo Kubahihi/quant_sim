@@ -16,6 +16,11 @@ def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
     assert math.isclose(wharton_dash._saved_number({}, "limit", 0.15), 0.15)
     assert "Bond Analysis" in wharton_dash.COCKPIT_AREAS["Research"]
     assert "Bond Analysis" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert "Commodity Analysis" in wharton_dash.COCKPIT_AREAS["Research"]
+    assert "Commodity Analysis" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_AREAS["Risk & Quant"]
+    assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert wharton_dash._parse_tickers("", allow_empty=True) == []
 
 
 def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-team-pass") -> Path:

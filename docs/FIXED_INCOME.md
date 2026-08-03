@@ -57,3 +57,20 @@ The **Competition Case** tab converts the analysis into an auditable decision wo
 Competition eligibility is intentionally not inferred from instrument type. When current trading rules are unpublished or the instrument is not confirmed in WInS, keep the status at **Pending verification**. A verified-ineligible instrument and an oversized proposed position are both explicit do-not-trade blockers.
 
 The generated memo is a working evidence draft. Every number and source must be verified, and the student team remains responsible for writing and citing its final competition submission in its own voice.
+
+## Manual bonds in the Quant Engine
+
+The Quant Engine accepts individual bonds through the **Manual Individual Bonds** editable grid. Market tickers are optional when manual-bond weights total 100%. In a mixed portfolio, explicit bond weights reserve that share of the portfolio and the market-ticker weights are normalized inside the remaining sleeve.
+
+Required manual inputs are an identifier, portfolio weight, clean price, maturity, coupon frequency, annual volatility assumption, and a traded bond-ETF proxy ticker. Coupon, face value, quantity, YTM, duration, convexity, issuer, rating, call terms, and default/recovery assumptions can also be entered; YTM and duration are calculated from contractual terms when possible.
+
+Because an individual bond generally has no dependable Yahoo ticker history, the engine does not pretend that its proxy is an observed price series. It:
+
+1. takes daily returns from the explicitly selected traded bond ETF;
+2. preserves the proxy's historical timing and correlation pattern;
+3. rescales the series to the entered annual volatility; and
+4. shifts its arithmetic annual mean to calculated yield to worst less the entered expected credit loss (`PD × (1 − recovery)`).
+
+The resulting series participates in portfolio metrics, correlation, contribution analysis, optimization, Monte Carlo, factor/regime analysis, and scenario testing. Scenario classification identifies it as fixed income. News lookup remains limited to actual market tickers. The Quant Engine displays the proxy ticker and assumptions next to YTW, duration, convexity, allocated market value, and portfolio-scaled DV01.
+
+This is a covariance and risk approximation, not reconstructed bond-price history. For investment decisions, retain the contractual cash-flow, rate/spread scenario, credit, call-risk, and source checks in **Research → Bond Analysis**.
