@@ -235,10 +235,10 @@ def inject_dashboard_styles() -> None:
             color: var(--qp-muted);
         }
 
-        .stButton > button,
-        .stDownloadButton > button,
-        .stFormSubmitButton > button,
-        .stLinkButton > a,
+        .stButton button,
+        .stDownloadButton button,
+        .stFormSubmitButton button,
+        .stLinkButton a,
         button[kind="secondary"] {
             min-height: 2.65rem;
             border-radius: 10px;
@@ -246,39 +246,43 @@ def inject_dashboard_styles() -> None:
             color: var(--qp-ink) !important;
             border-color: var(--qp-line) !important;
             font-weight: 650;
-            transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+            transition: color 120ms ease, background-color 120ms ease, transform 120ms ease,
+                        box-shadow 120ms ease, border-color 120ms ease;
         }
 
         /* Streamlit renders the label in nested text elements. Keep those from
            inheriting the global muted paragraph colour. */
-        .stButton > button :is(p, span),
-        .stDownloadButton > button :is(p, span),
-        .stFormSubmitButton > button :is(p, span),
-        .stLinkButton > a :is(p, span) {
+        .stButton button :is(p, span),
+        .stDownloadButton button :is(p, span),
+        .stFormSubmitButton button :is(p, span),
+        .stLinkButton a :is(p, span) {
             color: inherit !important;
         }
 
-        .stButton > button svg,
-        .stDownloadButton > button svg,
-        .stFormSubmitButton > button svg,
-        .stLinkButton > a svg {
+        .stButton button svg,
+        .stDownloadButton button svg,
+        .stFormSubmitButton button svg,
+        .stLinkButton a svg {
             color: inherit !important;
             fill: currentColor;
         }
 
-        .stButton > button:hover,
-        .stDownloadButton > button:hover,
-        .stFormSubmitButton > button:hover,
-        .stLinkButton > a:hover {
+        .stButton button:hover,
+        .stDownloadButton button:hover,
+        .stFormSubmitButton button:hover,
+        .stLinkButton a:hover {
             border-color: var(--qp-accent);
-            color: #0f625e !important;
-            background: var(--qp-accent-soft);
+            color: var(--qp-accent-text) !important;
+            background: var(--qp-accent-soft) !important;
             transform: translateY(-1px);
             box-shadow: 0 7px 16px rgba(22, 125, 120, 0.12);
         }
 
-        .stButton > button[kind="primary"],
-        .stFormSubmitButton > button[kind="primaryFormSubmit"],
+        button[data-testid="stBaseButton-primary"],
+        button[data-testid="stBaseButton-primaryFormSubmit"],
+        .stButton button[kind="primary"],
+        .stFormSubmitButton button[kind="primary"],
+        .stFormSubmitButton button[kind="primaryFormSubmit"],
         button[kind="primaryFormSubmit"] {
             color: #ffffff !important;
             background: var(--qp-accent) !important;
@@ -286,21 +290,38 @@ def inject_dashboard_styles() -> None:
             box-shadow: 0 5px 14px rgba(22, 125, 120, 0.2);
         }
 
-        .stButton > button[kind="primary"]:hover,
-        .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover,
+        button[data-testid="stBaseButton-primary"]:hover,
+        button[data-testid="stBaseButton-primaryFormSubmit"]:hover,
+        .stButton button[kind="primary"]:hover,
+        .stFormSubmitButton button[kind="primary"]:hover,
+        .stFormSubmitButton button[kind="primaryFormSubmit"]:hover,
         button[kind="primaryFormSubmit"]:hover {
             color: #ffffff !important;
-            background: #106b67;
-            border-color: #106b67;
+            background: #106b67 !important;
+            background: color-mix(in srgb, var(--qp-accent) 82%, #000000) !important;
+            border-color: #106b67 !important;
+            border-color: color-mix(in srgb, var(--qp-accent) 82%, #000000) !important;
             box-shadow: 0 8px 18px rgba(16, 107, 103, 0.26);
         }
 
-        .stButton > button:focus-visible,
-        .stDownloadButton > button:focus-visible,
-        .stFormSubmitButton > button:focus-visible,
-        .stLinkButton > a:focus-visible {
+        .stButton button:focus-visible,
+        .stDownloadButton button:focus-visible,
+        .stFormSubmitButton button:focus-visible,
+        .stLinkButton a:focus-visible {
             outline: 3px solid rgba(22, 125, 120, 0.3);
+            outline: 3px solid color-mix(in srgb, var(--qp-accent) 32%, transparent);
             outline-offset: 2px;
+        }
+
+        .stButton button:disabled,
+        .stDownloadButton button:disabled,
+        .stFormSubmitButton button:disabled,
+        .stLinkButton a[aria-disabled="true"] {
+            color: var(--qp-muted) !important;
+            background: var(--qp-soft) !important;
+            border-color: var(--qp-line) !important;
+            box-shadow: none;
+            transform: none;
         }
 
         .stTextInput > div > div > div, 
