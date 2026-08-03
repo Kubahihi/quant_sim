@@ -56,11 +56,11 @@ def inject_dashboard_styles() -> None:
         """
         <style>
         :root {
-            --qp-ink: var(--text-color);
-            --qp-line: var(--secondary-background-color);
-            --qp-card: var(--background-color);
-            --qp-accent: var(--primary-color);
-            --qp-accent-text: var(--primary-color);
+            --qp-ink: var(--text-color, #17202e);
+            --qp-line: var(--secondary-background-color, #e3e8ef);
+            --qp-card: var(--background-color, #ffffff);
+            --qp-accent: var(--primary-color, #167d78);
+            --qp-accent-text: var(--primary-color, #167d78);
             --qp-radius: 14px;
         }
 
