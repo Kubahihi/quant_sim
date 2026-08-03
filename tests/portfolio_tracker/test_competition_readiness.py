@@ -19,6 +19,15 @@ MANDATE = {
     "values_constraints": {"excluded_sectors": ["Tobacco"]},
     "policy_benchmark": "60% ACWI / 40% AGG",
     "policy_benchmark_rationale": "Matches growth and liquidity buckets.",
+    "behavioral_profile": {
+        "answers": {f"q{index}": 3 for index in range(12)},
+        "drawdown_actions": {
+            "-10%": "Hold the strategic allocation",
+            "-20%": "Seek advice before acting",
+            "-30%": "Seek advice before acting",
+        },
+        "decision_protocol": "Review the mandate, wait 48 hours, and obtain a second review.",
+    },
 }
 STRATEGY = {
     "strategy_thesis": "Own durable compounders with identifiable catalysts.",

@@ -4504,6 +4504,7 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
                 "mandate_summary": mandate_summary.strip(),
                 "values_constraints_text": values_constraints.strip(),
+                "behavioral_profile": current.get("behavioral_profile", {}),
             })
             with get_connection() as conn:
                 save_client_mandate(conn, payload, updated_by=str(profile["username"]))
@@ -4516,6 +4517,320 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
         summary_cols[1].metric("Risk tolerance", str(current.get("risk_tolerance") or "Not specified"))
         summary_cols[2].metric("Horizon", f"{float(current.get('horizon_years') or 0):g} years")
         summary_cols[3].metric("Liquidity need", f"{float(current.get('liquidity_need_pct') or 0):.1%}")
+
+
+def _render_client_behavioral_profile(
+    profile: dict[str, str | int],
+    record: dict[str, Any] | None,
+) -> None:
+    from src.portfolio_tracker.client_behavior import (
+        BEHAVIORAL_QUESTIONS,
+        DEFAULT_DRAWDOWN_ACTIONS,
+        DRAWDOWN_ACTION_SCORES,
+        LIKERT_OPTIONS,
+        assess_behavioral_profile,
+        parse_likert_answer,
+    )
+    from src.portfolio_tracker.strategy_store import save_client_mandate
+
+    current = _strategy_payload(record)
+    st.markdown("#### Client Behavioral Profile")
+    st.caption(
+        "Document how the client is likely to make decisions under uncertainty and convert observable tendencies "
+        "into communication, review, and trading guardrails. Higher scores mean greater vulnerability to a bias."
+    )
+    st.info(
+        "This is a transparent investment-governance aid, not a clinical diagnosis or a validated psychometric test. "
+        "Distinguish client statements, observed behavior, adviser judgement, and analyst assumptions."
+    )
+    if not current:
+        st.warning("Save the Client Mandate first so the behavioral profile can be versioned with it.")
+        return
+
+    saved = current.get("behavioral_profile")
+    saved = dict(saved) if isinstance(saved, dict) else {}
+    saved_answers = saved.get("answers") if isinstance(saved.get("answers"), dict) else {}
+    saved_actions = saved.get("drawdown_actions") if isinstance(saved.get("drawdown_actions"), dict) else {}
+
+    def answer_label(question_id: str) -> str:
+        try:
+            return LIKERT_OPTIONS[parse_likert_answer(saved_answers.get(question_id, 3)) - 1]
+        except ValueError:
+            return LIKERT_OPTIONS[2]
+
+    questionnaire_frame = pd.DataFrame(
+        [
+            {
+                "Category": question["category_label"],
+                "Statement": question["statement"],
+                "Response": answer_label(question["id"]),
+                "QuestionId": question["id"],
+            }
+            for question in BEHAVIORAL_QUESTIONS
+        ]
+    )
+    drawdown_frame = pd.DataFrame(
+        [
+            {
+                "Portfolio drawdown": threshold,
+                "Intended client action": str(saved_actions.get(threshold) or default_action),
+            }
+            for threshold, default_action in DEFAULT_DRAWDOWN_ACTIONS.items()
+        ]
+    )
+    source_options = [
+        "Client interview",
+        "Observed client behavior",
+        "Adviser assessment",
+        "Analyst assumption",
+        "Not verified",
+    ]
+    saved_source = str(saved.get("source_status") or "Not verified")
+    if saved_source not in source_options:
+        saved_source = "Not verified"
+    frequency_options = ["On demand", "Weekly", "Monthly", "Quarterly", "Semi-annually"]
+    saved_frequency = str(saved.get("communication_frequency") or "Quarterly")
+    if saved_frequency not in frequency_options:
+        saved_frequency = "Quarterly"
+    style_options = [
+        "Goal-based summary",
+        "Detailed evidence and scenarios",
+        "Visual dashboard",
+        "Short recommendation with appendix",
+        "Not specified",
+    ]
+    saved_style = str(saved.get("communication_style") or "Not specified")
+    if saved_style not in style_options:
+        saved_style = "Not specified"
+    experience_options = [
+        "No material loss experience",
+        "Experienced a loss and stayed with the plan",
+        "Experienced a loss and reduced risk",
+        "Experienced a loss and exited most risk assets",
+        "Unknown",
+    ]
+    saved_experience = str(saved.get("loss_experience") or "Unknown")
+    if saved_experience not in experience_options:
+        saved_experience = "Unknown"
+    try:
+        saved_assessment_date = date.fromisoformat(str(saved.get("assessment_date") or ""))
+    except ValueError:
+        saved_assessment_date = date.today()
+
+    with st.form("client_behavioral_profile_form"):
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            source_status = st.selectbox(
+                "Evidence status",
+                source_options,
+                index=source_options.index(saved_source),
+                help="Record whether the answers came directly from the client or are still assumptions.",
+            )
+            assessment_date = st.date_input("Assessment date", value=saved_assessment_date)
+        with m2:
+            communication_frequency = st.selectbox(
+                "Preferred communication frequency",
+                frequency_options,
+                index=frequency_options.index(saved_frequency),
+            )
+            communication_style = st.selectbox(
+                "Preferred communication style",
+                style_options,
+                index=style_options.index(saved_style),
+            )
+        with m3:
+            loss_experience = st.selectbox(
+                "Prior market-loss experience",
+                experience_options,
+                index=experience_options.index(saved_experience),
+            )
+            decision_makers = st.text_input(
+                "Decision makers / influencers",
+                value=str(saved.get("decision_makers") or ""),
+                placeholder="Client, spouse, board, adviser...",
+            )
+        evidence_reference = st.text_input(
+            "Interview, observation, or case-evidence reference",
+            value=str(saved.get("evidence_reference") or ""),
+            help="Point to meeting notes, the official case, or another reviewable source.",
+        )
+
+        st.markdown("##### Behavioral tendency questionnaire")
+        st.caption(
+            "Use 1 (strongly disagree) to 5 (strongly agree). Every statement is oriented so a higher answer "
+            "means greater potential decision vulnerability."
+        )
+        edited_questionnaire = st.data_editor(
+            questionnaire_frame,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Category", "Statement", "QuestionId"],
+            key="client_behavior_questionnaire_editor",
+            column_config={
+                "Response": st.column_config.SelectboxColumn("Response", options=list(LIKERT_OPTIONS), required=True),
+                "QuestionId": None,
+            },
+        )
+
+        st.markdown("##### Pre-committed drawdown behavior")
+        st.caption("Choose the action the client can realistically follow, not the answer that appears most sophisticated.")
+        edited_drawdowns = st.data_editor(
+            drawdown_frame,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Portfolio drawdown"],
+            key="client_behavior_drawdown_editor",
+            column_config={
+                "Intended client action": st.column_config.SelectboxColumn(
+                    "Intended client action", options=list(DRAWDOWN_ACTION_SCORES), required=True
+                ),
+            },
+        )
+
+        n1, n2 = st.columns(2)
+        with n1:
+            stress_triggers = st.text_area(
+                "Known emotional or decision triggers",
+                value=str(saved.get("stress_triggers") or ""),
+                height=90,
+                placeholder="Loss threshold, concentrated holding, alarming news, peer comparison...",
+            )
+            trusted_sources = st.text_area(
+                "Trusted information sources and people",
+                value=str(saved.get("trusted_sources") or ""),
+                height=85,
+            )
+        with n2:
+            decision_protocol = st.text_area(
+                "Agreed decision and escalation protocol",
+                value=str(saved.get("decision_protocol") or ""),
+                height=90,
+                placeholder="Who must be consulted, waiting period, evidence required, emergency exception...",
+            )
+            profile_notes = st.text_area(
+                "Context and limitations",
+                value=str(saved.get("notes") or ""),
+                height=85,
+            )
+        save_profile = st.form_submit_button(
+            "Save Behavioral Profile", type="primary", use_container_width=True
+        )
+
+    if save_profile:
+        try:
+            answers = {
+                str(row["QuestionId"]): parse_likert_answer(row["Response"])
+                for _, row in edited_questionnaire.iterrows()
+            }
+            drawdown_actions = {
+                str(row["Portfolio drawdown"]): str(row["Intended client action"])
+                for _, row in edited_drawdowns.iterrows()
+            }
+            assessment = assess_behavioral_profile(
+                answers,
+                drawdown_actions=drawdown_actions,
+                risk_tolerance=str(current.get("risk_tolerance") or ""),
+            )
+            behavioral_profile = {
+                "schema_version": 1,
+                "source_status": source_status,
+                "assessment_date": assessment_date.isoformat(),
+                "evidence_reference": evidence_reference.strip(),
+                "decision_makers": decision_makers.strip(),
+                "communication_frequency": communication_frequency,
+                "communication_style": communication_style,
+                "loss_experience": loss_experience,
+                "stress_triggers": stress_triggers.strip(),
+                "trusted_sources": trusted_sources.strip(),
+                "decision_protocol": decision_protocol.strip(),
+                "notes": profile_notes.strip(),
+                "answers": assessment["ParsedAnswers"],
+                "drawdown_actions": drawdown_actions,
+                "last_scored_at": _now_iso(),
+            }
+            updated_mandate = dict(current)
+            updated_mandate["behavioral_profile"] = behavioral_profile
+            with get_connection() as conn:
+                save_client_mandate(conn, updated_mandate, updated_by=str(profile["username"]))
+        except (TypeError, ValueError) as exc:
+            st.error(str(exc))
+        else:
+            st.success("Behavioral profile saved and versioned with the Client Mandate.")
+            st.rerun()
+
+    if not saved:
+        st.warning("No saved behavioral assessment yet. Complete the questionnaire and document its evidence status.")
+        return
+
+    try:
+        assessment = assess_behavioral_profile(
+            saved_answers,
+            drawdown_actions=saved_actions,
+            risk_tolerance=str(current.get("risk_tolerance") or ""),
+        )
+    except (TypeError, ValueError) as exc:
+        st.error(f"The saved behavioral profile is invalid: {exc}")
+        return
+
+    if saved_source in {"Analyst assumption", "Not verified"}:
+        st.warning(
+            "This profile is based on an analyst assumption or unverified evidence. Do not treat it as a confirmed client preference."
+        )
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Behavioral vulnerability", f"{float(assessment['OverallVulnerabilityScore']):.0f}/100")
+    k2.metric("Vulnerability band", str(assessment["VulnerabilityBand"]))
+    k3.metric("Decision style", str(assessment["DecisionStyle"]))
+    resilience = assessment.get("DrawdownResilienceScore")
+    k4.metric("Drawdown discipline", f"{float(resilience):.0f}/100" if resilience is not None else "N/A")
+    k5.metric("Question coverage", f"{float(assessment['CoveragePct']):.0%}")
+
+    st.markdown("##### Declared tolerance versus intended behavior")
+    status = str(assessment["RiskToleranceConsistency"])
+    note = str(assessment["RiskToleranceConsistencyNote"])
+    if status == "Broadly consistent":
+        st.success(f"{status}: {note}")
+    elif status == "Not assessed":
+        st.info(f"{status}: {note}")
+    else:
+        st.warning(f"{status}: {note}")
+
+    bias_scores = assessment.get("BiasScores")
+    if isinstance(bias_scores, pd.DataFrame) and not bias_scores.empty:
+        b1, b2 = st.columns([0.44, 0.56], gap="large")
+        with b1:
+            st.markdown("##### Bias vulnerability map")
+            st.bar_chart(bias_scores.set_index("Bias")[["Score"]], use_container_width=True)
+        with b2:
+            st.markdown("##### Scored tendencies")
+            st.dataframe(
+                bias_scores,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.ProgressColumn("Vulnerability", min_value=0, max_value=100, format="%.0f"),
+                    "AnsweredItems": st.column_config.NumberColumn("Answered items", format="%d"),
+                },
+            )
+
+    guardrails = assessment.get("Guardrails")
+    st.markdown("##### Required behavioral guardrails")
+    if isinstance(guardrails, pd.DataFrame):
+        st.dataframe(guardrails, use_container_width=True, hide_index=True)
+    st.markdown("##### Communication plan")
+    for recommendation in assessment.get("CommunicationPlan", []):
+        st.write(f"- {recommendation}")
+
+    st.download_button(
+        "Download Behavioral Profile (JSON)",
+        data=json.dumps(saved, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name=f"client_behavioral_profile_{saved.get('assessment_date', 'latest')}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    st.caption(
+        f"Evidence: {saved_source} · Assessment date: {saved.get('assessment_date', 'n/a')} · "
+        "Reassess after a material life event, mandate change, or observed behavior during market stress."
+    )
 
 
 def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any]) -> None:
@@ -5727,12 +6042,14 @@ def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> N
         str(item.get("name")) for item in mandate.get("goals", [])
         if isinstance(item, dict) and item.get("name")
     ]
-    mandate_tab, rulebook_tab, alignment_tab, pretrade_tab, thesis_tab, catalysts_tab, universe_tab, decisions_tab, review_tab = st.tabs([
-        "Client Mandate", "Strategy Rulebook", "Alignment & Drift", "Pre-Trade Lab",
+    mandate_tab, behavior_tab, rulebook_tab, alignment_tab, pretrade_tab, thesis_tab, catalysts_tab, universe_tab, decisions_tab, review_tab = st.tabs([
+        "Client Mandate", "Behavioral Profile", "Strategy Rulebook", "Alignment & Drift", "Pre-Trade Lab",
         "Thesis Monitor", "Catalyst Calendar", "Approved Universe", "Decision Journal", "Review & Learning",
     ])
     with mandate_tab:
         _render_client_mandate(profile, data.get("mandate_record"))
+    with behavior_tab:
+        _render_client_behavioral_profile(profile, data.get("mandate_record"))
     with rulebook_tab:
         _render_strategy_rulebook(profile, data)
     with alignment_tab:

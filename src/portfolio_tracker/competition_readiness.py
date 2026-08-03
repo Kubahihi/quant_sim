@@ -36,6 +36,9 @@ def assess_strategy_constitution(mandate_record: Any, strategy_record: Any) -> d
     """Score explicit client and process rules; no market performance enters the score."""
     mandate = _payload(mandate_record)
     strategy = _payload(strategy_record)
+    behavior = mandate.get("behavioral_profile") if isinstance(mandate.get("behavioral_profile"), Mapping) else {}
+    behavior_answers = behavior.get("answers") if isinstance(behavior.get("answers"), Mapping) else {}
+    behavior_actions = behavior.get("drawdown_actions") if isinstance(behavior.get("drawdown_actions"), Mapping) else {}
     checks = [
         ("client", "Named client and case status", _present(mandate.get("client_name")) and _present(mandate.get("case_status"))),
         ("goals", "Measurable client goal buckets", _present(mandate.get("goals"))),
@@ -47,6 +50,11 @@ def assess_strategy_constitution(mandate_record: Any, strategy_record: Any) -> d
         ("liquidity", "Liquidity need explicitly quantified", mandate.get("liquidity_need_pct") is not None),
         ("constraints", "Values and investment constraints", _present(mandate.get("values_constraints")) or _present(mandate.get("values_constraints_text"))),
         ("benchmark", "Policy benchmark and rationale", _present(mandate.get("policy_benchmark")) and _present(mandate.get("policy_benchmark_rationale"))),
+        (
+            "behavior",
+            "Behavioral profile, drawdown actions, and decision protocol",
+            len(behavior_answers) >= 10 and len(behavior_actions) >= 3 and _present(behavior.get("decision_protocol")),
+        ),
         ("thesis", "One-sentence strategy thesis", any(_present(strategy.get(key)) for key in ("thesis", "strategy_thesis", "one_sentence_thesis"))),
         ("selection", "Security-selection rules", any(_present(strategy.get(key)) for key in ("process", "selection_process", "selection_factors"))),
         ("sizing", "Position and sector sizing rules", float(strategy.get("max_position_weight") or 0) > 0 and float(strategy.get("max_sector_weight") or 0) > 0),

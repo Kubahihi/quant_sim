@@ -298,6 +298,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert any("Strategy Lab" in item.value for item in at.markdown)
     strategy_tab_labels = [tab.label for tab in at.tabs]
     assert "Client Mandate" in strategy_tab_labels
+    assert "Behavioral Profile" in strategy_tab_labels
     assert "Alignment & Drift" in strategy_tab_labels
     assert "Thesis Monitor" in strategy_tab_labels
 
