@@ -37,10 +37,11 @@ from src.analytics.portfolio_metrics import (
 from src.analytics.risk_metrics import calculate_cvar, calculate_var
 
 from .wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
+from .bond_analytics import build_fixed_income_analytics
 
 
 ACTUAL_LEDGER_LABEL = (
-    "Actual tracked ledger P/L from recorded entry, exit, and current prices."
+    "Actual tracked ledger P/L from recorded prices, FX, and cash income."
 )
 RISK_PROXY_LABEL = (
     "Current-weight historical risk proxy; not the realised competition return path."
@@ -59,6 +60,7 @@ _TICKER_ATTRIBUTION_COLUMNS = [
     "CurrentValue",
     "RealizedPnL",
     "UnrealizedPnL",
+    "CouponIncome",
     "TotalPnL",
     "ReturnContribution",
     "ContributionToTotalPnL",
@@ -75,6 +77,7 @@ _GROUP_ATTRIBUTION_COLUMNS = [
     "CurrentValue",
     "RealizedPnL",
     "UnrealizedPnL",
+    "CouponIncome",
     "TotalPnL",
     "ReturnContribution",
     "ContributionToTotalPnL",
@@ -90,6 +93,7 @@ _OPEN_EXPOSURE_COLUMNS = [
     "CurrentPrice",
     "CurrentValue",
     "UnrealizedPnL",
+    "CouponIncome",
     "UnrealizedReturn",
     "Weight",
     "OpenLots",
@@ -279,6 +283,7 @@ def _build_ledger_attribution(
                 "CurrentValue": 0.0,
                 "RealizedPnL": 0.0,
                 "UnrealizedPnL": 0.0,
+                "CouponIncome": 0.0,
                 "TotalPnL": 0.0,
                 "_price_sources": set(),
             },
@@ -287,8 +292,10 @@ def _build_ledger_attribution(
         quantity = _finite_float(item.get("quantity"))
         cost = _finite_float(item.get("cost"))
         pnl = _finite_float(item.get("pnl"))
+        coupon_income = _finite_float(item.get("coupon_income"))
         row["TotalCost"] += cost
         row["TotalPnL"] += pnl
+        row["CouponIncome"] += coupon_income
         if status == "closed":
             row["ClosedLots"] += 1
             row["ClosedQuantity"] += quantity
@@ -298,7 +305,7 @@ def _build_ledger_attribution(
             row["OpenQuantity"] += quantity
             row["OpenCost"] += cost
             row["CurrentValue"] += _finite_float(item.get("current_value"))
-            row["UnrealizedPnL"] += pnl
+            row["UnrealizedPnL"] += _finite_float(item.get("price_pnl"), pnl - coupon_income)
             source = str(item.get("price_source") or "unknown").strip()
             if source:
                 row["_price_sources"].add(source)
@@ -333,6 +340,7 @@ def _group_attribution(
         "CurrentValue",
         "RealizedPnL",
         "UnrealizedPnL",
+        "CouponIncome",
         "TotalPnL",
         "ReturnContribution",
     ]
@@ -380,6 +388,7 @@ def _build_open_exposures(
                 "CurrentPrice": current_value / quantity if not np.isclose(quantity, 0.0) else np.nan,
                 "CurrentValue": current_value,
                 "UnrealizedPnL": _finite_float(item.get("UnrealizedPnL")),
+                "CouponIncome": _finite_float(item.get("CouponIncome")),
                 "UnrealizedReturn": (
                     _finite_float(item.get("UnrealizedPnL")) / open_cost
                     if not np.isclose(open_cost, 0.0)
@@ -494,8 +503,10 @@ def build_live_competition_analytics(
     goal_attribution = _group_attribution(ticker_attribution, "ClientGoal")
 
     current_equity = _finite_float(performance.get("equity"))
-    current_cash = _finite_float(performance.get("cash_before_pnl")) + _finite_float(
-        performance.get("realized_pnl")
+    current_cash = (
+        _finite_float(performance.get("cash_before_pnl"))
+        + _finite_float(performance.get("realized_pnl"))
+        + _finite_float(performance.get("open_cash_income"))
     )
     open_exposures = _build_open_exposures(ticker_attribution, prices, current_equity)
     open_market_value = float(open_exposures["CurrentValue"].sum()) if not open_exposures.empty else 0.0
@@ -725,6 +736,11 @@ def build_live_competition_analytics(
         "entry_fallback_symbols": fallback_tickers,
     }
 
+    fixed_income = build_fixed_income_analytics(
+        clean_positions,
+        performance.get("positions", []),
+    )
+
     return {
         "available": bool(clean_positions),
         "risk_proxy_available": risk_proxy_available,
@@ -750,6 +766,7 @@ def build_live_competition_analytics(
         "risk_contribution": risk_contribution,
         "proxy_return_contribution": proxy_return_contribution,
         "coverage": coverage,
+        "fixed_income": fixed_income,
         "warnings": warnings,
     }
 

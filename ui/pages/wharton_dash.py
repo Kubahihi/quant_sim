@@ -77,13 +77,14 @@ QUANT_RESULT_KEY = "wharton_quant_result"
 QUANT_ERROR_KEY = "wharton_quant_error"
 QUANT_STACK_RESULT_KEY = "wharton_quant_stack_result"
 COMPANY_ANALYSIS_KEY = "wharton_company_analysis_v1"
+BOND_ANALYSIS_KEY = "wharton_bond_analysis_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
 HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
 
 COCKPIT_AREAS = {
     "Home": ("Overview & Tasks", "Competition Readiness", "Assignment & Rules"),
     "Portfolio": ("Strategy & Decisions", "Portfolio Tracker"),
-    "Research": ("Company Analysis", "Stock Screener"),
+    "Research": ("Company Analysis", "Bond Analysis", "Stock Screener"),
     "Risk & Quant": ("Quant Engine", "Risk Cockpit", "Factor Exposure", "Regime Detection"),
     "Scenarios": (
         "Scenario Playground",
@@ -111,6 +112,7 @@ COCKPIT_PANEL_DESCRIPTIONS = {
     "Strategy & Decisions": "Document the mandate, strategy, theses, catalysts, and decisions.",
     "Portfolio Tracker": "Track positions, performance, ownership, and reconciliation.",
     "Company Analysis": "Review company evidence, regions, financials, management, moat, and valuation.",
+    "Bond Analysis": "Value a bond or bond ETF and inspect yield, cash flows, duration, and rate sensitivity.",
     "Stock Screener": "Filter and rank the investable universe before deeper research.",
     "Quant Engine": "Configure and run the shared analytical pipeline.",
     "Risk Cockpit": "Inspect portfolio-level risk signals and concentrations.",
@@ -331,9 +333,88 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'open',
                 exit_price REAL,
                 exit_date TEXT,
-                closed_by TEXT
+                closed_by TEXT,
+                bond_instrument_type TEXT DEFAULT '',
+                bond_category TEXT DEFAULT '',
+                isin TEXT DEFAULT '',
+                issuer TEXT DEFAULT '',
+                currency TEXT DEFAULT 'USD',
+                face_value REAL,
+                coupon_rate REAL,
+                maturity_date TEXT,
+                coupon_frequency INTEGER DEFAULT 2,
+                next_coupon_date TEXT,
+                entry_accrued_interest REAL DEFAULT 0,
+                accrued_interest REAL DEFAULT 0,
+                entry_fx_rate_to_usd REAL DEFAULT 1,
+                fx_rate_to_usd REAL DEFAULT 1,
+                exit_accrued_interest REAL DEFAULT 0,
+                exit_fx_rate_to_usd REAL DEFAULT 1,
+                coupon_income REAL DEFAULT 0,
+                yield_to_maturity REAL,
+                modified_duration REAL,
+                convexity REAL,
+                credit_rating TEXT DEFAULT '',
+                seniority TEXT DEFAULT '',
+                valuation_source TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
+                price_observed_at TEXT,
+                callable INTEGER DEFAULT 0,
+                call_date TEXT,
+                call_price REAL,
+                benchmark_name TEXT DEFAULT '',
+                benchmark_yield REAL,
+                income_yield REAL,
+                default_probability REAL,
+                recovery_rate REAL,
+                competition_eligibility_status TEXT DEFAULT 'Pending verification',
+                eligibility_source TEXT DEFAULT '',
+                eligibility_checked_at TEXT
             )
         """)
+        position_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(competition_positions)").fetchall()
+        }
+        for col, definition in [
+            ("bond_instrument_type", "TEXT DEFAULT ''"),
+            ("bond_category", "TEXT DEFAULT ''"),
+            ("isin", "TEXT DEFAULT ''"),
+            ("issuer", "TEXT DEFAULT ''"),
+            ("currency", "TEXT DEFAULT 'USD'"),
+            ("face_value", "REAL"),
+            ("coupon_rate", "REAL"),
+            ("maturity_date", "TEXT"),
+            ("coupon_frequency", "INTEGER DEFAULT 2"),
+            ("next_coupon_date", "TEXT"),
+            ("entry_accrued_interest", "REAL DEFAULT 0"),
+            ("accrued_interest", "REAL DEFAULT 0"),
+            ("entry_fx_rate_to_usd", "REAL DEFAULT 1"),
+            ("fx_rate_to_usd", "REAL DEFAULT 1"),
+            ("exit_accrued_interest", "REAL DEFAULT 0"),
+            ("exit_fx_rate_to_usd", "REAL DEFAULT 1"),
+            ("coupon_income", "REAL DEFAULT 0"),
+            ("yield_to_maturity", "REAL"),
+            ("modified_duration", "REAL"),
+            ("convexity", "REAL"),
+            ("credit_rating", "TEXT DEFAULT ''"),
+            ("seniority", "TEXT DEFAULT ''"),
+            ("valuation_source", "TEXT DEFAULT ''"),
+            ("source_url", "TEXT DEFAULT ''"),
+            ("price_observed_at", "TEXT"),
+            ("callable", "INTEGER DEFAULT 0"),
+            ("call_date", "TEXT"),
+            ("call_price", "REAL"),
+            ("benchmark_name", "TEXT DEFAULT ''"),
+            ("benchmark_yield", "REAL"),
+            ("income_yield", "REAL"),
+            ("default_probability", "REAL"),
+            ("recovery_rate", "REAL"),
+            ("competition_eligibility_status", "TEXT DEFAULT 'Pending verification'"),
+            ("eligibility_source", "TEXT DEFAULT ''"),
+            ("eligibility_checked_at", "TEXT"),
+        ]:
+            if col not in position_cols:
+                conn.execute(f"ALTER TABLE competition_positions ADD COLUMN {col} {definition}")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
@@ -6108,6 +6189,7 @@ def _render_wins_reconciliation(
         normalize_wins_rows,
         reconcile_wins_positions,
     )
+    from src.portfolio_tracker.bond_analytics import position_cost_usd, value_position
 
     with st.expander("WInS Reconciliation", expanded=False):
         st.caption(
@@ -6155,6 +6237,8 @@ def _render_wins_reconciliation(
                 if market_price in (None, "", 0, 0.0):
                     market_price = row.get("entry_price")
                 row["current_price"] = market_price
+                row["total_cost"] = position_cost_usd(row)
+                row["current_value"] = value_position(row, market_price)["current_value"]
             tracked_snapshot.append(row)
 
         result = reconcile_wins_positions(uploaded_rows, tracked_snapshot)
@@ -6240,6 +6324,7 @@ def _render_live_competition_analytics(
     live_prices: dict[str, float],
 ) -> None:
     from src.portfolio_tracker.live_analytics import build_live_competition_analytics
+    from src.portfolio_tracker.bond_analytics import is_individual_bond
     from src.portfolio_tracker.research_health import assess_research_health
     from src.portfolio_tracker.strategy_store import list_holding_theses
 
@@ -6247,6 +6332,13 @@ def _render_live_competition_analytics(
         str(row.get("ticker") or "").upper()
         for row in positions
         if row.get("ticker") and str(row.get("status") or "open").lower() == "open"
+    ))
+    market_history_tickers = list(dict.fromkeys(
+        str(row.get("ticker") or "").upper()
+        for row in positions
+        if row.get("ticker")
+        and str(row.get("status") or "open").lower() == "open"
+        and not is_individual_bond(row)
     ))
     st.markdown("#### Live Competition Portfolio Analytics")
     st.caption(
@@ -6267,7 +6359,7 @@ def _render_live_competition_analytics(
     if run_live_analytics:
         end_date = date.today() + timedelta(days=1)
         start_date = end_date - timedelta(days=365 * int(lookback_years))
-        history_symbols = list(dict.fromkeys([*open_tickers, *([benchmark] if benchmark else [])]))
+        history_symbols = list(dict.fromkeys([*market_history_tickers, *([benchmark] if benchmark else [])]))
         with st.spinner("Loading histories and calculating live-portfolio analytics…"):
             prices = _fetch_close_prices_cached(tuple(history_symbols), start_date, end_date)
             asset_prices = prices.reindex(columns=open_tickers) if open_tickers else pd.DataFrame(index=prices.index)
@@ -6304,6 +6396,18 @@ def _render_live_competition_analytics(
                 ticker: {"observed_at": date.today().isoformat(), "source": "Yahoo Finance"}
                 for ticker in open_tickers if ticker in live_prices
             }
+            for position in positions:
+                ticker = str(position.get("ticker") or "").upper()
+                if (
+                    ticker
+                    and str(position.get("status") or "open").lower() == "open"
+                    and is_individual_bond(position)
+                    and position.get("price_observed_at")
+                ):
+                    price_observations[ticker] = {
+                        "observed_at": str(position.get("price_observed_at")),
+                        "source": str(position.get("valuation_source") or "Manual bond valuation"),
+                    }
             analytics_result["research_health"] = assess_research_health(
                 open_tickers,
                 theses=thesis_records,
@@ -6444,8 +6548,550 @@ def _render_live_competition_analytics(
         st.caption(str(health.get("macro_policy") or ""))
 
 
+def _render_fixed_income_dashboard(
+    positions: list[dict[str, Any]],
+    performance_rows: list[dict[str, Any]],
+) -> None:
+    from src.portfolio_tracker.bond_analytics import (
+        build_fixed_income_analytics,
+        stress_fixed_income,
+    )
+
+    analytics = build_fixed_income_analytics(positions, performance_rows)
+    if not analytics.get("available"):
+        return
+
+    st.markdown("#### Fixed-Income Dashboard")
+    st.caption(
+        "Individual bonds use clean price plus accrued interest and FX. Bond ETFs retain share-price valuation."
+    )
+    metrics = st.columns(6)
+    metrics[0].metric("Fixed-income value", f"${float(analytics.get('market_value_usd') or 0):,.0f}")
+    metrics[1].metric("Weighted YTW", _fmt_pct(analytics.get("weighted_yield_to_worst")))
+    metrics[2].metric(
+        "Benchmark spread",
+        f"{float(analytics.get('weighted_spread_to_benchmark') or 0) * 10_000:+,.0f} bp"
+        if analytics.get("weighted_spread_to_benchmark") is not None else "n/a",
+    )
+    metrics[3].metric("Modified duration", _fmt_float(analytics.get("weighted_modified_duration")))
+    metrics[4].metric("Portfolio DV01", f"${float(analytics.get('portfolio_dv01_usd') or 0):,.2f}")
+    metrics[5].metric("Expected credit loss", f"${float(analytics.get('expected_credit_loss_usd') or 0):,.2f}")
+
+    overview_tab, cashflow_tab, exposure_tab, stress_tab = st.tabs(
+        ["Bond Overview", "Cash-Flow Calendar", "Concentrations", "Rate & Spread Stress"]
+    )
+    with overview_tab:
+        overview = analytics.get("overview")
+        if isinstance(overview, pd.DataFrame) and not overview.empty:
+            display_overview = overview.copy()
+            for percentage_column in (
+                "CouponRate", "CurrentYield", "YieldToMaturity", "YieldToCall",
+                "YieldToWorst", "BenchmarkYield", "SpreadToBenchmark",
+            ):
+                display_overview[percentage_column] = pd.to_numeric(
+                    display_overview[percentage_column], errors="coerce"
+                ) * 100.0
+            st.dataframe(
+                display_overview,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "MarketValueUSD": st.column_config.NumberColumn("Market Value", format="$%.2f"),
+                    "CouponRate": st.column_config.NumberColumn("Coupon", format="%.2f%%"),
+                    "CurrentYield": st.column_config.NumberColumn("Current Yield", format="%.2f%%"),
+                    "YieldToMaturity": st.column_config.NumberColumn("YTM", format="%.2f%%"),
+                    "YieldToCall": st.column_config.NumberColumn("YTC", format="%.2f%%"),
+                    "YieldToWorst": st.column_config.NumberColumn("YTW", format="%.2f%%"),
+                    "BenchmarkYield": st.column_config.NumberColumn("Benchmark", format="%.2f%%"),
+                    "SpreadToBenchmark": st.column_config.NumberColumn("Spread", format="%.2f%%"),
+                    "DV01USD": st.column_config.NumberColumn("DV01", format="$%.2f"),
+                },
+            )
+            st.download_button(
+                "Download Bond Overview (CSV)",
+                data=overview.to_csv(index=False).encode("utf-8"),
+                file_name=f"fixed_income_overview_{analytics.get('as_of')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        st.caption("YTM is solved from the entered dirty price unless an override is supplied. ETF metrics require provider/manual overrides.")
+    with cashflow_tab:
+        cashflows = analytics.get("cashflows")
+        if isinstance(cashflows, pd.DataFrame) and not cashflows.empty:
+            st.dataframe(
+                cashflows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"TotalUSD": st.column_config.NumberColumn("Total USD", format="$%.2f")},
+            )
+            st.download_button(
+                "Download Cash-Flow Calendar (CSV)",
+                data=cashflows.to_csv(index=False).encode("utf-8"),
+                file_name=f"fixed_income_cashflows_{analytics.get('as_of')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        else:
+            st.info("Cash-flow dates are available for individual bonds with maturity and coupon data.")
+    with exposure_tab:
+        e1, e2 = st.columns(2)
+        with e1:
+            st.markdown("##### Maturity ladder")
+            st.dataframe(analytics["maturity_ladder"], use_container_width=True, hide_index=True)
+            st.markdown("##### Currency exposure")
+            st.dataframe(analytics["currency_exposure"], use_container_width=True, hide_index=True)
+        with e2:
+            st.markdown("##### Issuer exposure")
+            st.dataframe(analytics["issuer_exposure"], use_container_width=True, hide_index=True)
+            st.markdown("##### Rating exposure")
+            st.dataframe(analytics["rating_exposure"], use_container_width=True, hide_index=True)
+    with stress_tab:
+        with st.form("fixed_income_stress_form"):
+            s1, s2 = st.columns(2)
+            with s1:
+                curve_shock = st.number_input("Parallel curve shock (bp)", value=100.0, step=25.0)
+            with s2:
+                spread_shock = st.number_input("Credit-spread shock (bp)", value=50.0, step=25.0)
+            run_stress = st.form_submit_button("Run Fixed-Income Stress", use_container_width=True)
+        if run_stress:
+            stress = stress_fixed_income(
+                analytics,
+                curve_shock_bps=float(curve_shock),
+                credit_spread_shock_bps=float(spread_shock),
+            )
+            total_pnl = float(stress["EstimatedPnLUSD"].fillna(0.0).sum()) if not stress.empty else 0.0
+            st.metric("Estimated fixed-income P/L", f"${total_pnl:+,.2f}")
+            st.dataframe(stress, use_container_width=True, hide_index=True)
+            st.caption("Deterministic duration-convexity estimate; it is a sensitivity, not a forecast.")
+
+
+def _render_bond_analysis(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.bond_analytics import (
+        assess_bond_data_quality,
+        build_bond_sensitivity,
+        build_fixed_income_analytics,
+        build_rate_spread_scenario_grid,
+        calculate_bond_metrics,
+        is_individual_bond,
+        value_position,
+    )
+    from src.portfolio_tracker.bond_competition import (
+        ELIGIBILITY_INELIGIBLE,
+        ELIGIBILITY_PENDING,
+        ELIGIBILITY_VERIFIED,
+        assess_bond_competition_case,
+        build_bond_pitch_questions,
+        build_bond_relative_value_table,
+        generate_bond_competition_memo,
+    )
+    from src.portfolio_tracker.wharton_competition import calculate_portfolio_performance
+
+    st.markdown("### Bond Analysis")
+    st.caption(
+        "Analyze an individual bond from contractual cash flows or a bond ETF from provider/manual yield and duration data."
+    )
+    single_tab, portfolio_tab = st.tabs(["Single Bond / ETF", "Saved Fixed-Income Portfolio"])
+
+    with single_tab:
+        with st.form("standalone_bond_analysis_form"):
+            a1, a2, a3, a4 = st.columns(4)
+            with a1:
+                identifier = st.text_input("Identifier", placeholder="Ticker, ISIN, or internal code").strip().upper()
+                instrument_label = st.selectbox("Instrument", ["Individual bond", "Bond ETF"])
+                issuer = st.text_input("Issuer / fund provider")
+                bond_category = st.selectbox("Category", ["Corporate", "Government", "Municipal", "Sovereign", "Other"])
+            with a2:
+                quantity = st.number_input("Quantity", min_value=0.000001, value=1.0, step=1.0)
+                face_value = st.number_input("Face value per bond", min_value=0.01, value=1000.0, step=100.0)
+                entry_price = st.number_input("Entry clean price / unit price", min_value=0.000001, value=100.0, step=0.01)
+                current_price = st.number_input("Current clean price / unit price", min_value=0.000001, value=100.0, step=0.01)
+            with a3:
+                coupon_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.01)
+                coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1, key="analysis_coupon_frequency")
+                accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                entry_accrued = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+            with a4:
+                as_of = st.date_input("Analysis date", value=date.today())
+                maturity = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
+                next_coupon = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
+                coupon_income = st.number_input("Coupons received (USD)", min_value=0.0, value=0.0, step=1.0)
+
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                currency = st.text_input("Currency", value="USD", key="analysis_bond_currency").strip().upper()
+                entry_fx = st.number_input("Entry FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f", key="analysis_entry_fx")
+            with b2:
+                current_fx = st.number_input("Current FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f", key="analysis_current_fx")
+                credit_rating = st.text_input("Credit rating", placeholder="e.g. A-")
+            with b3:
+                ytm_override_pct = st.number_input("YTM override (%)", value=0.0, step=0.01, help="Zero calculates YTM for an individual bond.")
+                duration_override = st.number_input("Modified duration override", min_value=0.0, value=0.0, step=0.1)
+            with b4:
+                convexity_override = st.number_input("Convexity override", min_value=0.0, value=0.0, step=0.1)
+                source = st.text_input("Data source / reference")
+                source_url = st.text_input("Source URL / document reference")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                callable_bond = st.checkbox("Callable bond")
+                call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2))
+                call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01)
+            with c2:
+                benchmark_name = st.text_input("Yield benchmark", placeholder="e.g. 5Y U.S. Treasury")
+                benchmark_yield_pct = st.number_input("Benchmark yield (%)", value=0.0, step=0.01)
+                income_yield_pct = st.number_input("ETF income yield (%)", min_value=0.0, value=0.0, step=0.01)
+            with c3:
+                default_probability_pct = st.number_input("Annual default probability (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.05)
+                recovery_rate_pct = st.number_input("Recovery rate (%)", min_value=0.0, max_value=100.0, value=40.0, step=1.0)
+            with c4:
+                scenario_horizon = st.number_input("Scenario horizon (years)", min_value=0.1, max_value=10.0, value=1.0, step=0.5)
+            st.markdown("##### Competition case")
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                client_goal = st.text_input("Client goal served", placeholder="e.g. income with capital preservation")
+                portfolio_role = st.selectbox(
+                    "Portfolio role",
+                    ["Income", "Capital preservation", "Diversifier", "Liquidity reserve", "Liability matching", "Tactical rate view", "Other"],
+                )
+            with d2:
+                proposed_weight_pct = st.number_input("Proposed portfolio weight (%)", min_value=0.0, max_value=100.0, value=2.0, step=0.5)
+                max_position_weight_pct = st.number_input("Team position limit (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.5)
+            with d3:
+                eligibility_status = st.selectbox(
+                    "Current WInS eligibility",
+                    [ELIGIBILITY_PENDING, ELIGIBILITY_VERIFIED, ELIGIBILITY_INELIGIBLE],
+                    help="Do not mark eligible until the current official trading rules or WInS security list confirms it.",
+                )
+                eligibility_checked_at = st.date_input("Eligibility checked on", value=date.today())
+            with d4:
+                eligibility_source = st.text_input("Eligibility source", placeholder="Official rules or WInS list reference")
+            thesis = st.text_area("Bond thesis", height=75, placeholder="Why this security should deliver the intended client outcome")
+            e1, e2 = st.columns(2)
+            with e1:
+                why_now = st.text_area("Why now / catalyst", height=70)
+                risks = st.text_area("Key risks", height=70)
+            with e2:
+                invalidation = st.text_area("Observable invalidation condition", height=70)
+                sell_discipline = st.text_area("Sell / review discipline", height=70)
+            counter_thesis = st.text_input("Strongest counter-thesis")
+            run_analysis = st.form_submit_button("Run Bond Analysis", type="primary", use_container_width=True)
+
+        if run_analysis:
+            individual = instrument_label == "Individual bond"
+            if not identifier:
+                st.error("Enter an identifier.")
+            elif individual and maturity <= as_of:
+                st.error("Maturity must be after the analysis date.")
+            elif individual and callable_bond and not (as_of < call_date < maturity):
+                st.error("The first call date must be after the analysis date and before maturity.")
+            elif not individual and duration_override <= 0:
+                st.error("A bond ETF needs a modified-duration input for rate sensitivity.")
+            else:
+                position = {
+                    "id": "standalone",
+                    "ticker": identifier,
+                    "security_type": "Bond",
+                    "bond_instrument_type": "individual" if individual else "etf",
+                    "bond_category": bond_category,
+                    "isin": identifier if individual and len(identifier) == 12 else "",
+                    "issuer": issuer.strip(),
+                    "currency": currency or "USD",
+                    "quantity": float(quantity),
+                    "face_value": float(face_value) if individual else None,
+                    "entry_price": float(entry_price),
+                    "last_price": float(current_price),
+                    "coupon_rate": float(coupon_pct) / 100.0 if individual else None,
+                    "coupon_frequency": int(coupon_frequency) if individual else None,
+                    "entry_accrued_interest": float(entry_accrued) if individual else 0.0,
+                    "accrued_interest": float(accrued_interest) if individual else 0.0,
+                    "maturity_date": maturity.isoformat() if individual else None,
+                    "next_coupon_date": next_coupon.isoformat() if individual else None,
+                    "entry_fx_rate_to_usd": float(entry_fx) if individual else 1.0,
+                    "fx_rate_to_usd": float(current_fx) if individual else 1.0,
+                    "coupon_income": float(coupon_income),
+                    "yield_to_maturity": float(ytm_override_pct) / 100.0 if ytm_override_pct else None,
+                    "modified_duration": float(duration_override) if duration_override else None,
+                    "convexity": float(convexity_override) if convexity_override else None,
+                    "credit_rating": credit_rating.strip(),
+                    "valuation_source": source.strip(),
+                    "source_url": source_url.strip(),
+                    "price_observed_at": as_of.isoformat(),
+                    "callable": int(callable_bond and individual),
+                    "call_date": call_date.isoformat() if callable_bond and individual else None,
+                    "call_price": float(call_price) if callable_bond and individual else None,
+                    "benchmark_name": benchmark_name.strip(),
+                    "benchmark_yield": float(benchmark_yield_pct) / 100.0 if benchmark_yield_pct else None,
+                    "income_yield": float(income_yield_pct) / 100.0 if income_yield_pct else None,
+                    "default_probability": float(default_probability_pct) / 100.0 if default_probability_pct else 0.0,
+                    "recovery_rate": float(recovery_rate_pct) / 100.0,
+                    "competition_eligibility_status": eligibility_status,
+                    "eligibility_source": eligibility_source.strip(),
+                    "eligibility_checked_at": eligibility_checked_at.isoformat() if eligibility_status != ELIGIBILITY_PENDING else None,
+                    "analysis_horizon": float(scenario_horizon),
+                    "status": "open",
+                }
+                competition_case = {
+                    "client_goal": client_goal.strip(),
+                    "portfolio_role": portfolio_role,
+                    "proposed_weight": float(proposed_weight_pct) / 100.0,
+                    "max_position_weight": float(max_position_weight_pct) / 100.0,
+                    "eligibility_status": eligibility_status,
+                    "eligibility_source": eligibility_source.strip(),
+                    "eligibility_checked_at": eligibility_checked_at.isoformat() if eligibility_status != ELIGIBILITY_PENDING else None,
+                    "thesis": thesis.strip(),
+                    "why_now": why_now.strip(),
+                    "risks": risks.strip(),
+                    "invalidation": invalidation.strip(),
+                    "sell_discipline": sell_discipline.strip(),
+                    "counter_thesis": counter_thesis.strip(),
+                }
+                metrics = calculate_bond_metrics(position, current_price, as_of=as_of)
+                valuation = value_position(position, current_price)
+                sensitivity = build_bond_sensitivity(position, current_price, as_of=as_of)
+                scenario_grid = build_rate_spread_scenario_grid(
+                    position, current_price, as_of=as_of, horizon_years=scenario_horizon,
+                )
+                data_quality = assess_bond_data_quality(position, as_of=as_of)
+                competition_readiness = assess_bond_competition_case(
+                    position, metrics, data_quality, competition_case, scenario_grid=scenario_grid,
+                )
+                pitch_questions = build_bond_pitch_questions(
+                    position, metrics, competition_readiness, competition_case,
+                )
+                st.session_state[BOND_ANALYSIS_KEY] = {
+                    "position": position,
+                    "metrics": metrics,
+                    "valuation": valuation,
+                    "sensitivity": sensitivity,
+                    "scenario_grid": scenario_grid,
+                    "data_quality": data_quality,
+                    "competition_case": competition_case,
+                    "competition_readiness": competition_readiness,
+                    "pitch_questions": pitch_questions,
+                    "as_of": as_of.isoformat(),
+                }
+
+        result = st.session_state.get(BOND_ANALYSIS_KEY)
+        if not isinstance(result, dict):
+            st.info("Enter bond terms above to calculate valuation, yield, cash flows, and sensitivity.")
+        else:
+            position = result["position"]
+            metrics = result["metrics"]
+            valuation = result["valuation"]
+            sensitivity = result["sensitivity"]
+            scenario_grid = result.get("scenario_grid")
+            data_quality = result.get("data_quality", {})
+            competition_case = result.get("competition_case", {})
+            competition_readiness = result.get("competition_readiness", {})
+            pitch_questions = result.get("pitch_questions", [])
+            st.markdown(f"#### {position['ticker']} · {str(position.get('bond_instrument_type')).title()}")
+            if position.get("valuation_source"):
+                st.caption(f"Input source: {position['valuation_source']} · Analysis date: {result['as_of']}")
+            kpis = st.columns(6)
+            kpis[0].metric("Dirty price", _fmt_float(metrics.get("dirty_price"), 3))
+            kpis[1].metric("Market value", f"${float(metrics.get('market_value_usd') or 0):,.2f}")
+            kpis[2].metric("YTM", _fmt_pct(metrics.get("yield_to_maturity")))
+            kpis[3].metric("Current yield", _fmt_pct(metrics.get("current_yield")))
+            kpis[4].metric("Modified duration", _fmt_float(metrics.get("modified_duration")))
+            kpis[5].metric("DV01", f"${float(metrics.get('dv01_usd') or 0):,.2f}")
+            advanced_kpis = st.columns(6)
+            advanced_kpis[0].metric("Yield to call", _fmt_pct(metrics.get("yield_to_call")))
+            advanced_kpis[1].metric("Yield to worst", _fmt_pct(metrics.get("yield_to_worst")))
+            advanced_kpis[2].metric("Benchmark spread", f"{float(metrics.get('spread_to_benchmark') or 0) * 10_000:+,.0f} bp" if metrics.get("spread_to_benchmark") is not None else "n/a")
+            advanced_kpis[3].metric("Annual income", f"${float(metrics.get('annual_income_usd') or 0):,.2f}")
+            advanced_kpis[4].metric("Expected credit loss", f"${float(metrics.get('expected_loss_usd') or 0):,.2f}" if metrics.get("expected_loss_usd") is not None else "n/a")
+            advanced_kpis[5].metric("Carry breakeven", f"{float(metrics.get('breakeven_yield_rise_bps') or 0):,.0f} bp" if metrics.get("breakeven_yield_rise_bps") is not None else "n/a")
+            st.caption(
+                f"Cost ${float(valuation.get('cost') or 0):,.2f} · Current value ${float(valuation.get('current_value') or 0):,.2f} · "
+                f"Coupon income ${float(valuation.get('coupon_income') or 0):,.2f} · Total P/L ${float(valuation.get('pnl') or 0):+,.2f}"
+            )
+
+            summary_tab, sensitivity_tab, credit_tab, cashflow_tab, competition_tab, quality_tab, method_tab = st.tabs(
+                ["Summary", "Yield Sensitivity", "Credit & Scenarios", "Cash Flows", "Competition Case", "Data Quality", "Methodology"]
+            )
+            with summary_tab:
+                st.dataframe(pd.DataFrame([{
+                    "Identifier": position["ticker"],
+                    "Issuer": position.get("issuer") or "Unassigned",
+                    "Category": position.get("bond_category"),
+                    "Currency": position.get("currency"),
+                    "Clean Price": metrics.get("clean_price"),
+                    "Accrued / 100": float(position.get("accrued_interest") or 0),
+                    "Maturity": metrics.get("maturity_date") or "ETF / no fixed maturity",
+                    "Years to Maturity": metrics.get("years_to_maturity"),
+                    "Macaulay Duration": metrics.get("macaulay_duration"),
+                    "Convexity": metrics.get("convexity"),
+                    "Credit Rating": position.get("credit_rating") or "Unrated",
+                    "Callable": "Yes" if position.get("callable") else "No",
+                    "Call Date": position.get("call_date") or "—",
+                    "Call Price": position.get("call_price"),
+                    "Benchmark": position.get("benchmark_name") or "—",
+                }]), use_container_width=True, hide_index=True)
+            with sensitivity_tab:
+                if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
+                    display_sensitivity = sensitivity.copy()
+                    for column in ("YieldToMaturity", "PriceChange"):
+                        display_sensitivity[column] = pd.to_numeric(display_sensitivity[column], errors="coerce") * 100.0
+                    st.dataframe(display_sensitivity, use_container_width=True, hide_index=True)
+                    chart = sensitivity.dropna(subset=["CleanPrice"]).set_index("ShockBps")["CleanPrice"]
+                    if not chart.empty:
+                        st.line_chart(chart.rename("Clean price"))
+                    st.download_button(
+                        "Download Sensitivity (CSV)", sensitivity.to_csv(index=False).encode("utf-8"),
+                        file_name=f"bond_sensitivity_{position['ticker']}_{result['as_of']}.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+                else:
+                    st.warning("Sensitivity is unavailable. Supply YTM and duration data.")
+            with credit_tab:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Default probability", _fmt_pct(metrics.get("default_probability")))
+                c2.metric("Recovery rate", _fmt_pct(metrics.get("recovery_rate")))
+                c3.metric("Expected loss rate", _fmt_pct(metrics.get("expected_loss_rate")))
+                c4.metric("Scenario horizon", f"{float(position.get('analysis_horizon') or 1):.1f}Y")
+                if isinstance(scenario_grid, pd.DataFrame) and not scenario_grid.empty:
+                    display_grid = scenario_grid.copy()
+                    display_grid["ExpectedReturn"] = pd.to_numeric(display_grid["ExpectedReturn"], errors="coerce") * 100.0
+                    st.dataframe(display_grid, use_container_width=True, hide_index=True)
+                    pivot = scenario_grid.pivot(
+                        index="CurveShockBps", columns="SpreadShockBps", values="ExpectedReturn"
+                    )
+                    st.markdown("##### Expected return by curve and spread shock")
+                    st.dataframe(
+                        pivot.style.format("{:+.2%}").background_gradient(cmap="RdYlGn", axis=None),
+                        use_container_width=True,
+                    )
+                    st.download_button(
+                        "Download Scenario Grid (CSV)", scenario_grid.to_csv(index=False).encode("utf-8"),
+                        file_name=f"bond_scenarios_{position['ticker']}_{result['as_of']}.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+                st.caption("Expected loss is probability of default × loss given default. Scenario carry assumes the entered annual income remains unchanged over the selected horizon.")
+            with cashflow_tab:
+                performance_row = {
+                    **position,
+                    "current_price": metrics.get("clean_price"),
+                    "current_value": metrics.get("market_value_usd"),
+                    "price_source": "analysis input",
+                }
+                fixed_income = build_fixed_income_analytics(
+                    [position], [performance_row], as_of=result["as_of"]
+                )
+                cashflows = fixed_income.get("cashflows")
+                if isinstance(cashflows, pd.DataFrame) and not cashflows.empty:
+                    st.dataframe(cashflows, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "Download Cash Flows (CSV)", cashflows.to_csv(index=False).encode("utf-8"),
+                        file_name=f"bond_cashflows_{position['ticker']}_{result['as_of']}.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+                else:
+                    st.info("Bond ETFs have no fixed contractual cash-flow schedule.")
+            with competition_tab:
+                if not competition_readiness:
+                    st.info("Run the analysis again to generate the competition case.")
+                else:
+                    score = int(competition_readiness.get("score") or 0)
+                    status = str(competition_readiness.get("status") or "Not assessed")
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Case completeness", f"{score}/100")
+                    r2.metric("Decision gate", status)
+                    r3.metric("WInS eligibility", str(competition_readiness.get("eligibility_status") or ELIGIBILITY_PENDING))
+                    st.progress(score / 100.0)
+                    for blocker in competition_readiness.get("blockers", []):
+                        st.error(blocker)
+                    checks = pd.DataFrame(competition_readiness.get("checks", []))
+                    if not checks.empty:
+                        st.dataframe(checks, use_container_width=True, hide_index=True)
+                    st.markdown("##### Pitch-defense questions")
+                    for index, question in enumerate(pitch_questions, start=1):
+                        st.write(f"{index}. {question}")
+                    memo = generate_bond_competition_memo(
+                        position,
+                        metrics,
+                        competition_readiness,
+                        competition_case,
+                        questions=pitch_questions,
+                        generated_on=date.fromisoformat(result["as_of"]),
+                    )
+                    st.download_button(
+                        "Download Working Bond Memo (Markdown)",
+                        memo.encode("utf-8"),
+                        file_name=f"bond_case_{position['ticker']}_{result['as_of']}.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "The memo is an evidence worksheet, not submission-ready prose. Verify all numbers and sources, then write the final report in the team's own voice."
+                    )
+                    st.markdown(
+                        "Current official references: [2026–2027 Rules & Roles](https://globalyouth.wharton.upenn.edu/competitions/investment-competition/rules-roles/) · "
+                        "[Competition Deliverables](https://globalyouth.wharton.upenn.edu/competition-deliverables/)"
+                    )
+            with quality_tab:
+                if not data_quality:
+                    st.info("Run the analysis again to generate the input-quality review.")
+                else:
+                    score = int(data_quality.get("score") or 0)
+                    st.metric("Input quality", f"{score}/100", str(data_quality.get("status") or "unknown").title())
+                    st.progress(score / 100.0)
+                    issues = data_quality.get("issues", [])
+                    if not issues:
+                        st.success("Inputs are complete for the selected analytical scope.")
+                    for item in issues:
+                        severity = str(item.get("severity") or "info")
+                        message = str(item.get("message") or "")
+                        if severity == "error":
+                            st.error(message)
+                        elif severity == "warning":
+                            st.warning(message)
+                        else:
+                            st.info(message)
+            with method_tab:
+                st.markdown(
+                    "Individual bonds are discounted from their contractual coupon and principal cash flows. "
+                    "Yield sensitivity uses exact repricing. Bond ETFs use the supplied duration and convexity because their holdings change. "
+                    "Yield to worst is the lower available yield to maturity or first call. Benchmark spread is yield to worst minus the entered benchmark yield."
+                )
+                st.warning("Sensitivity results are deterministic analytical estimates, not price forecasts or investment advice.")
+
+    with portfolio_tab:
+        positions = _fetch_competition_positions()
+        bond_positions = [
+            row for row in positions
+            if str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
+        ]
+        if not bond_positions:
+            st.info("No saved bond or bond-ETF positions are available. Add one in Portfolio Tracker.")
+        else:
+            market_tickers = [
+                str(row.get("ticker") or "").upper()
+                for row in bond_positions
+                if str(row.get("status") or "open").lower() == "open" and not is_individual_bond(row)
+            ]
+            live_prices = _competition_live_prices(market_tickers)
+            performance = calculate_portfolio_performance(bond_positions, live_prices)
+            _render_fixed_income_dashboard(bond_positions, performance["positions"])
+            st.markdown("#### Relative-Value Shortlist")
+            relative_value = build_bond_relative_value_table(
+                bond_positions, performance["positions"], as_of=date.today(),
+            )
+            if relative_value.empty:
+                st.info("No open fixed-income positions are available for comparison.")
+            else:
+                st.dataframe(relative_value, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Download Relative-Value Table (CSV)",
+                    relative_value.to_csv(index=False).encode("utf-8"),
+                    file_name=f"bond_relative_value_{date.today().isoformat()}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption("Carry-after-loss and carry-per-duration are transparent comparison aids, not buy/sell scores.")
+
+
 def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
+    from src.portfolio_tracker.bond_analytics import is_individual_bond
 
     st.markdown("### Portfolio Tracker — Wharton 2026–2027")
     st.caption("Returns are measured from USD 500,000. Every position records its creator, dates, entry price, and performance.")
@@ -6453,25 +7099,147 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         with st.form("competition_add_position", clear_on_submit=True):
             p1, p2, p3 = st.columns(3)
             with p1:
-                ticker = st.text_input("Ticker", placeholder="e.g. MSFT")
+                ticker = st.text_input("Ticker / internal identifier", placeholder="e.g. MSFT or bond code")
                 security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Other"])
             with p2:
                 quantity = st.number_input("Quantity", min_value=0.0, value=0.0, step=1.0)
-                entry_price = st.number_input("Entry Price per Unit (USD)", min_value=0.0, value=0.0, step=0.01)
+                entry_price = st.number_input(
+                    "Entry price", min_value=0.0, value=0.0, step=0.01,
+                    help="USD per unit for stocks/ETFs; clean quote per 100 of par for an individual bond.",
+                )
             with p3:
                 entry_date = st.date_input("Opening Date", value=date.today())
-                manual_price = st.number_input("Current Price (optional)", min_value=0.0, value=0.0, step=0.01)
+                manual_price = st.number_input(
+                    "Current price (optional)", min_value=0.0, value=0.0, step=0.01,
+                    help="For an individual bond, enter the current clean quote per 100 of par.",
+                )
+            st.markdown("##### Fixed-income details")
+            st.caption("These fields are used only when Type is Bond. Select Bond ETF for an exchange-traded fund.")
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                bond_instrument_type = st.selectbox("Bond instrument", ["Individual bond", "Bond ETF"])
+                bond_category = st.selectbox("Bond category", ["Corporate", "Government", "Municipal", "Sovereign", "Other"])
+                isin = st.text_input("ISIN (individual bond)").strip().upper()
+                issuer = st.text_input("Issuer")
+            with b2:
+                currency = st.text_input("Currency", value="USD").strip().upper()
+                face_value = st.number_input("Face value per bond", min_value=0.0, value=1000.0, step=100.0)
+                coupon_rate_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.01)
+                coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1)
+            with b3:
+                maturity_date = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
+                next_coupon_date = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
+                entry_accrued_interest = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+            with b4:
+                entry_fx_rate = st.number_input("Entry FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f")
+                current_fx_rate = st.number_input("Current FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f")
+                coupon_income = st.number_input("Coupons received (USD)", min_value=0.0, value=0.0, step=1.0)
+                credit_rating = st.text_input("Credit rating", placeholder="e.g. A-")
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                ytm_pct = st.number_input("YTM override (%)", value=0.0, step=0.01, help="Leave at zero to calculate it from price and cash flows.")
+            with r2:
+                modified_duration = st.number_input("Modified duration override", min_value=0.0, value=0.0, step=0.1)
+            with r3:
+                convexity = st.number_input("Convexity override", min_value=0.0, value=0.0, step=0.1)
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                seniority = st.text_input("Seniority", placeholder="e.g. Senior unsecured")
+            with m2:
+                valuation_source = st.text_input("Valuation source", placeholder="e.g. WInS statement")
+            with m3:
+                source_url = st.text_input("Source URL / reference")
+            q1, q2, q3, q4 = st.columns(4)
+            with q1:
+                callable_bond = st.checkbox("Callable individual bond", key="portfolio_bond_callable")
+                call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2), key="portfolio_bond_call_date")
+                call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01, key="portfolio_bond_call_price")
+            with q2:
+                benchmark_name = st.text_input("Yield benchmark", placeholder="e.g. 5Y U.S. Treasury", key="portfolio_bond_benchmark")
+                benchmark_yield_pct = st.number_input("Benchmark yield (%)", value=0.0, step=0.01, key="portfolio_bond_benchmark_yield")
+            with q3:
+                income_yield_pct = st.number_input("ETF income yield (%)", min_value=0.0, value=0.0, step=0.01, key="portfolio_bond_income_yield")
+                default_probability_pct = st.number_input("Annual default probability (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.05, key="portfolio_bond_pd")
+            with q4:
+                recovery_rate_pct = st.number_input("Recovery rate (%)", min_value=0.0, max_value=100.0, value=40.0, step=1.0, key="portfolio_bond_recovery")
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                competition_eligibility_status = st.selectbox(
+                    "Current WInS eligibility",
+                    ["Pending verification", "Verified eligible", "Verified ineligible"],
+                    key="portfolio_bond_eligibility",
+                    help="Verify against the current official rules or WInS security list before trading.",
+                )
+            with e2:
+                eligibility_source = st.text_input(
+                    "Eligibility source", placeholder="Official rule or WInS list reference",
+                    key="portfolio_bond_eligibility_source",
+                )
+            with e3:
+                eligibility_checked_at = st.date_input(
+                    "Eligibility checked on", value=date.today(), key="portfolio_bond_eligibility_date",
+                )
             notes = st.text_area("Notes / Investment Thesis", height=80)
             add_position = st.form_submit_button("Add Position", type="primary", use_container_width=True)
         if add_position:
-            clean_ticker = ticker.strip().upper()
+            individual_bond = security_type == "Bond" and bond_instrument_type == "Individual bond"
+            clean_ticker = ticker.strip().upper() or (isin if individual_bond else "")
             if not clean_ticker or quantity <= 0 or entry_price <= 0:
                 st.error("Ticker, quantity, and entry price are required and must be positive.")
+            elif individual_bond and (not isin or face_value <= 0 or maturity_date <= entry_date):
+                st.error("An individual bond requires an ISIN, positive face value, and maturity after the opening date.")
+            elif individual_bond and manual_price > 0 and not valuation_source.strip():
+                st.error("Identify the valuation source when entering a current bond price.")
+            elif individual_bond and callable_bond and not (entry_date < call_date < maturity_date):
+                st.error("The first call date must be after opening and before maturity.")
+            elif security_type == "Bond" and competition_eligibility_status != "Pending verification" and not eligibility_source.strip():
+                st.error("A verified eligibility status requires an official rule or WInS list reference.")
             else:
+                values = {
+                    "ticker": clean_ticker, "security_type": security_type,
+                    "quantity": float(quantity), "entry_price": float(entry_price),
+                    "entry_date": entry_date.isoformat(), "opened_by": str(profile["username"]),
+                    "opened_at": _now_iso(), "last_price": float(manual_price) if manual_price > 0 else None,
+                    "notes": notes.strip(), "status": "open",
+                    "bond_instrument_type": "individual" if individual_bond else "etf" if security_type == "Bond" else "",
+                    "bond_category": bond_category if security_type == "Bond" else "",
+                    "isin": isin if individual_bond else "", "issuer": issuer.strip() if security_type == "Bond" else "",
+                    "currency": currency or "USD", "face_value": float(face_value) if individual_bond else None,
+                    "coupon_rate": float(coupon_rate_pct) / 100.0 if individual_bond else None,
+                    "maturity_date": maturity_date.isoformat() if individual_bond else None,
+                    "coupon_frequency": int(coupon_frequency) if individual_bond else None,
+                    "next_coupon_date": next_coupon_date.isoformat() if individual_bond else None,
+                    "entry_accrued_interest": float(entry_accrued_interest) if individual_bond else 0.0,
+                    "accrued_interest": float(accrued_interest) if individual_bond else 0.0,
+                    "entry_fx_rate_to_usd": float(entry_fx_rate) if individual_bond else 1.0,
+                    "fx_rate_to_usd": float(current_fx_rate) if individual_bond else 1.0,
+                    "coupon_income": float(coupon_income) if individual_bond else 0.0,
+                    "yield_to_maturity": float(ytm_pct) / 100.0 if ytm_pct else None,
+                    "modified_duration": float(modified_duration) if modified_duration else None,
+                    "convexity": float(convexity) if convexity else None,
+                    "credit_rating": credit_rating.strip() if security_type == "Bond" else "",
+                    "seniority": seniority.strip() if individual_bond else "",
+                    "valuation_source": valuation_source.strip() if security_type == "Bond" else "",
+                    "source_url": source_url.strip() if security_type == "Bond" else "",
+                    "price_observed_at": date.today().isoformat() if security_type == "Bond" and manual_price > 0 else None,
+                    "callable": int(individual_bond and callable_bond),
+                    "call_date": call_date.isoformat() if individual_bond and callable_bond else None,
+                    "call_price": float(call_price) if individual_bond and callable_bond else None,
+                    "benchmark_name": benchmark_name.strip() if security_type == "Bond" else "",
+                    "benchmark_yield": float(benchmark_yield_pct) / 100.0 if security_type == "Bond" and benchmark_yield_pct else None,
+                    "income_yield": float(income_yield_pct) / 100.0 if security_type == "Bond" and income_yield_pct else None,
+                    "default_probability": float(default_probability_pct) / 100.0 if security_type == "Bond" else None,
+                    "recovery_rate": float(recovery_rate_pct) / 100.0 if security_type == "Bond" else None,
+                    "competition_eligibility_status": competition_eligibility_status if security_type == "Bond" else "",
+                    "eligibility_source": eligibility_source.strip() if security_type == "Bond" else "",
+                    "eligibility_checked_at": eligibility_checked_at.isoformat() if security_type == "Bond" and competition_eligibility_status != "Pending verification" else None,
+                }
+                columns = list(values)
                 with get_connection() as conn:
                     conn.execute(
-                        "INSERT INTO competition_positions (ticker, security_type, quantity, entry_price, entry_date, opened_by, opened_at, last_price, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
-                        (clean_ticker, security_type, float(quantity), float(entry_price), entry_date.isoformat(), str(profile["username"]), _now_iso(), float(manual_price) if manual_price > 0 else None, notes.strip()),
+                        f"INSERT INTO competition_positions ({', '.join(columns)}) VALUES ({', '.join(['?'] * len(columns))})",
+                        tuple(values[column] for column in columns),
                     )
                     conn.commit()
                     if hasattr(conn, "sync"):
@@ -6481,7 +7249,12 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
 
     positions = _fetch_competition_positions()
     open_tickers = [str(row["ticker"]).upper() for row in positions if row["status"] == "open"]
-    live_prices = _competition_live_prices(open_tickers)
+    market_tickers = [
+        str(row["ticker"]).upper()
+        for row in positions
+        if row["status"] == "open" and not is_individual_bond(row)
+    ]
+    live_prices = _competition_live_prices(market_tickers)
     performance = calculate_portfolio_performance(positions, live_prices)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Portfolio Value", f"${performance['equity']:,.2f}")
@@ -6490,7 +7263,7 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     m4.metric("Realized P/L", f"${performance['realized_pnl']:+,.2f}")
     st.caption(
         f"Initial capital: ${INITIAL_CAPITAL_USD:,.0f} · Uninvested cash before P/L: "
-        f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(open_tickers))} tickers."
+        f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(market_tickers))} market tickers."
     )
     _render_wins_reconciliation(positions, live_prices)
     if not performance["positions"]:
@@ -6507,8 +7280,13 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     }
     st.dataframe(pd.DataFrame([{
         "Status": "Open" if row["status"] == "open" else "Closed", "Ticker": row["ticker"],
-        "Type": row["security_type"], "Quantity": row["quantity"], "Entry Price": f"${row['entry_price']:,.2f}",
-        "Current / Exit Price": f"${row['current_price']:,.2f}", "Position Return": f"{row['return_pct']:+.2f}%",
+        "Type": row["security_type"], "Bond Instrument": row.get("bond_instrument_type") or "—",
+        "WInS Eligibility": row.get("competition_eligibility_status") or "—",
+        "ISIN": row.get("isin") or "—", "Currency": row.get("currency") or "USD",
+        "Quantity": row["quantity"], "Face Value": row.get("face_value"),
+        "Entry Price / Quote": row["entry_price"], "Current / Exit Price": row["current_price"],
+        "Current Value": row.get("current_value"), "Coupon Income": row.get("coupon_income") or 0.0,
+        "Maturity": row.get("maturity_date") or "—", "Position Return": f"{row['return_pct']:+.2f}%",
         "P/L": f"${row['pnl']:+,.2f}", "Opened By": row["opened_by"], "Opening Date": row["entry_date"],
         "Price Source": row["price_source"],
         "Client Goal": _strategy_payload(thesis_by_ticker.get(str(row["ticker"]).upper(), {})).get("primary_goal") or "Unassigned",
@@ -6518,21 +7296,129 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         "Next Review": thesis_by_ticker.get(str(row["ticker"]).upper(), {}).get("next_review_at") or "Not scheduled",
     } for row in performance["positions"]]), use_container_width=True, hide_index=True)
 
+    _render_fixed_income_dashboard(positions, performance["positions"])
     _render_live_competition_analytics(positions, live_prices)
 
     st.markdown("#### Manage Open Positions")
     for row in performance["positions"]:
         if row["status"] != "open":
             continue
+        individual_bond = is_individual_bond(row)
+        bond_security = str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
         with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · opened by {row['opened_by']}"):
             st.write(row.get("notes") or "No notes.")
             update_col, close_col = st.columns(2)
             with update_col:
                 with st.form(f"competition_update_price_{row['id']}"):
-                    new_price = st.number_input("Manual Current Price", min_value=0.0, value=float(row["current_price"]), step=0.01, key=f"competition_price_{row['id']}")
-                    if st.form_submit_button("Save Manual Price", use_container_width=True):
+                    new_price = st.number_input(
+                        "Manual current price" if not individual_bond else "Current clean price / 100",
+                        min_value=0.0, value=float(row["current_price"]), step=0.01,
+                        key=f"competition_price_{row['id']}",
+                    )
+                    if bond_security:
+                        new_accrued = float(row.get("accrued_interest") or 0.0)
+                        new_fx = float(row.get("fx_rate_to_usd") or 1.0)
+                        if individual_bond:
+                            new_accrued = st.number_input(
+                                "Accrued interest / 100", min_value=0.0,
+                                value=new_accrued, step=0.01,
+                                key=f"competition_accrued_{row['id']}",
+                            )
+                            new_fx = st.number_input(
+                                "Current FX to USD", min_value=0.000001,
+                                value=new_fx, step=0.01, format="%.6f",
+                                key=f"competition_fx_{row['id']}",
+                            )
+                        new_coupon_income = st.number_input(
+                            "Cumulative cash income (USD)", min_value=0.0,
+                            value=float(row.get("coupon_income") or 0.0), step=1.0,
+                            key=f"competition_coupon_income_{row['id']}",
+                        )
+                        new_ytm = st.number_input(
+                            "YTM override (%)", value=float(row.get("yield_to_maturity") or 0.0) * 100.0,
+                            step=0.01, key=f"competition_ytm_{row['id']}",
+                        )
+                        new_duration = st.number_input(
+                            "Modified duration override", min_value=0.0,
+                            value=float(row.get("modified_duration") or 0.0), step=0.1,
+                            key=f"competition_duration_{row['id']}",
+                        )
+                        new_source = st.text_input(
+                            "Valuation source", value=str(row.get("valuation_source") or ""),
+                            key=f"competition_source_{row['id']}",
+                        )
+                        new_source_url = st.text_input(
+                            "Source URL / reference", value=str(row.get("source_url") or ""),
+                            key=f"competition_source_url_{row['id']}",
+                        )
+                        new_benchmark = st.text_input(
+                            "Yield benchmark", value=str(row.get("benchmark_name") or ""),
+                            key=f"competition_benchmark_{row['id']}",
+                        )
+                        new_benchmark_yield = st.number_input(
+                            "Benchmark yield (%)", value=float(row.get("benchmark_yield") or 0.0) * 100.0,
+                            step=0.01, key=f"competition_benchmark_yield_{row['id']}",
+                        )
+                        new_income_yield = st.number_input(
+                            "Income yield (%)", min_value=0.0, value=float(row.get("income_yield") or 0.0) * 100.0,
+                            step=0.01, key=f"competition_income_yield_{row['id']}",
+                        )
+                        new_pd = st.number_input(
+                            "Annual default probability (%)", min_value=0.0, max_value=100.0,
+                            value=float(row.get("default_probability") or 0.0) * 100.0,
+                            step=0.05, key=f"competition_pd_{row['id']}",
+                        )
+                        new_recovery = st.number_input(
+                            "Recovery rate (%)", min_value=0.0, max_value=100.0,
+                            value=float(row.get("recovery_rate") if row.get("recovery_rate") is not None else 0.4) * 100.0,
+                            step=1.0, key=f"competition_recovery_{row['id']}",
+                        )
+                        eligibility_options = ["Pending verification", "Verified eligible", "Verified ineligible"]
+                        saved_eligibility = str(row.get("competition_eligibility_status") or "Pending verification")
+                        if saved_eligibility not in eligibility_options:
+                            saved_eligibility = "Pending verification"
+                        new_eligibility = st.selectbox(
+                            "Current WInS eligibility", eligibility_options,
+                            index=eligibility_options.index(saved_eligibility),
+                            key=f"competition_eligibility_{row['id']}",
+                        )
+                        new_eligibility_source = st.text_input(
+                            "Eligibility source", value=str(row.get("eligibility_source") or ""),
+                            key=f"competition_eligibility_source_{row['id']}",
+                        )
+                        try:
+                            saved_eligibility_date = date.fromisoformat(str(row.get("eligibility_checked_at") or ""))
+                        except ValueError:
+                            saved_eligibility_date = date.today()
+                        new_eligibility_date = st.date_input(
+                            "Eligibility checked on", value=saved_eligibility_date,
+                            key=f"competition_eligibility_date_{row['id']}",
+                        )
+                    if st.form_submit_button("Save Valuation Inputs", use_container_width=True):
                         with get_connection() as conn:
-                            conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
+                            if bond_security:
+                                conn.execute(
+                                    "UPDATE competition_positions SET last_price = ?, accrued_interest = ?, "
+                                    "fx_rate_to_usd = ?, coupon_income = ?, yield_to_maturity = ?, modified_duration = ?, "
+                                    "valuation_source = ?, source_url = ?, price_observed_at = ?, benchmark_name = ?, "
+                                    "benchmark_yield = ?, income_yield = ?, default_probability = ?, recovery_rate = ?, "
+                                    "competition_eligibility_status = ?, eligibility_source = ?, eligibility_checked_at = ? WHERE id = ?",
+                                    (
+                                        float(new_price), float(new_accrued), float(new_fx),
+                                        float(new_coupon_income), float(new_ytm) / 100.0 if new_ytm else None,
+                                        float(new_duration) if new_duration else None, new_source.strip(),
+                                        new_source_url.strip(), date.today().isoformat(), new_benchmark.strip(),
+                                        float(new_benchmark_yield) / 100.0 if new_benchmark_yield else None,
+                                        float(new_income_yield) / 100.0 if new_income_yield else None,
+                                        float(new_pd) / 100.0, float(new_recovery) / 100.0,
+                                        new_eligibility if new_eligibility == "Pending verification" or new_eligibility_source.strip() else "Pending verification",
+                                        new_eligibility_source.strip(),
+                                        new_eligibility_date.isoformat() if new_eligibility != "Pending verification" and new_eligibility_source.strip() else None,
+                                        int(row["id"]),
+                                    ),
+                                )
+                            else:
+                                conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
                             conn.commit()
                             if hasattr(conn, "sync"):
                                 conn.sync()
@@ -6541,9 +7427,30 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                 with st.form(f"competition_close_{row['id']}"):
                     exit_price = st.number_input("Exit Price", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
                     exit_date = st.date_input("Closing Date", value=date.today(), key=f"competition_exit_date_{row['id']}")
+                    if individual_bond:
+                        exit_accrued = st.number_input(
+                            "Exit accrued interest / 100", min_value=0.0,
+                            value=float(row.get("accrued_interest") or 0.0), step=0.01,
+                            key=f"competition_exit_accrued_{row['id']}",
+                        )
+                        exit_fx = st.number_input(
+                            "Exit FX to USD", min_value=0.000001,
+                            value=float(row.get("fx_rate_to_usd") or 1.0), step=0.01, format="%.6f",
+                            key=f"competition_exit_fx_{row['id']}",
+                        )
                     if st.form_submit_button("Close Position", type="primary", use_container_width=True):
                         with get_connection() as conn:
-                            conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
+                            if individual_bond:
+                                conn.execute(
+                                    "UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, "
+                                    "closed_by = ?, exit_accrued_interest = ?, exit_fx_rate_to_usd = ? WHERE id = ?",
+                                    (
+                                        float(exit_price), exit_date.isoformat(), str(profile["username"]),
+                                        float(exit_accrued), float(exit_fx), int(row["id"]),
+                                    ),
+                                )
+                            else:
+                                conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
                             conn.commit()
                             if hasattr(conn, "sync"):
                                 conn.sync()
@@ -8540,6 +9447,7 @@ def render_wharton_cockpit() -> None:
         ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
         ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
         ("Company Analysis", lambda: _render_company_analysis(profile)),
+        ("Bond Analysis", lambda: _render_bond_analysis(profile)),
         ("Stock Screener", _render_stock_screener),
         ("Quant Engine", lambda: _render_quant_engine(profile)),
         ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),

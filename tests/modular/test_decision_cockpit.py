@@ -100,9 +100,17 @@ def test_asset_role_classification_and_exposure_table():
     assert classify_asset_role("GLD") == "gold"
     assert classify_asset_role("BTC") == "crypto"
     assert classify_asset_role("AAPL") == "equity"
+    assert classify_asset_role("CUSTOM-ISIN", "Bond") == "bond"
 
     exposure = build_role_exposure_table(["AAPL", "BND", "GLD"], np.array([0.5, 0.3, 0.2]))
     assert list(exposure["Role"]) == ["equity", "bond", "gold"]
+
+    typed = build_role_exposure_table(
+        ["CUSTOM-ISIN", "AAPL"],
+        np.array([0.4, 0.6]),
+        security_types={"CUSTOM-ISIN": "Bond"},
+    )
+    assert list(typed["Role"]) == ["bond", "equity"]
 
 
 def test_historical_crisis_presets_and_phase_outputs_exist():

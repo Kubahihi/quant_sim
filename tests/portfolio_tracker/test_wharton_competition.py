@@ -48,6 +48,20 @@ def test_compliance_keeps_unpublished_rules_pending():
     assert len([item for item in checks if item["status"] == "pending"]) == 2
 
 
+def test_compliance_rejects_incomplete_individual_bond_terms():
+    positions = [{
+        "status": "open", "ticker": "US0001", "security_type": "Bond",
+        "bond_instrument_type": "individual", "quantity": 1, "entry_price": 100,
+        "opened_by": "Jakub", "face_value": 1_000,
+    }]
+
+    checks = evaluate_compliance(_compliant_settings(), positions)
+
+    failure = next(item for item in checks if item["rule"] == "Every individual bond has complete valuation terms")
+    assert failure["status"] == "fail"
+    assert "US0001" in failure["detail"]
+
+
 def test_portfolio_performance_tracks_open_closed_and_authors():
     positions = [
         {
@@ -79,3 +93,31 @@ def test_portfolio_performance_tracks_open_closed_and_authors():
     assert result["total_return_pct"] == pytest.approx(0.06)
     assert result["positions"][0]["opened_by"] == "Jakub"
     assert result["positions"][0]["return_pct"] == pytest.approx(10.0)
+
+
+def test_portfolio_performance_accounts_for_individual_bond_quote_and_coupons():
+    bond = {
+        "id": 10,
+        "ticker": "US0001",
+        "security_type": "Bond",
+        "bond_instrument_type": "individual",
+        "status": "open",
+        "quantity": 10,
+        "face_value": 1_000,
+        "entry_price": 98,
+        "entry_accrued_interest": 1,
+        "last_price": 101,
+        "accrued_interest": 0.5,
+        "entry_fx_rate_to_usd": 1,
+        "fx_rate_to_usd": 1,
+        "coupon_income": 250,
+        "opened_by": "Jakub",
+    }
+
+    result = calculate_portfolio_performance([bond], {})
+
+    assert result["positions"][0]["cost"] == pytest.approx(9_900)
+    assert result["positions"][0]["current_value"] == pytest.approx(10_150)
+    assert result["unrealized_pnl"] == pytest.approx(250)
+    assert result["open_cash_income"] == pytest.approx(250)
+    assert result["total_pnl"] == pytest.approx(500)

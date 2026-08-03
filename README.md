@@ -8,6 +8,11 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - metriky, score, flagy a rizikovy rozbor
 - volitelny doplnkovy komentar pres Groq API
 - export vsech vysledku do vice-strankoveho PDF + CSV + JSON
+- portfolio tracker pro dluhopisova ETF i jednotlive dluhopisy vcetne kuponu, FX, YTM, durace, DV01 a cash-flow kalendare
+- samostatny panel Research -> Bond Analysis pro analyzu navrhovane emise, YTW/call risk, benchmark spread, kreditni ocekavanou ztratu, kombinovane rate/spread scenare a porovnani s ulozenym dluhopisovym portfoliem
+- Wharton bond case s kontrolou zpusobilosti ve WInS, vazbou na cil klienta, position-sizing limitem, pitch-defense otazkami, relative-value shortlistem a exportem pracovniho investicniho memo
+
+Konvence oceneni a prace s dluhopisovymi daty jsou popsane v [docs/FIXED_INCOME.md](docs/FIXED_INCOME.md).
 
 ## 1) Jak projekt spustit lokalne
 
