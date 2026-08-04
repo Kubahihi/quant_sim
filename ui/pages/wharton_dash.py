@@ -167,8 +167,8 @@ def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str,
 
 
 DEFAULT_USERS = [
-    {"username": "Jakub", "role": "Co-Captain / Quant", "primary_module": "Quant Engine"},
-    {"username": "Matěj", "role": "Co-Captain / Strategy", "primary_module": "Dashboard & Strategy"},
+    {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
+    {"username": "Jakub", "role": "Co-Captain", "primary_module": "Quant Engine"},
     {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
     {"username": "Lukáš", "role": "Geopolitics", "primary_module": "Macro Intelligence"},
     {"username": "Janek", "role": "Intelligence", "primary_module": "War Room"},
@@ -504,6 +504,10 @@ def init_db() -> None:
 
             if existing_users.get(user["username"]):
                 if not _should_sync_seeded_passwords():
+                    conn.execute(
+                        "UPDATE wharton_users SET role = ?, primary_module = ? WHERE username = ?",
+                        (user["role"], user["primary_module"], user["username"]),
+                    )
                     continue
                 stored_hash = existing_users[user["username"]]
                 if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
@@ -553,7 +557,17 @@ def init_db() -> None:
 def _fetch_users() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
-            "SELECT id, username, role, primary_module FROM wharton_users ORDER BY username COLLATE NOCASE"
+            """
+            SELECT id, username, role, primary_module
+            FROM wharton_users
+            ORDER BY
+                CASE username
+                    WHEN 'Matěj' THEN 0
+                    WHEN 'Jakub' THEN 1
+                    ELSE 2
+                END,
+                username COLLATE NOCASE
+            """
         ).fetchall()
 
 

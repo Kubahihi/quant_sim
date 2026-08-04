@@ -138,3 +138,16 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
         assert not bcrypt.checkpw(
             old_password.encode(), h.encode()
         ), f"Hash {h!r} still matches old password — password was NOT re-synced"
+
+
+def test_captains_have_matching_roles_and_matej_is_first_at_login(monkeypatch, tmp_path):
+    _configure_temp_wharton(monkeypatch, tmp_path)
+    wharton_dash.init_db()
+
+    users = wharton_dash._fetch_users()
+
+    assert [user["username"] for user in users[:2]] == ["Matěj", "Jakub"]
+    assert {user["username"]: user["role"] for user in users[:2]} == {
+        "Matěj": "Co-Captain",
+        "Jakub": "Co-Captain",
+    }
