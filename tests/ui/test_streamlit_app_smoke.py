@@ -379,7 +379,7 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, t
     monkeypatch.setattr(
         src.optimization,
         "optimize_minimum_variance",
-        lambda returns: {
+        lambda returns, **kwargs: {
             "success": True,
             "symbols": list(returns.columns),
             "weights": [1.0 / len(returns.columns)] * len(returns.columns),

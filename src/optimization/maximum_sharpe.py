@@ -4,19 +4,10 @@ import pandas as pd
 from scipy.optimize import minimize
 from typing import Dict, Optional
 
+from ._shared import _clean_returns
+
 
 TRADING_DAYS = 252.0
-
-
-def _clean_returns(returns: pd.DataFrame) -> pd.DataFrame:
-    clean = pd.DataFrame(returns).replace([np.inf, -np.inf], np.nan).dropna(how="any")
-    if clean.empty:
-        raise ValueError("returns are empty after cleaning.")
-    if clean.shape[1] < 1:
-        raise ValueError("returns must contain at least one asset.")
-    if clean.shape[0] < 2:
-        raise ValueError("returns must contain at least two observations.")
-    return clean.astype(float)
 
 
 def _shrink_expected_returns(sample_mean: np.ndarray, shrinkage: float) -> np.ndarray:

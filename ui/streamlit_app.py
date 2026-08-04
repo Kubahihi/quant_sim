@@ -958,7 +958,7 @@ def _compute_analysis(
     )
     adv_simulation_percentiles = _create_simulation_percentiles(adv_price_paths)
 
-    min_var_result = optimize_minimum_variance(returns)
+    min_var_result = optimize_minimum_variance(returns, risk_free_rate=risk_free_rate)
     max_sharpe_result = optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate)
     cost_aware_rebalance = optimize_cost_aware_rebalance(
         returns=returns,

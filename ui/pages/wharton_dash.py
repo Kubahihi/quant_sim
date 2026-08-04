@@ -1732,7 +1732,7 @@ def _compute_quant_run(
     return_contribution = analytics.calculate_return_contribution(returns, aligned_w)
     risk_contribution = analytics.calculate_risk_contribution(returns, aligned_w)
     effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
-    min_variance = optimization.optimize_minimum_variance(returns, max_weight=effective_max_weight)
+    min_variance = optimization.optimize_minimum_variance(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
     max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
     cost_aware = optimization.optimize_cost_aware_rebalance(
         returns=returns, current_weights=aligned_w, risk_free_rate=risk_free_rate,
