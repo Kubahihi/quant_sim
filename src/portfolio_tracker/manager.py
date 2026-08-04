@@ -8,7 +8,7 @@ import re
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -269,6 +269,8 @@ def update_position(
 def _fetch_latest_prices(tickers: list[str]) -> dict[str, float]:
     if not tickers:
         return {}
+
+    import yfinance as yf  # noqa: PLC0415 — intentional lazy import
 
     prices: dict[str, float] = {}
     try:

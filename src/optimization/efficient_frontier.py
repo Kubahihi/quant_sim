@@ -71,9 +71,22 @@ def sample_portfolio_cloud(
     random_seed: Optional[int] = 42,
 ) -> pd.DataFrame:
     """Sample a large set of long-only portfolios for 3D visualization."""
-    n_assets = returns.shape[1]
-    mean_returns = returns.mean().values * TRADING_DAYS
-    cov_matrix = returns.cov().values * TRADING_DAYS
+    clean_returns = (
+        pd.DataFrame(returns)
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(how="any")
+    )
+    if clean_returns.empty or clean_returns.shape[1] == 0:
+        raise ValueError(
+            "returns must contain finite observations for at least one asset."
+        )
+    if clean_returns.shape[0] < 2:
+        raise ValueError("returns must contain at least two observations.")
+
+    clean_returns = clean_returns.astype(float)
+    n_assets = clean_returns.shape[1]
+    mean_returns = clean_returns.mean().values * TRADING_DAYS
+    cov_matrix = clean_returns.cov().values * TRADING_DAYS
     rng = np.random.default_rng(random_seed)
 
     weights = rng.dirichlet(np.ones(n_assets), size=n_samples)
