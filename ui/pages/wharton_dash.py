@@ -624,10 +624,12 @@ def _logout() -> None:
 
 
 def _render_login() -> None:
-    users = _fetch_users()
-    usernames = [str(u["username"]) for u in users]
+    # The team roster is static configuration, so the anonymous landing page
+    # does not need a remote database connection.  Database/schema setup is
+    # deferred until a user actually submits the form.
+    usernames = [str(user["username"]) for user in DEFAULT_USERS]
     if not usernames:
-        st.error("No users found. Restart the app.")
+        st.error("No users configured. Restart the app.")
         st.stop()
 
     _, center, _ = st.columns([1, 1.15, 1])
@@ -665,7 +667,16 @@ def _render_login() -> None:
         return
 
     if submitted:
-        from src.auth.database import log_login_attempt, get_recent_failed_attempts
+        # Authentication and brute-force tracking require their schemas, but
+        # anonymous visitors should never pay this remote initialization cost.
+        init_db()
+        from src.auth.database import (
+            get_recent_failed_attempts,
+            init_auth_database,
+            log_login_attempt,
+        )
+
+        init_auth_database()
         
         failed_attempts = get_recent_failed_attempts(username, minutes=LOGIN_ATTEMPT_WINDOW_MINUTES)
         if failed_attempts >= MAX_LOGIN_ATTEMPTS:
@@ -11541,13 +11552,16 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
 
 def render_wharton_cockpit() -> None:
     _inject_cockpit_styles()
-    init_db()
 
     profile = _get_current_profile()
     if profile is None:
         _render_login()
         return
 
+    # Full schema and storage initialization is only needed inside the
+    # authenticated cockpit.  Keeping it off the public login route removes a
+    # network round trip and table audit from the first interaction.
+    init_db()
     _render_header(profile)
 
     # Fetch result from state if available.

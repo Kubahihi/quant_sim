@@ -26,6 +26,23 @@ def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
     assert "Mandate-Aware Optimizer" in wharton_dash.QUANT_MODULES
 
 
+def test_anonymous_wharton_login_does_not_initialize_database(monkeypatch):
+    rendered = []
+
+    monkeypatch.setattr(wharton_dash, "_inject_cockpit_styles", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_get_current_profile", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_render_login", lambda: rendered.append("login"))
+    monkeypatch.setattr(
+        wharton_dash,
+        "init_db",
+        lambda: pytest.fail("anonymous Wharton route initialized the database"),
+    )
+
+    wharton_dash.render_wharton_cockpit()
+
+    assert rendered == ["login"]
+
+
 def test_black_litterman_view_parser_and_optimizer_metadata_adapter():
     assert wharton_dash._parse_black_litterman_views(
         "msft=10%; NVDA=12.5"
