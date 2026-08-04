@@ -261,9 +261,10 @@ def get_current_user(session_token: str) -> Optional[dict[str, Any]]:
     if not session_token:
         return None
     
-    # Initialize database if needed
+    # Initialize database if needed. The database layer memoizes successful
+    # schema initialization per database path.
     init_auth_database()
-    
+
     return get_user_by_session_token(session_token)
 
 

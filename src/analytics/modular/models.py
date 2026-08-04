@@ -9,15 +9,34 @@ import pandas as pd
 from .registry import ModelRegistry
 from .results import ModelResult
 
-try:
-    from statsmodels.tsa.arima.model import ARIMA
-except Exception:  # pragma: no cover
-    ARIMA = None  # type: ignore
 
-try:
-    from arch import arch_model
-except Exception:  # pragma: no cover
-    arch_model = None  # type: ignore
+_DEPENDENCY_NOT_LOADED = object()
+_arima_class: Any = _DEPENDENCY_NOT_LOADED
+_arch_model_factory: Any = _DEPENDENCY_NOT_LOADED
+
+
+def _load_arima_class() -> Any:
+    """Import statsmodels only when the ARIMA model is actually requested."""
+    global _arima_class
+    if _arima_class is _DEPENDENCY_NOT_LOADED:
+        try:
+            from statsmodels.tsa.arima.model import ARIMA
+        except Exception:  # pragma: no cover
+            ARIMA = None  # type: ignore
+        _arima_class = ARIMA
+    return _arima_class
+
+
+def _load_arch_model_factory() -> Any:
+    """Import arch only when the GARCH model is actually requested."""
+    global _arch_model_factory
+    if _arch_model_factory is _DEPENDENCY_NOT_LOADED:
+        try:
+            from arch import arch_model
+        except Exception:  # pragma: no cover
+            arch_model = None  # type: ignore
+        _arch_model_factory = arch_model
+    return _arch_model_factory
 
 
 def _safe_model(name: str, family: str, fn: Any, series: pd.Series, context: Dict[str, Any]) -> ModelResult:
@@ -131,9 +150,10 @@ def _arima_model(series: pd.Series, _: Dict[str, Any]) -> ModelResult:
     clean = _series(series)
     if len(clean) < 30:
         raise ValueError("arima requires at least 30 observations")
-    if ARIMA is None:
+    arima_class = _load_arima_class()
+    if arima_class is None:
         raise ImportError("statsmodels not available")
-    fitted = ARIMA(clean, order=(1, 0, 1)).fit()
+    fitted = arima_class(clean, order=(1, 0, 1)).fit()
     forecast = fitted.get_forecast(steps=1)
     next_ret = float(np.asarray(forecast.predicted_mean)[0])
     conf = np.asarray(forecast.conf_int(alpha=0.05), dtype=float)
@@ -157,9 +177,17 @@ def _garch_model(series: pd.Series, context: Dict[str, Any]) -> ModelResult:
     if len(clean) < 50:
         raise ValueError("garch requires at least 50 observations")
 
-    if arch_model is not None:
+    arch_model_factory = _load_arch_model_factory()
+    if arch_model_factory is not None:
         scaled = clean * 100.0
-        fitted = arch_model(scaled, mean="Zero", vol="GARCH", p=1, q=1, rescale=False).fit(disp="off")
+        fitted = arch_model_factory(
+            scaled,
+            mean="Zero",
+            vol="GARCH",
+            p=1,
+            q=1,
+            rescale=False,
+        ).fit(disp="off")
         forecast = fitted.forecast(horizon=1, reindex=False)
         variance = float(forecast.variance.values[-1, 0])
         cond_vol = max(0.0, np.sqrt(variance) / 100.0)

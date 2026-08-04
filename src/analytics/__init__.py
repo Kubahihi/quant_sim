@@ -23,7 +23,7 @@ from .scoring import (
     compute_weighted_factor_score,
     evaluate_portfolio_score,
 )
-from .advanced import run_advanced_models
+from .advanced.runner import run_advanced_models
 from .scenario_playground import (
     build_role_exposure_table,
     build_scenario_suite,
@@ -42,35 +42,43 @@ from .modular import (
     run_quant_stack,
     run_signal_bundle,
 )
-from .dcf import (
-    DCF_SCHEMA_VERSION,
-    build_dcf_sensitivity,
-    build_multistage_dcf_scenarios,
-    calculate_multistage_dcf,
-    calculate_wacc,
-    default_multistage_dcf_assumptions,
-    prepare_dcf_inputs,
-    solve_reverse_dcf,
-)
-from .commodity_analysis import (
-    COMMODITY_CATALOG,
-    COMMODITY_SYMBOLS,
-    build_cumulative_index,
-    build_price_shock_table,
-    build_return_correlation,
-    calculate_commodity_metrics,
-    commodity_catalog_frame,
-)
-from .currency_risk import (
-    FX_USD_QUOTES,
-    SUPPORTED_CURRENCIES,
-    aggregate_currency_exposure,
-    build_fx_rate_history,
-    build_fx_stress_table,
-    calculate_fx_risk,
-    optimize_currency_hedges,
-    required_fx_symbols,
-)
+from importlib import import_module
+
+
+_LAZY_EXPORTS = {
+    "DCF_SCHEMA_VERSION": ".dcf",
+    "build_dcf_sensitivity": ".dcf",
+    "build_multistage_dcf_scenarios": ".dcf",
+    "calculate_multistage_dcf": ".dcf",
+    "calculate_wacc": ".dcf",
+    "default_multistage_dcf_assumptions": ".dcf",
+    "prepare_dcf_inputs": ".dcf",
+    "solve_reverse_dcf": ".dcf",
+    "COMMODITY_CATALOG": ".commodity_analysis",
+    "COMMODITY_SYMBOLS": ".commodity_analysis",
+    "build_cumulative_index": ".commodity_analysis",
+    "build_price_shock_table": ".commodity_analysis",
+    "build_return_correlation": ".commodity_analysis",
+    "calculate_commodity_metrics": ".commodity_analysis",
+    "commodity_catalog_frame": ".commodity_analysis",
+    "FX_USD_QUOTES": ".currency_risk",
+    "SUPPORTED_CURRENCIES": ".currency_risk",
+    "aggregate_currency_exposure": ".currency_risk",
+    "build_fx_rate_history": ".currency_risk",
+    "build_fx_stress_table": ".currency_risk",
+    "calculate_fx_risk": ".currency_risk",
+    "optimize_currency_hedges": ".currency_risk",
+    "required_fx_symbols": ".currency_risk",
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "calculate_returns",

@@ -16,7 +16,6 @@ from src.auth import (
     login_user,
     logout_user,
     get_current_user,
-    is_authenticated,
     migrate_existing_data,
 )
 
@@ -176,8 +175,9 @@ def check_auth() -> bool:
     
     token = st.session_state.get(AUTH_TOKEN_KEY)
     
-    if token and is_authenticated(token):
-        # User is authenticated
+    if token:
+        # get_current_user validates the token; avoid doing the same remote
+        # database lookup once through is_authenticated and then again here.
         user = get_current_user(token)
         if user:
             st.session_state[AUTH_USER_KEY] = user
@@ -254,7 +254,7 @@ def init_multi_user_mode() -> int | None:
     
     # Check authentication
     token = st.session_state.get(AUTH_TOKEN_KEY)
-    if token and is_authenticated(token):
+    if token:
         user = get_current_user(token)
         if user:
             st.session_state[AUTH_USER_KEY] = user

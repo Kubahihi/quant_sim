@@ -209,7 +209,7 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_db() -> None:
+def _initialize_database() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     with get_connection() as conn:
@@ -550,6 +550,22 @@ def init_db() -> None:
         conn.commit()
         if hasattr(conn, "sync"):
             conn.sync()
+
+
+@st.cache_resource(show_spinner=False)
+def _initialize_database_once(database_path: str, upload_path: str) -> None:
+    """Initialize a production database once per process and configured path."""
+    _initialize_database()
+
+
+def init_db() -> None:
+    # Development and tests intentionally support repeated initialization so a
+    # changed seeded password is applied immediately. Production schema setup is
+    # stable for a deployed process and should not run on every widget rerun.
+    if _is_development_mode():
+        _initialize_database()
+        return
+    _initialize_database_once(str(DB_PATH.resolve()), str(UPLOAD_DIR.resolve()))
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -1262,21 +1278,14 @@ def _render_chat(profile: dict[str, str | int]) -> None:
 
 # ─── File Vault (Storage Backend Integration) ─────────────────────────────────
 
-# Import storage backend
-from src.storage import (
-    init_storage_db,
-    save_uploaded_file as storage_save_file,
-    download_file as storage_download_file,
-    file_exists as storage_file_exists,
-    list_files_with_status,
-    StorageFileNotFoundError,
-    FileValidationError,
-)
+def _storage_api():
+    """Load the optional file-vault stack only when that panel is used."""
+    return importlib.import_module("src.storage")
 
 
 def _init_file_vault_storage():
     """Initialize storage layer for file vault."""
-    init_storage_db(str(DB_PATH))
+    _storage_api().init_storage_db(str(DB_PATH))
 
 
 def _safe_filename(filename: str) -> str:
@@ -1309,8 +1318,9 @@ def _save_uploaded_file(
     tags: str = "",
 ) -> None:
     """Save uploaded file using the new storage backend."""
+    storage = _storage_api()
     try:
-        result = storage_save_file(
+        storage.save_uploaded_file(
             uploaded_file=uploaded_file,
             uploaded_by=uploaded_by,
             db_path=str(DB_PATH),
@@ -1318,13 +1328,13 @@ def _save_uploaded_file(
             description=description,
             tags=tags,
         )
-    except FileValidationError as e:
+    except storage.FileValidationError as e:
         raise ValueError(str(e))
 
 
 def _fetch_file_rows() -> list[dict]:
     """Fetch file rows with storage status."""
-    return list_files_with_status(db_path=str(DB_PATH))
+    return _storage_api().list_files_with_status(db_path=str(DB_PATH))
 
 
 def _fetch_file_rows_legacy() -> list[sqlite3.Row]:
@@ -1337,6 +1347,7 @@ def _fetch_file_rows_legacy() -> list[sqlite3.Row]:
 
 
 def _render_file_center(profile: dict[str, str | int]) -> None:
+    storage = _storage_api()
     st.markdown("### Persistent File Vault")
     st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
@@ -1446,7 +1457,10 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
         with col2:
             if status == "available":
                 try:
-                    content, download_name, content_type = storage_download_file(file_id, db_path=str(DB_PATH))
+                    content, download_name, content_type = storage.download_file(
+                        file_id,
+                        db_path=str(DB_PATH),
+                    )
                     st.download_button(
                         "Download",
                         data=content,
@@ -1455,7 +1469,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
                         key=f"dl_{file_id}",
                         use_container_width=True,
                     )
-                except (StorageFileNotFoundError, FileNotFoundError) as e:
+                except (storage.StorageFileNotFoundError, FileNotFoundError) as e:
                     st.error(f"Download failed: {e}")
 
 
@@ -1600,12 +1614,6 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 # ─── Quant Engine ─────────────────────────────────────────────────────────────
 
 def _load_quant_modules() -> dict[str, Any]:
-    import sys
-    if "src.analytics.model_validation" in sys.modules:
-        importlib.reload(sys.modules["src.analytics.model_validation"])
-    if "src.analytics" in sys.modules:
-        importlib.reload(sys.modules["src.analytics"])
-
     return {
         "analytics": importlib.import_module("src.analytics"),
         "optimization": importlib.import_module("src.optimization"),
@@ -2997,10 +3005,9 @@ def _render_risk_cockpit(result: dict) -> None:
 
     clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
     
-    # Import risk metrics dynamically and reload to avoid stale cache in Streamlit
+    # Import risk metrics dynamically only when this panel is rendered.
     try:
         risk_mod = importlib.import_module("src.analytics.risk_metrics")
-        importlib.reload(risk_mod)
     except ImportError as e:
         st.error(f"Failed to load risk module: {e}")
         return
