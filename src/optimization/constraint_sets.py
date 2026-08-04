@@ -285,7 +285,8 @@ def build_constraint_set(
 
     if rules.get("min_holdings") is not None or rules.get("max_holdings") is not None:
         warnings.append(
-            "Minimum/maximum holding counts require a mixed-integer solver and are not enforced yet."
+            "Exact mixed-integer holding counts are not imposed on the continuous target; "
+            "they are enforced in the executable lot-level trade plan."
         )
     if float(np.sum(upper_bounds)) < 1.0 - WEIGHT_TOLERANCE:
         raise ValueError("asset exclusions and position caps make full investment infeasible.")

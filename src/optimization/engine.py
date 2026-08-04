@@ -19,6 +19,7 @@ from .estimators import (
     PortfolioEstimates,
     resolve_portfolio_estimates,
 )
+from .execution import estimate_trade_costs
 
 
 SUPPORTED_OBJECTIVES = {
@@ -64,11 +65,16 @@ def _transaction_cost_rates(
     return rates / 10_000.0
 
 
-def _solve_problem(problem: cp.Problem, objective_name: str) -> tuple[Optional[str], list[str]]:
+def _solve_problem(
+    problem: cp.Problem,
+    objective_name: str,
+    *,
+    allow_osqp: bool = True,
+) -> tuple[Optional[str], list[str]]:
     installed = set(cp.installed_solvers())
     errors: list[str] = []
     solver_order = ["CLARABEL"]
-    if objective_name != "target_volatility":
+    if objective_name != "target_volatility" and allow_osqp:
         solver_order.append("OSQP")
     solver_order.append("SCS")
 
@@ -103,6 +109,11 @@ def optimize_portfolio(
     allow_short: bool = False,
     turnover_limit: Optional[float] = None,
     transaction_cost_bps: float | Sequence[float] | Mapping[str, float] = 0.0,
+    half_spread_bps: float | Sequence[float] | Mapping[str, float] = 0.0,
+    market_impact_bps: float | Sequence[float] | Mapping[str, float] = 0.0,
+    average_daily_dollar_volume: Optional[Mapping[str, float]] = None,
+    portfolio_value: Optional[float] = None,
+    max_adv_participation: Optional[float] = None,
     risk_free_rate: float = 0.03,
     risk_aversion: float = 3.0,
     target_volatility: Optional[float] = None,
@@ -158,13 +169,46 @@ def optimize_portfolio(
         else "custom"
     )
     covariance = estimates.covariance
-    cost_rates = _transaction_cost_rates(transaction_cost_bps, symbols)
+    commission_rates = _transaction_cost_rates(transaction_cost_bps, symbols)
+    spread_rates = _transaction_cost_rates(half_spread_bps, symbols)
+    impact_rates = _transaction_cost_rates(market_impact_bps, symbols)
+    has_execution_costs = bool(
+        np.any(commission_rates > 0)
+        or np.any(spread_rates > 0)
+        or np.any(impact_rates > 0)
+    )
+    adv_values: Optional[np.ndarray] = None
+    capital: Optional[float] = None
+    if average_daily_dollar_volume is not None:
+        adv_values = _aligned_vector(
+            average_daily_dollar_volume,
+            symbols,
+            "average_daily_dollar_volume",
+        )
+        if np.any(adv_values <= 0):
+            raise ValueError("average_daily_dollar_volume must be positive.")
+    if portfolio_value is not None:
+        capital = float(portfolio_value)
+        if not np.isfinite(capital) or capital <= 0:
+            raise ValueError("portfolio_value must be positive.")
+    if np.any(impact_rates > 0) and (adv_values is None or capital is None):
+        raise ValueError(
+            "market impact requires portfolio_value and average_daily_dollar_volume."
+        )
+    if max_adv_participation is not None:
+        max_adv_participation = float(max_adv_participation)
+        if not np.isfinite(max_adv_participation) or not 0 < max_adv_participation <= 1:
+            raise ValueError("max_adv_participation must be in (0, 1].")
+        if adv_values is None or capital is None:
+            raise ValueError(
+                "max_adv_participation requires portfolio_value and average_daily_dollar_volume."
+            )
     confidence_for_metrics = float(cvar_confidence)
     if not np.isfinite(confidence_for_metrics) or not 0.5 < confidence_for_metrics < 1.0:
         raise ValueError("cvar_confidence must be between 0.5 and 1.")
     current = constraints_spec.current_weights
-    if current is None and np.any(cost_rates > 0):
-        raise ValueError("transaction costs require current_weights.")
+    if current is None and (has_execution_costs or max_adv_participation is not None):
+        raise ValueError("execution costs and liquidity limits require current_weights.")
 
     weights = cp.Variable(n_assets, name="weights")
     risk = cp.quad_form(weights, cp.psd_wrap(covariance))
@@ -191,7 +235,19 @@ def optimize_portfolio(
     if current is not None:
         trades = weights - current
         turnover_expression = cp.norm1(trades)
-        transaction_cost_expression = cp.sum(cp.multiply(cost_rates, cp.abs(trades)))
+        transaction_cost_expression = cp.sum(
+            cp.multiply(commission_rates + spread_rates, cp.abs(trades))
+        )
+        if np.any(impact_rates > 0):
+            assert adv_values is not None and capital is not None
+            impact_scale = impact_rates * np.sqrt(capital / adv_values)
+            transaction_cost_expression += cp.sum(
+                cp.multiply(impact_scale, cp.power(cp.abs(trades), 1.5))
+            )
+        if max_adv_participation is not None:
+            assert adv_values is not None and capital is not None
+            liquidity_capacity = adv_values * max_adv_participation / capital
+            cvx_constraints.append(cp.abs(trades) <= liquidity_capacity)
         if constraints_spec.turnover_limit is not None:
             cvx_constraints.append(
                 turnover_expression <= constraints_spec.turnover_limit
@@ -249,7 +305,11 @@ def optimize_portfolio(
         )
 
     problem = cp.Problem(problem_objective, cvx_constraints)
-    solver, solver_errors = _solve_problem(problem, objective_name)
+    solver, solver_errors = _solve_problem(
+        problem,
+        objective_name,
+        allow_osqp=not np.any(impact_rates > 0),
+    )
     if solver is None or weights.value is None:
         message = "; ".join(solver_errors) or f"status={problem.status}"
         logger.warning(f"Portfolio optimization failed: {message}")
@@ -296,11 +356,41 @@ def optimize_portfolio(
         if current is not None
         else 0.0
     )
-    transaction_cost = (
-        float(np.sum(cost_rates * np.abs(optimal_weights - current)))
-        if current is not None
-        else 0.0
-    )
+    cost_breakdown = {
+        "commission_drag": 0.0,
+        "spread_drag": 0.0,
+        "market_impact_drag": 0.0,
+        "total_drag": 0.0,
+    }
+    if current is not None:
+        # A unit capital base is sufficient when no ADV-dependent impact is used.
+        reporting_capital = capital if capital is not None else 1.0
+        cost_breakdown = estimate_trade_costs(
+            optimal_weights - current,
+            symbols,
+            portfolio_value=reporting_capital,
+            transaction_cost_bps=transaction_cost_bps,
+            half_spread_bps=half_spread_bps,
+            market_impact_bps=market_impact_bps,
+            average_daily_dollar_volume=average_daily_dollar_volume,
+        )
+    transaction_cost = float(cost_breakdown["total_drag"])
+    liquidity_report: list[dict[str, Any]] = []
+    if current is not None and adv_values is not None and capital is not None:
+        trade_notionals = np.abs(optimal_weights - current) * capital
+        participation = trade_notionals / adv_values
+        for index, symbol in enumerate(symbols):
+            liquidity_report.append({
+                "symbol": symbol,
+                "trade_notional": float(trade_notionals[index]),
+                "average_daily_dollar_volume": float(adv_values[index]),
+                "adv_participation": float(participation[index]),
+                "maximum_adv_participation": max_adv_participation,
+                "passed": bool(
+                    max_adv_participation is None
+                    or participation[index] <= max_adv_participation + 1e-7
+                ),
+            })
     daily_losses = -estimates.returns.to_numpy(dtype=float) @ optimal_weights
     cutoff = float(np.quantile(daily_losses, confidence_for_metrics))
     tail = daily_losses[daily_losses >= cutoff]
@@ -326,6 +416,13 @@ def optimize_portfolio(
         "turnover": turnover,
         "current_weights": current.copy() if current is not None else None,
         "transaction_cost_drag": transaction_cost,
+        "transaction_cost_breakdown": {
+            "commission_drag": float(cost_breakdown["commission_drag"]),
+            "spread_drag": float(cost_breakdown["spread_drag"]),
+            "market_impact_drag": float(cost_breakdown["market_impact_drag"]),
+            "total_drag": transaction_cost,
+        },
+        "liquidity_report": liquidity_report,
         "expected_return_model": resolved_return_model,
         "constraint_report": build_constraint_report(
             optimal_weights, constraints_spec

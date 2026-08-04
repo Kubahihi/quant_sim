@@ -15,6 +15,10 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - behaviorální profil klienta v Strategy & Decisions: transparentni dotaznik, reakce na drawdown, kontrola souladu s deklarovanou toleranci a konkretni rozhodovaci guardraily
 - Wharton bond case s kontrolou zpusobilosti ve WInS, vazbou na cil klienta, position-sizing limitem, pitch-defense otazkami, relative-value shortlistem a exportem pracovniho investicniho memo
 - rucni jednotlive dluhopisy primo v Quant Enginu: smluvni parametry, YTW/durace/DV01 a transparentni ETF proxy pro kovarianci, optimalizaci, Monte Carlo a stresove scenare
+- liquidity-aware portfolio construction s 30dennim dollar-ADV, spreadem, square-root market impactem a limitem ucasti na dennim objemu
+- executable trade plan s celymi loty, minimalni hodnotou obchodu, cash kontrolou, poctem pozic a tax-aware vyberem lotu
+- volitelna point-in-time rolling validace s lagovanou historii clenu univerza a fail-closed kontrolou chybejicich delisting returnu
+- produkcni Runtime & build panel s identifikaci commitu a serverovym medianem/p95 poslednich rerunu
 
 Konvence oceneni a prace s dluhopisovymi daty jsou popsane v [docs/FIXED_INCOME.md](docs/FIXED_INCOME.md).
 Metodika komoditnich proxy, stresu pozice a jejich omezeni je popsana v [docs/COMMODITIES.md](docs/COMMODITIES.md).

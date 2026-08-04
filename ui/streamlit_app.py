@@ -9,7 +9,10 @@ import inspect
 import json
 import os
 import sys
+import time
 from typing import Any, Dict, List, Tuple
+
+_APP_RUN_STARTED_AT = time.perf_counter()
 
 import streamlit as st
 
@@ -30,6 +33,17 @@ for module_name, module_obj in list(sys.modules.items()):
         sys.modules.pop(module_name, None)
 
 from ui.dashboard_shell import inject_dashboard_styles
+from ui.runtime_diagnostics import (
+    PerformanceTrace,
+    append_trace_history,
+    resolve_build_identity,
+    summarize_trace_history,
+)
+
+
+_RUNTIME_TRACE = PerformanceTrace(started_at=_APP_RUN_STARTED_AT)
+_BUILD_IDENTITY = resolve_build_identity(PROJECT_ROOT)
+_RUNTIME_HISTORY_KEY = "quant_workspace_runtime_history_v1"
 
 
 DEFAULT_TICKERS = [
@@ -171,10 +185,41 @@ with st.sidebar:
         )
     st.markdown("---")
 
+
+def _render_runtime_diagnostics(*, route: str, stage: str) -> None:
+    """Show privacy-safe server timings for the current and recent reruns."""
+    _RUNTIME_TRACE.mark(stage)
+    snapshot = _RUNTIME_TRACE.snapshot(route=route, stage=stage)
+    history = st.session_state.setdefault(_RUNTIME_HISTORY_KEY, [])
+    append_trace_history(history, snapshot, limit=20)
+    summary = summarize_trace_history(history)
+
+    with st.sidebar.expander("Runtime & build", expanded=False):
+        st.caption(f"Build `{_BUILD_IDENTITY.label}`")
+        st.write(f"Current server run: **{float(snapshot['total_ms']) / 1000.0:.2f} s**")
+        st.caption(
+            f"Recent median {summary['median_ms'] / 1000.0:.2f} s · "
+            f"p95 {summary['p95_ms'] / 1000.0:.2f} s · "
+            f"{int(summary['count'])} run(s)"
+        )
+        st.json({
+            "route": route,
+            "stage": stage,
+            "server_phase_ms": {
+                name: round(float(duration), 1)
+                for name, duration in dict(snapshot["phases_ms"]).items()
+            },
+            "scope": "Server-side Python only; browser and container wake-up are excluded.",
+        })
+
+
+_RUNTIME_TRACE.mark("launcher")
+
 if app_route == "Wharton Cockpit":
     from ui.pages.wharton_dash import render_wharton_cockpit
 
     render_wharton_cockpit()
+    _render_runtime_diagnostics(route=app_route, stage="wharton_ready")
     st.stop()
 
 # ---- Authentication initialization ----
@@ -240,20 +285,20 @@ def _initialize_auth_storage() -> dict[str, Any]:
 
 
 def _bootstrap_authentication() -> int | None:
-    from src.auth.migrations import migrate_local_files_to_database
-
-    migration_result = _initialize_auth_storage()
-    if migration_result.get("success") and not migration_result.get("already_migrated"):
-        st.info(
-            f"{migration_result.get('files_migrated', {}).get('total', 0)} files migrated."
-        )
-
     user_id = _resolve_authenticated_user_id()
     if user_id is None:
         user_id = _auto_login_for_smoke_tests()
 
     # On first login after deployment, migrate any existing local files to the DB
     if user_id is not None:
+        from src.auth.migrations import migrate_local_files_to_database
+
+        migration_result = _initialize_auth_storage()
+        if migration_result.get("success") and not migration_result.get("already_migrated"):
+            st.info(
+                f"{migration_result.get('files_migrated', {}).get('total', 0)} files migrated."
+            )
+
         migration_session_key = f"db_migration_done_{user_id}"
         if not st.session_state.get(migration_session_key):
             try:
@@ -269,8 +314,11 @@ user_id = _bootstrap_authentication()
 if user_id is None:
     from ui.auth_page import render_login_form
 
-    render_login_form()
+    render_login_form(prepare_auth_storage=_initialize_auth_storage)
+    _render_runtime_diagnostics(route=app_route, stage="login_ready")
     st.stop()
+
+_RUNTIME_TRACE.mark("authentication")
 
 # The launcher above stays intentionally light. Load the analytical stack only
 # after the Quant Platform route is selected and authentication has succeeded.
@@ -4534,6 +4582,7 @@ if run_clicked:
     if input_errors:
         for item in input_errors:
             st.error(item)
+        _render_runtime_diagnostics(route=app_route, stage="input_error")
         st.stop()
 
     with st.spinner("Running full portfolio analysis..."):
@@ -4561,6 +4610,7 @@ if run_clicked:
             st.rerun()
         except Exception as exc:
             st.error(f"Portfolio evaluation failed: {exc}")
+            _render_runtime_diagnostics(route=app_route, stage="analysis_error")
             st.stop()
 
 
@@ -4568,6 +4618,7 @@ analysis_result = st.session_state.get("analysis_result")
 
 if analysis_result is None:
     _render_empty_dashboard_state(dashboard_preferences)
+    _render_runtime_diagnostics(route=app_route, stage="workspace_ready")
     st.stop()
 
 # Chart libraries are only required once analysis output is visible.
@@ -4592,3 +4643,4 @@ from src.visualization.cockpit_charts import (
 )
 
 _render_modular_dashboard(analysis_result, dashboard_preferences)
+_render_runtime_diagnostics(route=app_route, stage="analysis_ready")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from copy import deepcopy
 from html import escape
+from io import BytesIO
 import hashlib
 import importlib
 import json
@@ -1639,6 +1640,19 @@ def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date)
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_market_data_cached(
+    symbols: tuple,
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    modules = _load_quant_modules()
+    fetcher = modules["yahoo_fetcher"].YahooFetcher()
+    return fetcher.fetch_close_prices_with_liquidity(
+        list(symbols), start_date, end_date, adv_window=30
+    )
+
+
 def _parse_tickers(raw: str, *, allow_empty: bool = False) -> list[str]:
     tickers, seen = [], set()
     for chunk in raw.replace(",", "\n").splitlines():
@@ -1724,8 +1738,28 @@ def _compute_quant_run(
     optimization_expected_return_model="shrunk_historical",
     black_litterman_views=None,
     black_litterman_confidence=0.60,
+    execution_model_enabled=True,
+    half_spread_bps=3.0,
+    market_impact_bps=20.0,
+    max_adv_participation=0.05,
+    minimum_trade_value=100.0,
+    maximum_holdings=None,
+    lot_size=1.0,
+    tax_lots=None,
+    short_term_tax_rate=0.35,
+    long_term_tax_rate=0.20,
+    universe_membership=None,
 ) -> dict[str, Any]:
     run_started_at = time.perf_counter()
+    phase_started_at = run_started_at
+    runtime_phases: dict[str, float] = {}
+
+    def mark_runtime_phase(name: str) -> None:
+        nonlocal phase_started_at
+        now = time.perf_counter()
+        runtime_phases[name] = float(now - phase_started_at)
+        phase_started_at = now
+
     modules = _load_quant_modules()
     analytics, optimization = modules["analytics"], modules["optimization"]
 
@@ -1740,15 +1774,34 @@ def _compute_quant_run(
         str(item.get("proxy_ticker") or "").strip().upper()
         for item in manual_bonds if str(item.get("proxy_ticker") or "").strip()
     })
-    data_symbols = list(dict.fromkeys([*tickers, *proxy_tickers]))
+    current_data_symbols = list(dict.fromkeys([*tickers, *proxy_tickers]))
+    point_in_time_symbols = (
+        [str(column).strip().upper() for column in universe_membership.columns]
+        if isinstance(universe_membership, pd.DataFrame)
+        else []
+    )
+    data_symbols = list(dict.fromkeys([*current_data_symbols, *point_in_time_symbols]))
     if not data_symbols:
         raise ValueError("Enter at least one market ticker or manual individual bond.")
-    prices = _fetch_close_prices_cached(tuple(data_symbols), start_date, end_date)
-    if prices.empty: raise ValueError("No price data returned.")
-    prices = prices.sort_index().ffill().dropna(how="all")
+    market_data = _fetch_market_data_cached(tuple(data_symbols), start_date, end_date)
+    all_prices = pd.DataFrame(market_data.get("prices", pd.DataFrame()))
+    if all_prices.empty: raise ValueError("No price data returned.")
+    all_prices = all_prices.sort_index().dropna(how="all")
+    prices = all_prices[
+        [symbol for symbol in current_data_symbols if symbol in all_prices.columns]
+    ].ffill()
     available_data = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
     prices = prices[available_data].dropna(how="any")
     if prices.empty: raise ValueError("Not enough aligned data.")
+    latest_adv = {
+        str(symbol): float(value)
+        for symbol, value in dict(
+            market_data.get("average_daily_dollar_volume", {})
+        ).items()
+        if np.isfinite(float(value)) and float(value) > 0
+    }
+    adv_history = pd.DataFrame(market_data.get("adv_history", pd.DataFrame()))
+    mark_runtime_phase("market_data")
 
     data_returns = prices.pct_change().dropna(how="any")
     available_market = [ticker for ticker in tickers if ticker in data_returns.columns]
@@ -1789,6 +1842,7 @@ def _compute_quant_run(
     )
     return_contribution = analytics.calculate_return_contribution(returns, aligned_w)
     risk_contribution = analytics.calculate_risk_contribution(returns, aligned_w)
+    mark_runtime_phase("analytics")
     shared_estimates = optimization.estimate_portfolio_inputs(returns)
     effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
     min_variance = optimization.optimize_minimum_variance(
@@ -1865,6 +1919,19 @@ def _compute_quant_run(
     engine_effective_max_weight = max(
         float(max_weight), 1.0 / float(engine_returns.shape[1])
     )
+    engine_liquidity_adv: dict[str, float] = {}
+    missing_liquidity_symbols: list[str] = []
+    for symbol in engine_returns.columns:
+        symbol_name = str(symbol)
+        if symbol_name == "CASH":
+            engine_liquidity_adv[symbol_name] = float(current_value) * 1_000.0
+        elif symbol_name in latest_adv:
+            engine_liquidity_adv[symbol_name] = float(latest_adv[symbol_name])
+        else:
+            missing_liquidity_symbols.append(symbol_name)
+    liquidity_model_ready = bool(
+        execution_model_enabled and not missing_liquidity_symbols
+    )
     try:
         portfolio_estimates = None
         if str(optimization_expected_return_model) == "black_litterman":
@@ -1896,6 +1963,15 @@ def _compute_quant_run(
             max_weight=engine_effective_max_weight,
             turnover_limit=turnover_limit,
             transaction_cost_bps=transaction_cost_bps,
+            half_spread_bps=(float(half_spread_bps) if liquidity_model_ready else 0.0),
+            market_impact_bps=(float(market_impact_bps) if liquidity_model_ready else 0.0),
+            average_daily_dollar_volume=(
+                engine_liquidity_adv if liquidity_model_ready else None
+            ),
+            portfolio_value=(float(current_value) if liquidity_model_ready else None),
+            max_adv_participation=(
+                float(max_adv_participation) if liquidity_model_ready else None
+            ),
             risk_free_rate=risk_free_rate,
             risk_aversion=risk_aversion,
             target_volatility=(
@@ -1921,6 +1997,97 @@ def _compute_quant_run(
             "Cash is modeled as a synthetic constant daily risk-free return, not as a "
             "historical money-market instrument.",
         ]
+    if execution_model_enabled and missing_liquidity_symbols:
+        mandate_aware["warnings"] = [
+            *list(mandate_aware.get("warnings", [])),
+            "Liquidity-aware optimization was not applied because 30-day dollar-volume "
+            "data is unavailable for: " + ", ".join(missing_liquidity_symbols) + ".",
+        ]
+
+    execution_plan = None
+    if mandate_aware.get("success"):
+        execution_prices: dict[str, float] = {}
+        for symbol in mandate_aware.get("symbols", []):
+            symbol_name = str(symbol)
+            if symbol_name == "CASH":
+                execution_prices[symbol_name] = 1.0
+            elif symbol_name in all_prices.columns:
+                valid_prices = pd.to_numeric(
+                    all_prices[symbol_name], errors="coerce"
+                ).dropna()
+                if not valid_prices.empty:
+                    execution_prices[symbol_name] = float(valid_prices.iloc[-1])
+        if len(execution_prices) == len(mandate_aware.get("symbols", [])):
+            strategy_max_holdings = active_strategy.get("max_holdings")
+            strategy_min_holdings = active_strategy.get("min_holdings")
+            requested_max_holdings = (
+                int(maximum_holdings)
+                if maximum_holdings is not None and int(maximum_holdings) > 0
+                else None
+            )
+            effective_max_holdings = (
+                min(
+                    value
+                    for value in (
+                        requested_max_holdings,
+                        int(strategy_max_holdings) if strategy_max_holdings is not None else None,
+                    )
+                    if value is not None
+                )
+                if requested_max_holdings is not None or strategy_max_holdings is not None
+                else None
+            )
+            try:
+                execution_plan = optimization.build_execution_plan(
+                    mandate_aware["symbols"],
+                    mandate_aware["weights"],
+                    prices=execution_prices,
+                    portfolio_value=float(current_value),
+                    current_weights=engine_current_weights,
+                    lot_sizes={
+                        str(symbol): (0.01 if str(symbol) == "CASH" else float(lot_size))
+                        for symbol in mandate_aware["symbols"]
+                    },
+                    minimum_trade_value=float(minimum_trade_value),
+                    maximum_holdings=effective_max_holdings,
+                    minimum_holdings=(
+                        int(strategy_min_holdings)
+                        if strategy_min_holdings is not None
+                        else None
+                    ),
+                    average_daily_dollar_volume=(
+                        engine_liquidity_adv if liquidity_model_ready else None
+                    ),
+                    maximum_adv_participation=(
+                        float(max_adv_participation) if liquidity_model_ready else None
+                    ),
+                    transaction_cost_bps=float(transaction_cost_bps),
+                    half_spread_bps=(
+                        float(half_spread_bps) if liquidity_model_ready else 0.0
+                    ),
+                    market_impact_bps=(
+                        float(market_impact_bps) if liquidity_model_ready else 0.0
+                    ),
+                    tax_lots=tax_lots,
+                    short_term_tax_rate=float(short_term_tax_rate),
+                    long_term_tax_rate=float(long_term_tax_rate),
+                    as_of=end_date,
+                )
+            except Exception as execution_error:
+                execution_plan = {
+                    "success": False,
+                    "message": str(execution_error),
+                    "warnings": [],
+                }
+        else:
+            execution_plan = {
+                "success": False,
+                "message": (
+                    "Executable lots require a current price for every optimized asset; "
+                    "manual instruments need instrument-specific lot inputs."
+                ),
+                "warnings": [],
+            }
     frontier = optimization.calculate_efficient_frontier(
         returns,
         n_points=50,
@@ -1936,12 +2103,49 @@ def _compute_quant_run(
         portfolio_estimates=shared_estimates,
     )
     optimization_validation = None
-    if len(engine_returns) > 146:
-        validation_train_periods = min(756, max(126, len(engine_returns) // 2))
-        if len(engine_returns) > validation_train_periods:
+    validation_returns = engine_returns
+    validation_membership = None
+    validation_metadata = engine_metadata
+    validation_adv_history = None
+    if isinstance(universe_membership, pd.DataFrame):
+        pit_symbols = [str(column).strip().upper() for column in universe_membership.columns]
+        missing_pit_prices = [symbol for symbol in pit_symbols if symbol not in all_prices.columns]
+        if missing_pit_prices:
+            optimization_validation = {
+                "success": False,
+                "error": "No price history was returned for point-in-time symbol(s): "
+                + ", ".join(missing_pit_prices),
+            }
+        else:
+            validation_returns = (
+                all_prices[pit_symbols]
+                .sort_index()
+                .pct_change(fill_method=None)
+                .dropna(how="all")
+            )
+            validation_membership = universe_membership[pit_symbols]
+            validation_metadata = {
+                symbol: dict((optimizer_asset_metadata or {}).get(symbol, {}))
+                for symbol in pit_symbols
+            }
+            for symbol in pit_symbols:
+                validation_metadata[symbol].setdefault("asset_type", "Stock")
+            if all(symbol in adv_history.columns for symbol in pit_symbols):
+                validation_adv_history = adv_history[pit_symbols]
+    elif all(str(symbol) in adv_history.columns for symbol in engine_returns.columns):
+        validation_adv_history = adv_history[
+            [str(symbol) for symbol in engine_returns.columns]
+        ]
+
+    validation_liquidity_ready = bool(
+        execution_model_enabled and validation_adv_history is not None
+    )
+    if optimization_validation is None and len(validation_returns) > 146:
+        validation_train_periods = min(756, max(126, len(validation_returns) // 2))
+        if len(validation_returns) > validation_train_periods:
             try:
                 optimization_validation = optimization.run_optimization_walk_forward(
-                    engine_returns,
+                    validation_returns,
                     optimizer=str(optimization_objective),
                     train_periods=validation_train_periods,
                     rebalance_periods=63,
@@ -1949,8 +2153,23 @@ def _compute_quant_run(
                     risk_free_rate=risk_free_rate,
                     transaction_cost_bps=transaction_cost_bps,
                     strategy=active_strategy or None,
-                    asset_metadata=engine_metadata,
+                    asset_metadata=validation_metadata,
                     turnover_limit=turnover_limit,
+                    half_spread_bps=(
+                        float(half_spread_bps) if validation_liquidity_ready else 0.0
+                    ),
+                    market_impact_bps=(
+                        float(market_impact_bps) if validation_liquidity_ready else 0.0
+                    ),
+                    average_daily_dollar_volume=(
+                        validation_adv_history if validation_liquidity_ready else None
+                    ),
+                    portfolio_value=float(current_value),
+                    max_adv_participation=(
+                        float(max_adv_participation)
+                        if validation_liquidity_ready
+                        else None
+                    ),
                     risk_aversion=risk_aversion,
                     target_volatility=(
                         float(optimization_target_volatility)
@@ -1961,12 +2180,15 @@ def _compute_quant_run(
                     expected_return_model=str(optimization_expected_return_model),
                     black_litterman_views=dict(black_litterman_views or {}),
                     black_litterman_confidence=float(black_litterman_confidence),
+                    universe_membership=validation_membership,
+                    membership_lag_periods=1,
                 )
             except Exception as validation_error:
                 optimization_validation = {
                     "success": False,
                     "error": str(validation_error),
                 }
+    mark_runtime_phase("optimization_and_validation")
     portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
 
     metrics = {
@@ -2008,6 +2230,7 @@ def _compute_quant_run(
         "cost_aware": cost_aware,
         "current_optimization_metrics": current_optimization_metrics,
         "mandate_aware": mandate_aware,
+        "execution_plan": execution_plan,
         "frontier": frontier,
         "portfolio_cloud": portfolio_cloud,
         "optimization_validation": optimization_validation,
@@ -2019,6 +2242,7 @@ def _compute_quant_run(
         "quant_stack": None,
         "runtime": {
             "core_seconds": float(time.perf_counter() - run_started_at),
+            "phases_seconds": runtime_phases,
             "simulation_seconds": None,
             "research_stack_seconds": None,
         },
@@ -2037,6 +2261,17 @@ def _compute_quant_run(
             "optimization_expected_return_model": str(optimization_expected_return_model),
             "black_litterman_views": dict(black_litterman_views or {}),
             "black_litterman_confidence": float(black_litterman_confidence),
+            "execution_model_enabled": bool(execution_model_enabled),
+            "liquidity_model_ready": liquidity_model_ready,
+            "half_spread_bps": float(half_spread_bps),
+            "market_impact_bps": float(market_impact_bps),
+            "max_adv_participation": float(max_adv_participation),
+            "minimum_trade_value": float(minimum_trade_value),
+            "maximum_holdings": maximum_holdings,
+            "lot_size": float(lot_size),
+            "short_term_tax_rate": float(short_term_tax_rate),
+            "long_term_tax_rate": float(long_term_tax_rate),
+            "point_in_time_universe_supplied": isinstance(universe_membership, pd.DataFrame),
             "simulation_days": simulation_days, "n_simulations": n_simulations,
             "random_seed": random_seed,
             "jump_intensity": jump_intensity,
@@ -2145,6 +2380,69 @@ def _render_quant_configuration() -> None:
                 jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
                 jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
                 jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
+            with st.expander("Execution realism and point-in-time validation", expanded=False):
+                execution_col, history_col = st.columns(2, gap="large")
+                with execution_col:
+                    execution_model_enabled = st.checkbox(
+                        "Model liquidity, spread, and market impact",
+                        value=True,
+                    )
+                    half_spread_bps = st.number_input(
+                        "Estimated half-spread (bps)", min_value=0.0,
+                        value=3.0, step=0.5,
+                        disabled=not execution_model_enabled,
+                    )
+                    market_impact_bps = st.number_input(
+                        "Square-root impact coefficient (bps)", min_value=0.0,
+                        value=20.0, step=1.0,
+                        disabled=not execution_model_enabled,
+                    )
+                    max_adv_participation_pct = st.number_input(
+                        "Maximum trade / 30-day ADV (%)",
+                        min_value=0.1, max_value=100.0, value=5.0, step=0.5,
+                        disabled=not execution_model_enabled,
+                    )
+                    minimum_trade_value = st.number_input(
+                        "Minimum trade value ($)", min_value=0.0,
+                        value=100.0, step=50.0,
+                    )
+                    maximum_holdings_input = st.number_input(
+                        "Maximum executed holdings (0 = no additional cap)",
+                        min_value=0, value=0, step=1,
+                    )
+                    lot_size = st.number_input(
+                        "Share lot size", min_value=0.0001,
+                        value=1.0, step=1.0,
+                    )
+                with history_col:
+                    tax_lots_file = st.file_uploader(
+                        "Tax lots CSV (optional)", type=["csv"],
+                        key="wharton_quant_tax_lots_csv",
+                        help=(
+                            "Columns: Ticker, Shares, Cost Basis Per Share, Acquired At. "
+                            "Lots are selected by lowest estimated tax per sold share."
+                        ),
+                    )
+                    short_term_tax_rate_pct = st.number_input(
+                        "Short-term tax rate (%)", min_value=0.0,
+                        max_value=100.0, value=35.0, step=1.0,
+                    )
+                    long_term_tax_rate_pct = st.number_input(
+                        "Long-term tax rate (%)", min_value=0.0,
+                        max_value=100.0, value=20.0, step=1.0,
+                    )
+                    universe_membership_file = st.file_uploader(
+                        "Point-in-time universe CSV (optional)", type=["csv"],
+                        key="wharton_quant_pit_universe_csv",
+                        help=(
+                            "Long form: Date, Ticker, Is Member. Wide form: Date plus one "
+                            "boolean column per ticker. Include the union of historical constituents."
+                        ),
+                    )
+                    st.caption(
+                        "Membership is lagged by one trading observation and forward-filled only; "
+                        "future membership is never back-filled."
+                    )
             st.markdown("#### Manual Individual Bonds")
             st.caption(
                 "Add bonds without exchange tickers. Their explicit weights reduce the market sleeve. "
@@ -2204,6 +2502,18 @@ def _render_quant_configuration() -> None:
                 if return_model_labels[return_model_label] == "black_litterman"
                 else {}
             )
+            tax_lots = None
+            if tax_lots_file is not None:
+                tax_lots = _load_quant_modules()["optimization"].parse_tax_lots(
+                    pd.read_csv(BytesIO(tax_lots_file.getvalue()))
+                )
+            universe_membership = None
+            if universe_membership_file is not None:
+                universe_membership = _load_quant_modules()[
+                    "optimization"
+                ].parse_point_in_time_membership(
+                    pd.read_csv(BytesIO(universe_membership_file.getvalue()))
+                )
             if apply_strategy_rulebook:
                 strategy_data = _load_strategy_workspace_data()
                 from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
@@ -2237,6 +2547,21 @@ def _render_quant_configuration() -> None:
                     optimization_expected_return_model=return_model_labels[return_model_label],
                     black_litterman_views=black_litterman_views,
                     black_litterman_confidence=float(black_litterman_confidence),
+                    execution_model_enabled=bool(execution_model_enabled),
+                    half_spread_bps=float(half_spread_bps),
+                    market_impact_bps=float(market_impact_bps),
+                    max_adv_participation=float(max_adv_participation_pct) / 100.0,
+                    minimum_trade_value=float(minimum_trade_value),
+                    maximum_holdings=(
+                        int(maximum_holdings_input)
+                        if int(maximum_holdings_input) > 0
+                        else None
+                    ),
+                    lot_size=float(lot_size),
+                    tax_lots=tax_lots,
+                    short_term_tax_rate=float(short_term_tax_rate_pct) / 100.0,
+                    long_term_tax_rate=float(long_term_tax_rate_pct) / 100.0,
+                    universe_membership=universe_membership,
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -2498,6 +2823,75 @@ def _render_mandate_aware_optimizer_body(
         use_container_width=True,
         height=360,
     )
+
+    execution_plan = result.get("execution_plan")
+    if isinstance(execution_plan, dict):
+        st.markdown("#### Executable Trade Plan")
+        if execution_plan.get("success"):
+            execution_kpis = st.columns(5)
+            execution_kpis[0].metric(
+                "Holdings", int(execution_plan.get("holding_count", 0))
+            )
+            execution_kpis[1].metric(
+                "Residual Cash", _fmt_pct(execution_plan.get("cash_weight"))
+            )
+            execution_kpis[2].metric(
+                "Execution Cost", _fmt_pct(execution_plan.get("total_execution_cost_drag"))
+            )
+            execution_kpis[3].metric(
+                "Estimated Tax", f"${float(execution_plan.get('estimated_tax', 0.0)):,.0f}"
+            )
+            execution_kpis[4].metric(
+                "Target Difference", _fmt_pct(execution_plan.get("tracking_difference_l1"))
+            )
+            trade_rows = []
+            for trade in execution_plan.get("trades", []):
+                trade_rows.append({
+                    "Ticker": trade.get("symbol"),
+                    "Side": trade.get("side"),
+                    "Shares": trade.get("shares"),
+                    "Price": trade.get("price"),
+                    "Notional": trade.get("notional"),
+                    "ADV Participation": trade.get("adv_participation"),
+                    "Commission": trade.get("commission_cost"),
+                    "Spread": trade.get("spread_cost"),
+                    "Market Impact": trade.get("market_impact_cost"),
+                    "Realized Gain": trade.get("realized_gain"),
+                    "Estimated Tax": trade.get("estimated_tax"),
+                })
+            trades_frame = pd.DataFrame(trade_rows)
+            if trades_frame.empty:
+                st.info("No trade clears the configured lot and minimum-notional rules.")
+            else:
+                display_trades = trades_frame.copy()
+                display_trades["ADV Participation"] = display_trades[
+                    "ADV Participation"
+                ].map(_fmt_pct)
+                for column in (
+                    "Price", "Notional", "Commission", "Spread",
+                    "Market Impact", "Realized Gain", "Estimated Tax",
+                ):
+                    display_trades[column] = display_trades[column].map(
+                        lambda value: f"${float(value or 0.0):,.2f}"
+                    )
+                st.dataframe(display_trades, use_container_width=True, hide_index=True)
+            for warning in execution_plan.get("warnings", []):
+                st.warning(str(warning))
+            if advanced:
+                with st.expander("Tax-lot selections and execution assumptions"):
+                    st.json({
+                        "assumptions": execution_plan.get("assumptions", {}),
+                        "tax_lot_allocations": {
+                            str(trade.get("symbol")): trade.get("tax_lot_allocations", [])
+                            for trade in execution_plan.get("trades", [])
+                            if trade.get("tax_lot_allocations")
+                        },
+                    })
+        else:
+            st.warning(
+                "Executable trade plan was not available: "
+                f"{execution_plan.get('message', 'missing execution inputs')}"
+            )
 
     report = pd.DataFrame(optimized.get("constraint_report", []))
     if not report.empty:
@@ -3340,12 +3734,21 @@ def _render_efficient_frontier(result: dict) -> None:
             use_container_width=True,
             hide_index=True,
         )
+        if validation.get("survivorship_bias_controlled"):
+            st.success(
+                "Point-in-time universe control is active. Membership is lagged by "
+                f"{int(validation.get('membership_lag_periods') or 1)} observation(s), "
+                "and each target uses only the preceding training window."
+            )
+        else:
+            st.warning(
+                "The selected universe is current rather than point-in-time; this rolling "
+                "test remains exposed to universe-selection and survivorship bias."
+            )
         st.caption(
-            "Each target allocation is estimated only from the preceding training window; "
-            "the following quarter is evaluated after proportional transaction costs. "
-            "The equal-weight line is a neutral comparator and may not satisfy the active mandate. "
-            "The selected asset universe is current rather than point-in-time, so this test does "
-            "not remove universe-selection or survivorship bias."
+            "The following quarter is evaluated after commission, spread, and market-impact "
+            "costs when liquidity inputs are available. The equal-weight line is a neutral "
+            "comparator and may not satisfy the active mandate."
         )
     elif isinstance(validation, dict) and validation.get("success") is False:
         st.warning(
@@ -4575,6 +4978,21 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
     else:
         runtime_parts.append("research stack loads only when opened")
     st.caption("Run time: " + " · ".join(runtime_parts))
+    runtime_phases = dict(runtime.get("phases_seconds", {}))
+    if runtime_phases:
+        with st.expander("Performance breakdown", expanded=False):
+            st.dataframe(
+                pd.DataFrame([
+                    {"Phase": name.replace("_", " ").title(), "Seconds": float(seconds)}
+                    for name, seconds in runtime_phases.items()
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "These are server-side Python phases. Container wake-up and browser rendering "
+                "are measured separately by the Runtime & build panel."
+            )
     advanced = st.checkbox("Show advanced diagnostics", key=diag_key)
     requested_max = float(result.get("inputs", {}).get("requested_max_weight", result.get("inputs", {}).get("max_weight", 1.0)))
     effective_max = float(result.get("inputs", {}).get("max_weight", requested_max))

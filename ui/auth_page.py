@@ -6,34 +6,32 @@ Provides login, registration, and session management UI components.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from html import escape
+from typing import Any
 
 import streamlit as st
-
-from src.auth import (
-    init_auth_database,
-    register_user,
-    login_user,
-    logout_user,
-    get_current_user,
-    migrate_existing_data,
-)
 
 
 # ---- Session state keys ----
 AUTH_TOKEN_KEY = "auth_token"
 AUTH_USER_KEY = "auth_user"
 AUTH_INIT_KEY = "auth_initialized"
+AuthStorageInitializer = Callable[[], dict[str, Any]]
 
 
 def _init_auth_system():
     """Initialize the auth system (run once at startup)."""
     if not st.session_state.get(AUTH_INIT_KEY):
+        from src.auth import init_auth_database
+
         init_auth_database()
         st.session_state[AUTH_INIT_KEY] = True
 
 
-def render_login_form() -> None:
+def render_login_form(
+    prepare_auth_storage: AuthStorageInitializer | None = None,
+) -> None:
     """Render the login form."""
     _, center, _ = st.columns([1, 1.15, 1])
     with center:
@@ -72,6 +70,11 @@ def render_login_form() -> None:
             )
 
             if login_clicked:
+                if prepare_auth_storage is not None:
+                    prepare_auth_storage()
+
+                from src.auth import login_user
+
                 token, user, errors = login_user(username, password)
                 if errors:
                     for error in errors:
@@ -87,10 +90,12 @@ def render_login_form() -> None:
                 st.rerun()
 
         if st.session_state.get("show_register"):
-            render_register_form()
+            render_register_form(prepare_auth_storage=prepare_auth_storage)
 
 
-def render_register_form() -> None:
+def render_register_form(
+    prepare_auth_storage: AuthStorageInitializer | None = None,
+) -> None:
     """Render the registration form."""
     st.markdown("---")
     st.subheader("Create your account")
@@ -112,6 +117,11 @@ def render_register_form() -> None:
             back_to_login = st.form_submit_button("Back to sign in", use_container_width=True)
         
         if register_clicked:
+            if prepare_auth_storage is not None:
+                prepare_auth_storage()
+
+            from src.auth import register_user
+
             user, errors = register_user(reg_username, email, password, confirm_password)
             if errors:
                 for error in errors:
@@ -133,6 +143,8 @@ def render_logout_button() -> bool:
     Returns True if logout was clicked.
     """
     if st.sidebar.button("Sign out", use_container_width=True):
+        from src.auth import logout_user
+
         token = st.session_state.get(AUTH_TOKEN_KEY)
         if token:
             logout_user(token)
@@ -176,6 +188,8 @@ def check_auth() -> bool:
     token = st.session_state.get(AUTH_TOKEN_KEY)
     
     if token:
+        from src.auth import get_current_user
+
         # get_current_user validates the token; avoid doing the same remote
         # database lookup once through is_authenticated and then again here.
         user = get_current_user(token)
@@ -243,6 +257,7 @@ def init_multi_user_mode() -> int | None:
     _init_auth_system()
     
     # Run migration if needed
+    from src.auth import get_current_user, migrate_existing_data
     from src.auth.migrations import get_migration_status
     status = get_migration_status()
     if not status.get("completed"):

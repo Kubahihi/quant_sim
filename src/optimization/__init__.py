@@ -29,6 +29,11 @@ _LAZY_EXPORTS = {
     "validate_constraint_solution": ".constraint_sets",
     "SUPPORTED_OBJECTIVES": ".engine",
     "optimize_portfolio": ".engine",
+    "build_execution_plan": ".execution",
+    "estimate_trade_costs": ".execution",
+    "parse_tax_lots": ".execution",
+    "align_point_in_time_membership": ".universe",
+    "parse_point_in_time_membership": ".universe",
 }
 
 

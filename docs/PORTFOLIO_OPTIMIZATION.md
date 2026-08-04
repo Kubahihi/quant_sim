@@ -35,6 +35,13 @@ their full data windows, solver tolerances, simulation counts and validation
 rules. Production source-file watching is disabled because deployed containers
 are immutable; a deployment restart is required to pick up code changes.
 
+The sidebar's **Runtime & build** panel identifies the branch and commit without
+spawning Git and records privacy-safe server-side timings for the latest 20
+Streamlit reruns. The Wharton Quant Engine separately records market-data,
+analytics, and optimization/validation phases. These measurements intentionally
+exclude browser rendering and a sleeping Community Cloud container's wake-up
+time, which must be measured externally.
+
 ## Constraints and failure behavior
 
 Current core constraints are full investment, long-only or bounded shorting,
@@ -60,11 +67,41 @@ The 3D portfolio cloud is projected onto the same capped long-only simplex.
 
 The current single-period objective maximizes:
 
-`expected return - risk aversion * variance - proportional trading cost`
+`expected return - risk aversion * variance - execution cost`
 
-Turnover is the L1 change in weights. Trading cost is turnover multiplied by
-the configured basis-point rate. Asset-specific spreads, nonlinear market
-impact, tax lots and integer share quantities are not yet modeled.
+Turnover is the L1 change in weights. Execution cost can contain:
+
+- asset-specific commissions/fees;
+- estimated half-spread;
+- convex square-root market impact, proportional to
+  `trade weight * sqrt(trade notional / average daily dollar volume)`.
+
+When portfolio value and 30-day average daily dollar volume (ADV) are supplied,
+the optimizer can also cap every trade's share of ADV. The Wharton engine derives
+rolling ADV from the same OHLCV download as prices, so historical validation uses
+only volume information available at each rebalance date.
+
+## Executable trade plan
+
+The continuous optimum and the executable plan are deliberately kept separate.
+`build_execution_plan` converts target weights into a deterministic list of
+trades while enforcing:
+
+- whole or configured lot sizes;
+- available cash after estimated execution costs;
+- minimum trade notional;
+- maximum ADV participation;
+- minimum/maximum executed holding counts;
+- optional tax-lot selection.
+
+Tax lots are sold in ascending estimated tax per share. This harvests the most
+valuable losses first and then chooses the lowest estimated-tax gains using the
+configured short- and long-term rates. The output retains each selected lot,
+realized gain, estimated tax, residual cash, execution cost and L1 difference
+from the continuous target. It is an estimate, not tax advice.
+
+Tax-lot CSV input is long-form with `Ticker`, `Shares`,
+`Cost Basis Per Share`, and `Acquired At` columns.
 
 ## Mandate-aware convex engine
 
@@ -82,8 +119,10 @@ tracking error. The engine can enforce the normalized Strategy Rulebook's:
 - turnover limit and asset-specific proportional costs.
 
 Every accepted result contains a constraint report with actual values, limits,
-binding flags and pass/fail status. Holding-count constraints are reported as
-unsupported until a mixed-integer solver is deliberately introduced.
+binding flags and pass/fail status. Exact holding counts are not forced into the
+continuous convex target because the installed solvers do not provide a robust
+mixed-integer quadratic path. They are enforced and audited in the executable
+lot-level plan, while both target versions remain visible.
 
 Black-Litterman expected returns are available with explicit absolute views and
 per-view confidence. The Wharton UI labels current portfolio weights as a
@@ -101,18 +140,37 @@ also recomputed from that window rather than reused from the full sample:
 2. calculate a new target allocation;
 3. apply it only to the following test window;
 4. allow weights to drift with realized asset returns;
-5. deduct proportional trading costs on rebalance dates;
+5. deduct commission, spread and square-root impact costs on rebalance dates
+   when causal liquidity inputs are available;
 6. compare after-cost results with an equal-weight baseline.
 
-The output includes target-weight history, gross and net returns, turnover,
-cost drag, return, volatility, Sharpe ratio and maximum drawdown. This validates
-the allocation process; it does not guarantee future performance. The
-equal-weight portfolio is a neutral comparator and is not asserted to satisfy
-the mandate. The evaluation currently uses the selected current universe, not
-a point-in-time historical universe, and therefore does not remove
-universe-selection or survivorship bias.
+The output includes target-weight history, active symbols by window, gross and
+net returns, turnover, cost breakdown, return, volatility, Sharpe ratio and
+maximum drawdown. This validates the allocation process; it does not guarantee
+future performance. The equal-weight portfolio is a neutral comparator and is
+not asserted to satisfy the mandate.
 
-## Next extensions
+An optional point-in-time membership table removes the specific current-universe
+shortcut. Membership is lagged by one observation, forward-filled, and never
+back-filled. The return matrix must contain the union of historical constituents.
+Missing returns for a held asset fail closed: the caller must supply a delisting
+return or shorten the holding window instead of silently treating the loss as
+zero. Without a membership table, the result is explicitly marked as still
+exposed to survivorship bias.
 
-The next implementation layer should add liquidity/market-impact estimates,
-integer trade sizing, tax-aware lots and point-in-time universe data.
+Membership CSV input supports either:
+
+- long form: `Date`, `Ticker`, `Is Member`; or
+- wide form: `Date` plus one boolean column per ticker.
+
+## Remaining limitations
+
+- Yahoo Finance volume and prices are estimates for research, not execution feeds.
+- Spread and impact coefficients are assumptions and should be calibrated to a
+  broker or venue before trading.
+- Manual bonds need instrument-specific denomination, accrued-interest and
+  liquidity inputs before they can receive a generic equity-style trade plan.
+- Point-in-time membership controls survivorship bias only when the supplied
+  historical constituent union and delisting returns are complete.
+- Tax estimates omit jurisdiction-specific wash-sale, currency, account and
+  investor rules.

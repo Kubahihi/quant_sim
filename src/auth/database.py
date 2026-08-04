@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # Database path - stored in project data directory
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -326,6 +326,137 @@ def create_user(
             "email": email,
             "created_at": created_at,
         }
+    finally:
+        conn.close()
+
+
+def register_user_once(
+    username: str,
+    email: str,
+    password_hasher: Callable[[], str],
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Check uniqueness and create a user with one database connection.
+
+    The password callback is evaluated only after both uniqueness checks pass,
+    so duplicate registrations do not pay the bcrypt cost.
+    """
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            SELECT username, email
+            FROM users
+            WHERE is_active = 1 AND (username = ? OR email = ?)
+            """,
+            (username, email),
+        )
+        existing = [_row_to_dict(cursor, row) or {} for row in cursor.fetchall()]
+        if any(str(row.get("username")) == username for row in existing):
+            return None, "username_exists"
+        if any(str(row.get("email")) == email for row in existing):
+            return None, "email_exists"
+
+        password_hash = str(password_hasher())
+        if not password_hash:
+            raise ValueError("password_hasher returned an empty hash.")
+        created_at = datetime.now(timezone.utc).isoformat()
+        insert_cursor = conn.execute(
+            """
+            INSERT INTO users (username, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (username, email, password_hash, created_at),
+        )
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
+        return {
+            "id": insert_cursor.lastrowid,
+            "username": username,
+            "email": email,
+            "created_at": created_at,
+        }, "ok"
+    finally:
+        conn.close()
+
+
+def authenticate_user_once(
+    username: str,
+    password_verifier: Callable[[str], bool],
+    *,
+    maximum_failed_attempts: int = 5,
+    failure_window_minutes: int = 10,
+) -> tuple[Optional[str], Optional[dict[str, Any]], str]:
+    """Validate credentials, audit the attempt, and create a session once.
+
+    One connection and one commit replace the previous chain of independent
+    rate-limit, user lookup, audit, and session-creation connections.
+    """
+    if maximum_failed_attempts < 1:
+        raise ValueError("maximum_failed_attempts must be positive.")
+    if failure_window_minutes < 1:
+        raise ValueError("failure_window_minutes must be positive.")
+
+    conn = _get_connection()
+    try:
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(minutes=failure_window_minutes)).isoformat()
+        failed_cursor = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM login_attempts
+            WHERE username = ? AND success = 0 AND timestamp > ?
+            """,
+            (username, since),
+        )
+        if int(failed_cursor.fetchone()[0]) >= maximum_failed_attempts:
+            return None, None, "rate_limited"
+
+        user_cursor = conn.execute(
+            """
+            SELECT id, username, email, password_hash, created_at, is_active
+            FROM users
+            WHERE username = ? AND is_active = 1
+            """,
+            (username,),
+        )
+        user = _row_to_dict(user_cursor, user_cursor.fetchone())
+        password_matches = bool(
+            user is not None
+            and password_verifier(str(user.get("password_hash") or ""))
+        )
+        conn.execute(
+            """
+            INSERT INTO login_attempts (username, timestamp, success, ip_address)
+            VALUES (?, ?, ?, ?)
+            """,
+            (username, now.isoformat(), 1 if password_matches else 0, None),
+        )
+
+        token: Optional[str] = None
+        safe_user: Optional[dict[str, Any]] = None
+        status = "invalid_credentials"
+        if password_matches and user is not None:
+            token = secrets.token_urlsafe(32)
+            expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
+            conn.execute(
+                """
+                INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (token, int(user["id"]), now.isoformat(), expires_at, now.isoformat()),
+            )
+            safe_user = {
+                key: value
+                for key, value in user.items()
+                if key != "password_hash"
+            }
+            status = "ok"
+
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
+        return token, safe_user, status
     finally:
         conn.close()
 

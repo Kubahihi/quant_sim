@@ -29,6 +29,23 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
         return prices[[symbol for symbol in symbols if symbol in prices.columns]].copy()
 
     monkeypatch.setattr(wharton_dash, "_fetch_close_prices_cached", fake_prices)
+    monkeypatch.setattr(
+        wharton_dash,
+        "_fetch_market_data_cached",
+        lambda symbols, start_date, end_date: {
+            "prices": fake_prices(symbols, start_date, end_date),
+            "average_daily_dollar_volume": {
+                symbol: 10_000_000.0 for symbol in symbols if symbol in prices.columns
+            },
+            "adv_history": pd.DataFrame(
+                {
+                    symbol: 10_000_000.0
+                    for symbol in symbols if symbol in prices.columns
+                },
+                index=index,
+            ),
+        },
+    )
     def fake_optimization(returns, **kwargs):
         weights = np.repeat(1.0 / returns.shape[1], returns.shape[1])
         return {
@@ -71,6 +88,18 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
             "transaction_cost_drag": 0.0,
             "constraint_report": [],
             "warnings": [],
+        },
+        build_execution_plan=lambda *args, **kwargs: {
+            "success": True,
+            "trades": [],
+            "warnings": [],
+            "holding_count": len(args[0]),
+            "cash": 0.0,
+            "cash_weight": 0.0,
+            "total_execution_cost": 0.0,
+            "total_execution_cost_drag": 0.0,
+            "estimated_tax": 0.0,
+            "tracking_difference_l1": 0.0,
         },
     )
     monkeypatch.setattr(
