@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.optimization import optimize_cost_aware_rebalance
 
@@ -40,30 +41,24 @@ def test_cost_aware_rebalance_respects_constraints():
     assert float(result["turnover"]) <= float(result["turnover_limit"]) + 1e-6
 
 
-def test_cost_aware_rebalance_auto_relaxes_infeasible_max_weight():
+def test_cost_aware_rebalance_rejects_infeasible_max_weight():
     returns = _sample_returns()
     current_weights = np.array([0.5, 0.3, 0.2], dtype=float)
 
-    result = optimize_cost_aware_rebalance(
-        returns=returns,
-        current_weights=current_weights,
-        max_weight=0.10,
-        turnover_limit=2.0,
-        transaction_cost_bps=0.0,
-        risk_aversion=1.0,
-    )
-
-    assert result["success"] is True
-    assert float(result["max_weight"]) >= (1.0 / returns.shape[1])
-    weights = np.asarray(result["weights"], dtype=float)
-    assert np.isclose(float(weights.sum()), 1.0, atol=1e-8)
+    with pytest.raises(ValueError, match="infeasible"):
+        optimize_cost_aware_rebalance(
+            returns=returns,
+            current_weights=current_weights,
+            max_weight=0.10,
+            turnover_limit=2.0,
+            transaction_cost_bps=0.0,
+            risk_aversion=1.0,
+        )
 
 
 def test_cost_aware_rebalance_handles_empty_returns():
-    result = optimize_cost_aware_rebalance(
-        returns=pd.DataFrame(),
-        current_weights=np.array([]),
-    )
-
-    assert result["success"] is False
-    assert "returns are empty" in str(result.get("message", ""))
+    with pytest.raises(ValueError, match="returns are empty"):
+        optimize_cost_aware_rebalance(
+            returns=pd.DataFrame(),
+            current_weights=np.array([]),
+        )

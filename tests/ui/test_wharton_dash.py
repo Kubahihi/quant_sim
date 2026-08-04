@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 import bcrypt
 import math
+import pytest
+from types import SimpleNamespace
 
 from ui.pages import wharton_dash
 
@@ -21,6 +23,93 @@ def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
     assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_AREAS["Risk & Quant"]
     assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
     assert wharton_dash._parse_tickers("", allow_empty=True) == []
+    assert "Mandate-Aware Optimizer" in wharton_dash.QUANT_MODULES
+
+
+def test_black_litterman_view_parser_and_optimizer_metadata_adapter():
+    assert wharton_dash._parse_black_litterman_views(
+        "msft=10%; NVDA=12.5"
+    ) == {"MSFT": pytest.approx(0.10), "NVDA": pytest.approx(0.125)}
+    with pytest.raises(ValueError, match="TICKER=annual return"):
+        wharton_dash._parse_black_litterman_views("MSFT 10")
+    with pytest.raises(ValueError, match="unique"):
+        wharton_dash._parse_black_litterman_views("MSFT=10,MSFT=11")
+
+    metadata = wharton_dash._build_optimizer_asset_metadata({
+        "approved_securities": [
+            {"ticker": "MSFT", "approved": True, "payload": {"source": "committee"}}
+        ],
+        "theses": [
+            {
+                "ticker": "MSFT",
+                "payload": {
+                    "sector": "Technology",
+                    "beta": 1.05,
+                    "tags": ["liquid"],
+                },
+            }
+        ],
+    })
+    assert metadata["MSFT"] == {
+        "source": "committee",
+        "approved": True,
+        "sector": "Technology",
+        "beta": 1.05,
+        "tags": ["liquid"],
+    }
+
+
+def test_mandate_optimizer_renderer_reaches_metrics_and_audit(monkeypatch):
+    rendered = {"metrics": 0, "frames": 0}
+
+    class FakeColumn:
+        def metric(self, *args, **kwargs):
+            rendered["metrics"] += 1
+
+    fake_streamlit = SimpleNamespace(
+        markdown=lambda *args, **kwargs: None,
+        caption=lambda *args, **kwargs: None,
+        columns=lambda count: [FakeColumn() for _ in range(count)],
+        dataframe=lambda *args, **kwargs: rendered.__setitem__(
+            "frames", rendered["frames"] + 1
+        ),
+        bar_chart=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+        error=lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(wharton_dash, "st", fake_streamlit)
+    result = {
+        "inputs": {"strategy_rulebook_applied": True},
+        "mandate_aware": {
+            "success": True,
+            "objective": "maximum_utility",
+            "symbols": ["AAA", "BBB"],
+            "weights": [0.55, 0.45],
+            "current_weights": [0.50, 0.50],
+            "expected_return": 0.08,
+            "volatility": 0.12,
+            "sharpe_ratio": 0.42,
+            "historical_cvar_daily": 0.02,
+            "turnover": 0.10,
+            "transaction_cost_drag": 0.0001,
+            "constraint_report": [
+                {
+                    "name": "asset:AAA",
+                    "actual": 0.55,
+                    "minimum": 0.0,
+                    "maximum": 0.60,
+                    "binding": False,
+                    "passed": True,
+                }
+            ],
+            "warnings": [],
+        },
+    }
+
+    wharton_dash._render_mandate_aware_optimizer(result, advanced=False)
+
+    assert rendered == {"metrics": 6, "frames": 2}
 
 
 def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-team-pass") -> Path:

@@ -40,15 +40,11 @@ def test_maximum_sharpe_uses_shrunk_inputs_and_reports_diagnostics():
     assert set(result["estimation"]["shrunk_expected_returns"]) == {"AAA", "BBB", "CCC"}
 
 
-def test_maximum_sharpe_relaxes_infeasible_long_only_max_weight():
+def test_maximum_sharpe_rejects_infeasible_long_only_max_weight():
     returns = _sample_returns()
 
-    result = optimize_maximum_sharpe(returns, max_weight=0.10)
-
-    weights = np.asarray(result["weights"], dtype=float)
-    assert result["success"] is True
-    assert np.isclose(float(weights.sum()), 1.0, atol=1e-8)
-    assert np.max(weights) <= (1.0 / returns.shape[1]) + 1e-8
+    with pytest.raises(ValueError, match="infeasible"):
+        optimize_maximum_sharpe(returns, max_weight=0.10)
 
 
 def test_maximum_sharpe_rejects_empty_returns():

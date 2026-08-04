@@ -3,6 +3,10 @@ headless = true
 enableCORS = true
 enableXsrfProtection = true
 maxUploadSize = 20
+# Deployment processes are immutable; disabling source watching avoids a
+# needless filesystem observer and module scan on every cold container.
+fileWatcherType = "none"
+runOnSave = false
 
 [browser]
 gatherUsageStats = false

@@ -1,58 +1,111 @@
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from loguru import logger
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
-from typing import Optional, Dict
-from loguru import logger
+
+from .constraints import build_weight_bounds, validate_weight_solution
+from .estimators import (
+    DEFAULT_COVARIANCE_SHRINKAGE,
+    DEFAULT_RETURN_SHRINKAGE,
+    PortfolioEstimates,
+    resolve_portfolio_estimates,
+)
 
 
 def optimize_minimum_variance(
     returns: pd.DataFrame,
     allow_short: bool = False,
     max_weight: Optional[float] = None,
-) -> Dict[str, any]:
-    """Optimize for minimum variance portfolio"""
-    n_assets = returns.shape[1]
-    cov_matrix = returns.cov().values
-    
-    def portfolio_variance(weights):
-        return weights.T @ cov_matrix @ weights
-    
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
-    
-    if allow_short:
-        bounds = [(-1.0, 1.0) for _ in range(n_assets)]
-    else:
-        bounds = [(0.0, 1.0) for _ in range(n_assets)]
-    
-    if max_weight is not None:
-        bounds = [(0.0, max_weight) for _ in range(n_assets)]
-    
-    initial_weights = np.array([1.0 / n_assets] * n_assets)
-    
+    risk_free_rate: float = 0.03,
+    covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
+    return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
+    portfolio_estimates: Optional[PortfolioEstimates] = None,
+) -> dict[str, Any]:
+    """Optimize a minimum-variance portfolio using shared robust estimates."""
+    estimates = resolve_portfolio_estimates(
+        returns,
+        portfolio_estimates=portfolio_estimates,
+        covariance_shrinkage=covariance_shrinkage,
+        return_shrinkage=return_shrinkage,
+    )
+    n_assets = len(estimates.symbols)
+    covariance = estimates.covariance
+    bounds = build_weight_bounds(
+        n_assets,
+        allow_short=allow_short,
+        max_weight=max_weight,
+    )
+
+    def portfolio_variance(weights: np.ndarray) -> float:
+        return float(weights @ covariance @ weights)
+
+    def portfolio_variance_gradient(weights: np.ndarray) -> np.ndarray:
+        return 2.0 * covariance @ weights
+
+    ones = np.ones(n_assets, dtype=float)
+    constraints = [{
+        "type": "eq",
+        "fun": lambda weights: float(np.sum(weights) - 1.0),
+        "jac": lambda _weights: ones,
+    }]
+    initial_weights = np.full(n_assets, 1.0 / n_assets, dtype=float)
+
     result = minimize(
         portfolio_variance,
         initial_weights,
+        jac=portfolio_variance_gradient,
         method="SLSQP",
         bounds=bounds,
         constraints=constraints,
-        options={"maxiter": 1000},
+        options={"maxiter": 1000, "ftol": 1e-12},
     )
-    
+
     if not result.success:
-        logger.warning(f"Optimization failed: {result.message}")
-    
-    optimal_weights = result.x
-    optimal_variance = result.fun
-    optimal_volatility = np.sqrt(optimal_variance) * np.sqrt(252)
-    
-    mean_returns = returns.mean()
-    portfolio_return = (optimal_weights @ mean_returns) * 252
-    
+        logger.warning(f"Minimum-variance optimization failed: {result.message}")
+        return {
+            "weights": np.array([], dtype=float),
+            "symbols": list(estimates.symbols),
+            "expected_return": float("nan"),
+            "volatility": float("nan"),
+            "sharpe_ratio": float("nan"),
+            "success": False,
+            "message": str(result.message),
+            "estimation": estimates.metadata(),
+        }
+
+    try:
+        optimal_weights = validate_weight_solution(result.x, bounds)
+    except ValueError as exc:
+        logger.warning(f"Minimum-variance solution rejected: {exc}")
+        return {
+            "weights": np.array([], dtype=float),
+            "symbols": list(estimates.symbols),
+            "expected_return": float("nan"),
+            "volatility": float("nan"),
+            "sharpe_ratio": float("nan"),
+            "success": False,
+            "message": str(exc),
+            "estimation": estimates.metadata(),
+        }
+
+    expected_return = float(optimal_weights @ estimates.mean_returns)
+    volatility = float(np.sqrt(max(portfolio_variance(optimal_weights), 0.0)))
+    sharpe_ratio = (
+        (expected_return - float(risk_free_rate)) / volatility
+        if volatility > 0
+        else 0.0
+    )
     return {
         "weights": optimal_weights,
-        "symbols": returns.columns.tolist(),
-        "expected_return": portfolio_return,
-        "volatility": optimal_volatility,
-        "sharpe_ratio": portfolio_return / optimal_volatility if optimal_volatility > 0 else 0,
-        "success": result.success,
+        "symbols": list(estimates.symbols),
+        "expected_return": expected_return,
+        "volatility": volatility,
+        "sharpe_ratio": float(sharpe_ratio),
+        "success": True,
+        "message": str(result.message),
+        "estimation": estimates.metadata(),
     }

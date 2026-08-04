@@ -19,6 +19,10 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 Konvence oceneni a prace s dluhopisovymi daty jsou popsane v [docs/FIXED_INCOME.md](docs/FIXED_INCOME.md).
 Metodika komoditnich proxy, stresu pozice a jejich omezeni je popsana v [docs/COMMODITIES.md](docs/COMMODITIES.md).
 Metodika menovych expozic, rizikovych metrik, stresu a optimalizace hedge je popsana v [docs/CURRENCY_RISK.md](docs/CURRENCY_RISK.md).
+
+Metodika konstrukce portfolia, sdilenych odhadu, omezeni a rolling
+out-of-sample reoptimalizace je popsana v
+[docs/PORTFOLIO_OPTIMIZATION.md](docs/PORTFOLIO_OPTIMIZATION.md).
 Metodika behaviorálního profilu, skore, evidence a governance omezeni je popsana v [docs/BEHAVIORAL_PROFILE.md](docs/BEHAVIORAL_PROFILE.md).
 
 ## 1) Jak projekt spustit lokalne

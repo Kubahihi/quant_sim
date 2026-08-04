@@ -1,18 +1,25 @@
+from __future__ import annotations
+
+from typing import Any, Optional, Sequence
+
+from loguru import logger
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-from typing import List, Dict, Optional
-from loguru import logger
+from scipy.optimize import linprog, minimize
 
-TRADING_DAYS = 252
+from .constraints import build_weight_bounds, validate_weight_solution
+from .estimators import (
+    DEFAULT_COVARIANCE_SHRINKAGE,
+    DEFAULT_RETURN_SHRINKAGE,
+    PortfolioEstimates,
+    resolve_portfolio_estimates,
+)
 
 
 def _calculate_diversification_metrics(weights: np.ndarray) -> tuple[float, float]:
-    """Return normalized diversification score and effective holdings."""
     concentration = float(np.sum(np.square(weights)))
     if concentration <= 0:
         return 0.0, 0.0
-
     effective_holdings = 1.0 / concentration
     diversification_score = effective_holdings / len(weights)
     return diversification_score, effective_holdings
@@ -20,15 +27,14 @@ def _calculate_diversification_metrics(weights: np.ndarray) -> tuple[float, floa
 
 def _format_top_holdings(
     weights: np.ndarray,
-    symbols: List[str],
+    symbols: Sequence[str],
     top_n: int = 3,
 ) -> str:
-    """Create a compact hover-friendly summary of the largest positions."""
-    ranked_idx = np.argsort(weights)[::-1][:top_n]
+    ranked_idx = np.argsort(np.abs(weights))[::-1][:top_n]
     return ", ".join(
         f"{symbols[idx]} {weights[idx]:.0%}"
         for idx in ranked_idx
-        if weights[idx] > 0
+        if abs(weights[idx]) > 1e-12
     )
 
 
@@ -37,31 +43,70 @@ def calculate_portfolio_statistics(
     mean_returns: np.ndarray,
     cov_matrix: np.ndarray,
     risk_free_rate: float = 0.03,
-    symbols: Optional[List[str]] = None,
-) -> Dict[str, object]:
-    """Calculate portfolio metrics used across optimizers and visualizations."""
-    portfolio_return = float(weights @ mean_returns)
-    portfolio_volatility = float(np.sqrt(weights.T @ cov_matrix @ weights))
+    symbols: Optional[list[str]] = None,
+) -> dict[str, object]:
+    """Calculate comparable metrics from an explicit set of portfolio inputs."""
+    values = np.asarray(weights, dtype=float)
+    means = np.asarray(mean_returns, dtype=float)
+    covariance = np.asarray(cov_matrix, dtype=float)
+    if values.ndim != 1 or means.shape != values.shape:
+        raise ValueError("weights and mean_returns must be aligned one-dimensional arrays.")
+    if covariance.shape != (values.size, values.size):
+        raise ValueError("cov_matrix shape must match the weight vector.")
+
+    portfolio_return = float(values @ means)
+    variance = float(values @ covariance @ values)
+    portfolio_volatility = float(np.sqrt(max(variance, 0.0)))
     sharpe_ratio = (
-        (portfolio_return - risk_free_rate) / portfolio_volatility
+        (portfolio_return - float(risk_free_rate)) / portfolio_volatility
         if portfolio_volatility > 0
         else 0.0
     )
-    diversification_score, effective_holdings = _calculate_diversification_metrics(weights)
-
-    metrics = {
+    diversification_score, effective_holdings = _calculate_diversification_metrics(values)
+    metrics: dict[str, object] = {
         "return": portfolio_return,
         "volatility": portfolio_volatility,
-        "sharpe_ratio": sharpe_ratio,
+        "sharpe_ratio": float(sharpe_ratio),
         "diversification_score": diversification_score,
         "effective_holdings": effective_holdings,
-        "max_weight": float(np.max(weights)),
+        "max_weight": float(np.max(np.abs(values))),
     }
-
     if symbols is not None:
-        metrics["top_holdings"] = _format_top_holdings(weights, symbols)
-
+        metrics["top_holdings"] = _format_top_holdings(values, symbols)
     return metrics
+
+
+def _project_to_capped_simplex(
+    weights: np.ndarray,
+    max_weight: float,
+) -> np.ndarray:
+    """Project rows onto the long-only simplex with a uniform upper bound."""
+    upper = float(max_weight)
+    n_assets = weights.shape[1]
+    build_weight_bounds(n_assets, allow_short=False, max_weight=upper)
+    if upper >= 1.0:
+        return weights
+    if np.isclose(upper, 1.0 / n_assets, atol=1e-12, rtol=0.0):
+        return np.full_like(weights, 1.0 / n_assets)
+
+    lower_lambda = np.min(weights - upper, axis=1)
+    upper_lambda = np.max(weights, axis=1)
+    for _ in range(64):
+        midpoint = (lower_lambda + upper_lambda) * 0.5
+        projected_sum = np.clip(
+            weights - midpoint[:, None], 0.0, upper
+        ).sum(axis=1)
+        too_large = projected_sum > 1.0
+        lower_lambda = np.where(too_large, midpoint, lower_lambda)
+        upper_lambda = np.where(too_large, upper_lambda, midpoint)
+    projected = np.clip(weights - upper_lambda[:, None], 0.0, upper)
+    row_sums = projected.sum(axis=1, keepdims=True)
+    return np.divide(
+        projected,
+        row_sums,
+        out=np.full_like(projected, 1.0 / n_assets),
+        where=row_sums > 0,
+    )
 
 
 def sample_portfolio_cloud(
@@ -69,24 +114,38 @@ def sample_portfolio_cloud(
     n_samples: int = 2500,
     risk_free_rate: float = 0.03,
     random_seed: Optional[int] = 42,
+    max_weight: Optional[float] = None,
+    covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
+    return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
+    portfolio_estimates: Optional[PortfolioEstimates] = None,
 ) -> pd.DataFrame:
-    """Sample a large set of long-only portfolios for 3D visualization."""
-    n_assets = returns.shape[1]
-    mean_returns = returns.mean().values * TRADING_DAYS
-    cov_matrix = returns.cov().values * TRADING_DAYS
+    """Sample long-only portfolios using the same inputs as the optimizers."""
+    if not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
+        raise ValueError("n_samples must be a positive integer.")
+    estimates = resolve_portfolio_estimates(
+        returns,
+        portfolio_estimates=portfolio_estimates,
+        covariance_shrinkage=covariance_shrinkage,
+        return_shrinkage=return_shrinkage,
+    )
+    n_assets = len(estimates.symbols)
     rng = np.random.default_rng(random_seed)
-
     weights = rng.dirichlet(np.ones(n_assets), size=n_samples)
-    portfolio_returns = weights @ mean_returns
-    portfolio_variance = np.einsum("ij,jk,ik->i", weights, cov_matrix, weights)
-    portfolio_volatility = np.sqrt(np.clip(portfolio_variance, a_min=0.0, a_max=None))
+    if max_weight is not None:
+        weights = _project_to_capped_simplex(weights, float(max_weight))
+    portfolio_returns = weights @ estimates.mean_returns
+    portfolio_variance = np.einsum(
+        "ij,jk,ik->i", weights, estimates.covariance, weights
+    )
+    portfolio_volatility = np.sqrt(
+        np.clip(portfolio_variance, a_min=0.0, a_max=None)
+    )
     sharpe_ratio = np.divide(
-        portfolio_returns - risk_free_rate,
+        portfolio_returns - float(risk_free_rate),
         portfolio_volatility,
         out=np.zeros_like(portfolio_returns),
         where=portfolio_volatility > 0,
     )
-
     concentration = np.sum(np.square(weights), axis=1)
     effective_holdings = np.divide(
         1.0,
@@ -94,25 +153,20 @@ def sample_portfolio_cloud(
         out=np.zeros_like(concentration),
         where=concentration > 0,
     )
-    diversification_score = effective_holdings / n_assets
-    max_weight = np.max(weights, axis=1)
-    symbols = returns.columns.tolist()
-    top_holdings = [
-        _format_top_holdings(sample_weights, symbols)
-        for sample_weights in weights
-    ]
-
     cloud = pd.DataFrame({
         "expected_return": portfolio_returns,
         "volatility": portfolio_volatility,
         "sharpe_ratio": sharpe_ratio,
-        "diversification_score": diversification_score,
+        "diversification_score": effective_holdings / n_assets,
         "effective_holdings": effective_holdings,
-        "max_weight": max_weight,
-        "top_holdings": top_holdings,
+        "max_weight": np.max(weights, axis=1),
+        "top_holdings": [
+            _format_top_holdings(sample_weights, estimates.symbols)
+            for sample_weights in weights
+        ],
     })
-
-    logger.info(f"Sampled {len(cloud)} portfolios for 3D trade-off visualization")
+    cloud.attrs["estimation"] = estimates.metadata()
+    logger.info(f"Sampled {len(cloud)} portfolios for trade-off visualization")
     return cloud
 
 
@@ -120,133 +174,152 @@ def calculate_efficient_frontier(
     returns: pd.DataFrame,
     n_points: int = 50,
     allow_short: bool = False,
-) -> List[Dict]:
-    """Calculate efficient frontier points.
-
-    The frontier consists of a sequence of closely related quadratic
-    programs.  Supplying the exact objective/constraint gradients and using
-    each solution to initialize the next target avoids the repeated finite-
-    difference work of solving every point from equal weights.
-    """
+    max_weight: Optional[float] = None,
+    risk_free_rate: float = 0.03,
+    covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
+    return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
+    portfolio_estimates: Optional[PortfolioEstimates] = None,
+) -> list[dict[str, Any]]:
+    """Calculate only the efficient branch, beginning at global min variance."""
     if not isinstance(n_points, (int, np.integer)) or n_points < 2:
         raise ValueError("n_points must be an integer of at least 2.")
 
-    clean_returns = (
-        pd.DataFrame(returns)
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna(how="any")
+    estimates = resolve_portfolio_estimates(
+        returns,
+        portfolio_estimates=portfolio_estimates,
+        covariance_shrinkage=covariance_shrinkage,
+        return_shrinkage=return_shrinkage,
     )
-    if clean_returns.empty or clean_returns.shape[1] == 0:
-        raise ValueError(
-            "returns must contain finite observations for at least one asset."
-        )
-    if clean_returns.shape[0] < 2:
-        raise ValueError("returns must contain at least two observations.")
-
-    clean_returns = clean_returns.astype(float)
-    n_assets = clean_returns.shape[1]
-    mean_returns = clean_returns.mean().to_numpy(dtype=float) * TRADING_DAYS
-    cov_matrix = clean_returns.cov().to_numpy(dtype=float) * TRADING_DAYS
-    # Numerical noise can make a sample covariance microscopically
-    # asymmetric.  A symmetric matrix keeps the analytic gradient exact.
-    cov_matrix = (cov_matrix + cov_matrix.T) * 0.5
-    symbols = clean_returns.columns.tolist()
-    
-    def portfolio_metrics(weights):
-        ret = float(weights @ mean_returns)
-        variance = float(weights @ cov_matrix @ weights)
-        vol = float(np.sqrt(max(variance, 0.0)))
-        return ret, vol
+    n_assets = len(estimates.symbols)
+    mean_returns = estimates.mean_returns
+    covariance = estimates.covariance
+    symbols = list(estimates.symbols)
+    bounds = build_weight_bounds(
+        n_assets,
+        allow_short=allow_short,
+        max_weight=max_weight,
+    )
 
     if n_assets == 1:
-        weights = np.ones(1, dtype=float)
-        ret, vol = portfolio_metrics(weights)
+        weights = validate_weight_solution(np.ones(1, dtype=float), bounds)
         metrics = calculate_portfolio_statistics(
-            weights=weights,
-            mean_returns=mean_returns,
-            cov_matrix=cov_matrix,
-            risk_free_rate=0.0,
+            weights,
+            mean_returns,
+            covariance,
+            risk_free_rate=risk_free_rate,
             symbols=symbols,
         )
-        logger.info("Calculated the single feasible portfolio for one asset")
         return [{
             "weights": weights,
-            "return": ret,
-            "volatility": vol,
-            "sharpe_ratio": metrics["sharpe_ratio"],
-            "diversification_score": metrics["diversification_score"],
-            "effective_holdings": metrics["effective_holdings"],
-            "max_weight": metrics["max_weight"],
-            "top_holdings": metrics["top_holdings"],
+            **metrics,
+            "estimation": estimates.metadata(),
         }]
-    
-    def portfolio_variance(weights: np.ndarray) -> float:
-        return float(weights @ cov_matrix @ weights)
-
-    def portfolio_variance_gradient(weights: np.ndarray) -> np.ndarray:
-        return 2.0 * (cov_matrix @ weights)
 
     ones = np.ones(n_assets, dtype=float)
+
+    def portfolio_variance(weights: np.ndarray) -> float:
+        return float(weights @ covariance @ weights)
+
+    def portfolio_variance_gradient(weights: np.ndarray) -> np.ndarray:
+        return 2.0 * covariance @ weights
+
     fully_invested_constraint = {
         "type": "eq",
         "fun": lambda weights: float(np.sum(weights) - 1.0),
         "jac": lambda _weights: ones,
     }
-    
-    if allow_short:
-        bounds = [(-1.0, 1.0) for _ in range(n_assets)]
-    else:
-        bounds = [(0.0, 1.0) for _ in range(n_assets)]
-    
-    min_ret = mean_returns.min()
-    max_ret = mean_returns.max()
-    target_returns = np.linspace(min_ret, max_ret, n_points)
-    
-    frontier_points = []
-    initial_weights = np.full(n_assets, 1.0 / n_assets, dtype=float)
-    
-    for target_return in target_returns:
-        target_constraint = {
-            "type": "eq",
-            "fun": lambda weights, target=target_return: float(
-                weights @ mean_returns - target
-            ),
-            "jac": lambda _weights: mean_returns,
-        }
-        
-        result = minimize(
-            portfolio_variance,
-            initial_weights,
-            jac=portfolio_variance_gradient,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=(fully_invested_constraint, target_constraint),
-            options={"maxiter": 1000, "disp": False},
+    equal_weights = np.full(n_assets, 1.0 / n_assets, dtype=float)
+    minimum_variance_result = minimize(
+        portfolio_variance,
+        equal_weights,
+        jac=portfolio_variance_gradient,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=(fully_invested_constraint,),
+        options={"maxiter": 1000, "ftol": 1e-12, "disp": False},
+    )
+    if not minimum_variance_result.success:
+        raise RuntimeError(
+            f"minimum-variance anchor failed: {minimum_variance_result.message}"
         )
-        
-        if result.success:
-            weights = np.asarray(result.x, dtype=float)
-            # Adjacent target-return problems have adjacent solutions.
-            initial_weights = weights
-            ret, vol = portfolio_metrics(weights)
-            metrics = calculate_portfolio_statistics(
-                weights=weights,
-                mean_returns=mean_returns,
-                cov_matrix=cov_matrix,
-                risk_free_rate=0.0,
-                symbols=symbols,
+    minimum_variance_weights = validate_weight_solution(
+        minimum_variance_result.x, bounds
+    )
+    minimum_variance_return = float(minimum_variance_weights @ mean_returns)
+
+    maximum_return_result = linprog(
+        c=-mean_returns,
+        A_eq=ones.reshape(1, -1),
+        b_eq=np.array([1.0]),
+        bounds=bounds,
+        method="highs",
+    )
+    if not maximum_return_result.success:
+        raise RuntimeError(
+            f"maximum-return endpoint failed: {maximum_return_result.message}"
+        )
+    maximum_return_weights = validate_weight_solution(maximum_return_result.x, bounds)
+    maximum_return = float(maximum_return_weights @ mean_returns)
+
+    target_returns = np.linspace(
+        minimum_variance_return,
+        maximum_return,
+        n_points,
+    )
+    frontier_points: list[dict[str, Any]] = []
+    initial_weights = minimum_variance_weights
+
+    for index, target_return in enumerate(target_returns):
+        if index == 0:
+            weights = minimum_variance_weights
+        elif index == len(target_returns) - 1:
+            weights = maximum_return_weights
+        else:
+            target_constraint = {
+                "type": "eq",
+                "fun": lambda values, target=target_return: float(
+                    values @ mean_returns - target
+                ),
+                "jac": lambda _values: mean_returns,
+            }
+            result = minimize(
+                portfolio_variance,
+                initial_weights,
+                jac=portfolio_variance_gradient,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=(fully_invested_constraint, target_constraint),
+                options={"maxiter": 1000, "ftol": 1e-12, "disp": False},
             )
-            
-            frontier_points.append({
-                "weights": weights,
-                "return": ret,
-                "volatility": vol,
-                "sharpe_ratio": metrics["sharpe_ratio"],
-                "diversification_score": metrics["diversification_score"],
-                "effective_holdings": metrics["effective_holdings"],
-                "max_weight": metrics["max_weight"],
-                "top_holdings": metrics["top_holdings"],
-            })
-    
+            if not result.success:
+                logger.warning(
+                    f"Frontier target {target_return:.6f} failed: {result.message}"
+                )
+                continue
+            weights = validate_weight_solution(result.x, bounds, tolerance=1e-6)
+            if not np.isclose(
+                float(weights @ mean_returns), target_return, atol=1e-6, rtol=0.0
+            ):
+                logger.warning(
+                    f"Frontier target {target_return:.6f} rejected for residual error"
+                )
+                continue
+
+        initial_weights = weights
+        metrics = calculate_portfolio_statistics(
+            weights,
+            mean_returns,
+            covariance,
+            risk_free_rate=risk_free_rate,
+            symbols=symbols,
+        )
+        frontier_points.append({
+            "weights": weights,
+            **metrics,
+            "estimation": estimates.metadata(),
+        })
+
+    if not frontier_points:
+        raise RuntimeError("efficient frontier produced no valid portfolios.")
     logger.info(f"Calculated {len(frontier_points)} efficient frontier points")
     return frontier_points

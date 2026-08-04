@@ -763,6 +763,7 @@ def _compute_analysis(
     from src.analytics import run_advanced_models, run_quant_stack
     from src.optimization import (
         calculate_efficient_frontier,
+        estimate_portfolio_inputs,
         optimize_cost_aware_rebalance,
         calculate_portfolio_statistics,
         optimize_maximum_sharpe,
@@ -922,27 +923,55 @@ def _compute_analysis(
     )
     adv_simulation_percentiles = _create_simulation_percentiles(adv_price_paths)
 
-    min_var_result = optimize_minimum_variance(returns)
-    max_sharpe_result = optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate)
+    effective_max_weight = max(
+        float(rebalance_max_weight),
+        1.0 / float(returns.shape[1]),
+    )
+    if effective_max_weight > float(rebalance_max_weight) + 1e-12:
+        alignment_warnings.append(
+            "Maximum asset weight was below the feasible minimum and was raised "
+            f"to {effective_max_weight:.2%}."
+        )
+    shared_estimates = estimate_portfolio_inputs(returns)
+    min_var_result = optimize_minimum_variance(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
+    max_sharpe_result = optimize_maximum_sharpe(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
     cost_aware_rebalance = optimize_cost_aware_rebalance(
         returns=returns,
         current_weights=weights,
         risk_free_rate=risk_free_rate,
-        max_weight=rebalance_max_weight,
+        max_weight=effective_max_weight,
         turnover_limit=rebalance_turnover_limit,
         transaction_cost_bps=rebalance_cost_bps,
         risk_aversion=rebalance_risk_aversion,
+        portfolio_estimates=shared_estimates,
     )
-    frontier = calculate_efficient_frontier(returns, n_points=30)
+    frontier = calculate_efficient_frontier(
+        returns,
+        n_points=30,
+        max_weight=effective_max_weight,
+        risk_free_rate=risk_free_rate,
+        portfolio_estimates=shared_estimates,
+    )
 
     portfolio_cloud = sample_portfolio_cloud(
         returns,
         n_samples=portfolio_samples,
         risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
     )
-
-    mean_returns = returns.mean().values * 252
-    cov_matrix = returns.cov().values * 252
+    mean_returns = shared_estimates.mean_returns
+    cov_matrix = shared_estimates.covariance
 
     def build_portfolio_marker(
         name: str,

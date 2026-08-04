@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Any
+import time
+from typing import Any, Mapping
 import uuid
 import secrets
 
@@ -145,11 +146,12 @@ TASK_PRIORITY_COLORS = {
 }
 GRAPH_NODE_TYPES = ["Policy", "Company", "Model", "Market", "Risk", "Research", "Other"]
 QUANT_MODULES = [
-    "Methodology & Validation",
+    "Mandate-Aware Optimizer",
     "Benchmark Analytics",
     "Cost-Aware Rebalance",
     "Performance Attribution",
     "Simulation",
+    "Methodology & Validation",
     "Models & Signals",
     "News Sentiment",
     "Robustness Check",
@@ -1660,6 +1662,31 @@ def _parse_weights(raw: str, tickers: list[str]) -> np.ndarray:
     return w / w.sum()
 
 
+def _parse_black_litterman_views(raw: str) -> dict[str, float]:
+    """Parse TICKER=annual-return-percent entries into decimal absolute views."""
+    views: dict[str, float] = {}
+    if not str(raw or "").strip():
+        return views
+    chunks = str(raw).replace(";", "\n").replace(",", "\n").splitlines()
+    for chunk in chunks:
+        entry = chunk.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(
+                "Black-Litterman views must use TICKER=annual return %, for example MSFT=10."
+            )
+        ticker, raw_value = entry.split("=", 1)
+        symbol = ticker.strip().upper()
+        if not symbol or symbol in views:
+            raise ValueError("Black-Litterman view tickers must be unique and non-empty.")
+        value = float(raw_value.strip().replace("%", "")) / 100.0
+        if not np.isfinite(value):
+            raise ValueError(f"Black-Litterman view for {symbol} must be finite.")
+        views[symbol] = value
+    return views
+
+
 def _align_weights(tickers: list, weights: np.ndarray, columns: list) -> np.ndarray:
     series = pd.Series(weights, index=tickers, dtype=float).reindex(columns).fillna(0.0).to_numpy(dtype=float)
     if np.isclose(series.sum(), 0.0):
@@ -1689,9 +1716,18 @@ def _compute_quant_run(
     transaction_cost_bps, risk_aversion, simulation_days, n_simulations, random_seed,
     jump_intensity, jump_mean, jump_volatility,
     manual_bonds=None,
+    optimization_objective="maximum_utility",
+    optimization_target_volatility=0.18,
+    optimization_cvar_confidence=0.95,
+    strategy_rulebook=None,
+    optimizer_asset_metadata=None,
+    optimization_expected_return_model="shrunk_historical",
+    black_litterman_views=None,
+    black_litterman_confidence=0.60,
 ) -> dict[str, Any]:
+    run_started_at = time.perf_counter()
     modules = _load_quant_modules()
-    analytics, optimization, simulation = modules["analytics"], modules["optimization"], modules["simulation"]
+    analytics, optimization = modules["analytics"], modules["optimization"]
 
     from src.portfolio_tracker.manual_bond_quant import (
         build_manual_bond_metrics_table,
@@ -1753,32 +1789,38 @@ def _compute_quant_run(
     )
     return_contribution = analytics.calculate_return_contribution(returns, aligned_w)
     risk_contribution = analytics.calculate_risk_contribution(returns, aligned_w)
+    shared_estimates = optimization.estimate_portfolio_inputs(returns)
     effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
-    min_variance = optimization.optimize_minimum_variance(returns, max_weight=effective_max_weight)
-    max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
+    min_variance = optimization.optimize_minimum_variance(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
+    max_sharpe = optimization.optimize_maximum_sharpe(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
     cost_aware = optimization.optimize_cost_aware_rebalance(
         returns=returns, current_weights=aligned_w, risk_free_rate=risk_free_rate,
         max_weight=effective_max_weight, turnover_limit=turnover_limit,
         transaction_cost_bps=transaction_cost_bps, risk_aversion=risk_aversion,
+        portfolio_estimates=shared_estimates,
     )
-    portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
-    price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
-        current_value=current_value,
-        # GBM expects arithmetic drift; CAGR remains the headline realized
-        # return metric but is not the correct drift estimator here.
-        expected_return=float(portfolio_returns.mean() * 252.0),
-        volatility=float(core_metrics.get("volatility", 0.0)),
-        time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
+    current_optimization_stats = optimization.calculate_portfolio_statistics(
+        weights=aligned_w,
+        mean_returns=shared_estimates.mean_returns,
+        cov_matrix=shared_estimates.covariance,
+        risk_free_rate=risk_free_rate,
+        symbols=list(returns.columns),
     )
-    
-    adv_price_paths, adv_simulation_stats = simulation.run_advanced_monte_carlo_simulation(
-        current_value=current_value,
-        expected_return=float(core_metrics.get("annualized_return", 0.0)),
-        volatility=float(core_metrics.get("volatility", 0.0)),
-        time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
-        jump_intensity=jump_intensity, jump_mean=jump_mean, jump_volatility=jump_volatility,
-    )
-
+    current_optimization_metrics = {
+        "expected_return": current_optimization_stats["return"],
+        "volatility": current_optimization_stats["volatility"],
+        "sharpe_ratio": current_optimization_stats["sharpe_ratio"],
+    }
     from src.analytics.scenario_playground import classify_asset_role
 
     role_security_labels = {
@@ -1797,51 +1839,135 @@ def _compute_quant_run(
         )
         for column in returns.columns
     }
-
-    # Run full modular quant stack (models, signals, news, backtest, history)
-    quant_stack_result = None
-    try:
-        pipeline = _load_modular_pipeline()
-        config = {
-            "tickers": list(returns.columns),
-            "news_tickers": available_market,
-            "security_types": security_types,
-            "weights": aligned_w.tolist(),
-            "start_date": start_date,
-            "end_date": end_date,
-            "risk_free_rate": risk_free_rate,
-            "portfolio_metrics": {**core_metrics, **concentration, "avg_correlation": avg_corr},
-            "transaction_cost_bps": transaction_cost_bps,
-            "news_max_items": 80,
-            "news_api_key": "",
-        }
-        try:
-            news_api_key = str(st.secrets.get("NEWS_API_KEY", ""))
-            news_api_key = str(st.secrets.get("NEWSAPI_KEY", "")) # Standardize on NEWSAPI_KEY
-            if news_api_key: config["news_api_key"] = news_api_key
-        except Exception:
-            pass
-        quant_stack_result = pipeline.run_quant_stack(
-            portfolio_returns=portfolio_returns,
-            returns_df=returns,
-            config=config,
-            user_id=st.session_state.get("user_id"),
+    engine_returns = returns.copy()
+    engine_current_weights = aligned_w.copy()
+    synthetic_cash_proxy = False
+    engine_metadata = {
+        str(symbol): dict((optimizer_asset_metadata or {}).get(str(symbol), {}))
+        for symbol in returns.columns
+    }
+    for symbol, security_type in security_types.items():
+        engine_metadata.setdefault(str(symbol), {}).setdefault(
+            "asset_type", "Stock" if security_type == "Market" else security_type
         )
-    except Exception as stack_err:
-        quant_stack_result = {"_error": str(stack_err)}
-
-    backtest_for_validation = (
-        quant_stack_result.get("backtest", {})
-        if isinstance(quant_stack_result, dict) and "_error" not in quant_stack_result
-        else {}
+    active_strategy = dict(strategy_rulebook or {})
+    if float(active_strategy.get("min_cash_weight") or 0.0) > 0 and "CASH" not in engine_returns:
+        engine_returns["CASH"] = float(risk_free_rate) / 252.0
+        engine_current_weights = np.append(engine_current_weights, 0.0)
+        synthetic_cash_proxy = True
+        engine_metadata["CASH"] = {
+            "asset_type": "cash",
+            "is_cash": True,
+            "beta": 0.0,
+            "approved": True,
+            "tags": ["liquidity"],
+        }
+    engine_effective_max_weight = max(
+        float(max_weight), 1.0 / float(engine_returns.shape[1])
     )
-    model_validation = analytics.build_model_validation_report(
-        portfolio_returns=portfolio_returns,
-        simulation_stats=simulation_stats,
-        backtest=backtest_for_validation,
+    try:
+        portfolio_estimates = None
+        if str(optimization_expected_return_model) == "black_litterman":
+            supplied_views = dict(black_litterman_views or {})
+            portfolio_estimates = optimization.estimate_black_litterman_inputs(
+                engine_returns,
+                market_weights=engine_current_weights,
+                views=supplied_views,
+                view_confidences={
+                    symbol: float(black_litterman_confidence)
+                    for symbol in supplied_views
+                },
+                risk_aversion=risk_aversion,
+            )
+        elif tuple(str(column) for column in engine_returns.columns) == tuple(
+            str(column) for column in returns.columns
+        ):
+            portfolio_estimates = shared_estimates
+        else:
+            portfolio_estimates = optimization.estimate_portfolio_inputs(
+                engine_returns
+            )
+        mandate_aware = optimization.optimize_portfolio(
+            engine_returns,
+            objective=str(optimization_objective),
+            strategy=active_strategy or None,
+            asset_metadata=engine_metadata,
+            current_weights=engine_current_weights,
+            max_weight=engine_effective_max_weight,
+            turnover_limit=turnover_limit,
+            transaction_cost_bps=transaction_cost_bps,
+            risk_free_rate=risk_free_rate,
+            risk_aversion=risk_aversion,
+            target_volatility=(
+                float(optimization_target_volatility)
+                if str(optimization_objective) == "target_volatility"
+                else None
+            ),
+            cvar_confidence=float(optimization_cvar_confidence),
+            portfolio_estimates=portfolio_estimates,
+        )
+    except Exception as mandate_error:
+        mandate_aware = {
+            "success": False,
+            "weights": np.array([], dtype=float),
+            "symbols": list(engine_returns.columns),
+            "objective": str(optimization_objective),
+            "message": str(mandate_error),
+            "warnings": [],
+        }
+    if synthetic_cash_proxy:
+        mandate_aware["warnings"] = [
+            *list(mandate_aware.get("warnings", [])),
+            "Cash is modeled as a synthetic constant daily risk-free return, not as a "
+            "historical money-market instrument.",
+        ]
+    frontier = optimization.calculate_efficient_frontier(
+        returns,
+        n_points=50,
+        max_weight=effective_max_weight,
         risk_free_rate=risk_free_rate,
-        random_seed=random_seed,
+        portfolio_estimates=shared_estimates,
     )
+    portfolio_cloud = optimization.sample_portfolio_cloud(
+        returns,
+        n_samples=2000,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
+    optimization_validation = None
+    if len(engine_returns) > 146:
+        validation_train_periods = min(756, max(126, len(engine_returns) // 2))
+        if len(engine_returns) > validation_train_periods:
+            try:
+                optimization_validation = optimization.run_optimization_walk_forward(
+                    engine_returns,
+                    optimizer=str(optimization_objective),
+                    train_periods=validation_train_periods,
+                    rebalance_periods=63,
+                    max_weight=engine_effective_max_weight,
+                    risk_free_rate=risk_free_rate,
+                    transaction_cost_bps=transaction_cost_bps,
+                    strategy=active_strategy or None,
+                    asset_metadata=engine_metadata,
+                    turnover_limit=turnover_limit,
+                    risk_aversion=risk_aversion,
+                    target_volatility=(
+                        float(optimization_target_volatility)
+                        if str(optimization_objective) == "target_volatility"
+                        else None
+                    ),
+                    cvar_confidence=float(optimization_cvar_confidence),
+                    expected_return_model=str(optimization_expected_return_model),
+                    black_litterman_views=dict(black_litterman_views or {}),
+                    black_litterman_confidence=float(black_litterman_confidence),
+                )
+            except Exception as validation_error:
+                optimization_validation = {
+                    "success": False,
+                    "error": str(validation_error),
+                }
+    portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
 
     metrics = {
         **core_metrics, **concentration,
@@ -1880,20 +2006,42 @@ def _compute_quant_run(
         "min_variance": min_variance,
         "max_sharpe": max_sharpe,
         "cost_aware": cost_aware,
-        "price_paths": price_paths,
-        "simulation_stats": simulation_stats,
-        "model_validation": model_validation,
-        "adv_price_paths": adv_price_paths,
-        "adv_simulation_stats": adv_simulation_stats,
-        "quant_stack": quant_stack_result,
+        "current_optimization_metrics": current_optimization_metrics,
+        "mandate_aware": mandate_aware,
+        "frontier": frontier,
+        "portfolio_cloud": portfolio_cloud,
+        "optimization_validation": optimization_validation,
+        "price_paths": None,
+        "simulation_stats": None,
+        "model_validation": {},
+        "adv_price_paths": None,
+        "adv_simulation_stats": None,
+        "quant_stack": None,
+        "runtime": {
+            "core_seconds": float(time.perf_counter() - run_started_at),
+            "simulation_seconds": None,
+            "research_stack_seconds": None,
+        },
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
             "risk_free_rate": risk_free_rate, "current_value": current_value,
             "max_weight": effective_max_weight, "requested_max_weight": max_weight,
+            "mandate_max_weight": engine_effective_max_weight,
+            "synthetic_cash_proxy": synthetic_cash_proxy,
             "turnover_limit": turnover_limit,
             "transaction_cost_bps": transaction_cost_bps, "risk_aversion": risk_aversion,
+            "optimization_objective": str(optimization_objective),
+            "optimization_target_volatility": float(optimization_target_volatility),
+            "optimization_cvar_confidence": float(optimization_cvar_confidence),
+            "strategy_rulebook_applied": bool(active_strategy),
+            "optimization_expected_return_model": str(optimization_expected_return_model),
+            "black_litterman_views": dict(black_litterman_views or {}),
+            "black_litterman_confidence": float(black_litterman_confidence),
             "simulation_days": simulation_days, "n_simulations": n_simulations,
             "random_seed": random_seed,
+            "jump_intensity": jump_intensity,
+            "jump_mean": jump_mean,
+            "jump_volatility": jump_volatility,
             "manual_bond_count": len(manual_bonds),
             "manual_bond_proxy_method": "Proxy returns rescaled to entered annual volatility and shifted to yield to worst less entered expected credit loss",
         },
@@ -1930,6 +2078,66 @@ def _render_quant_configuration() -> None:
                 turnover_limit = st.slider("Turnover Limit", 0.05, 2.0, 0.30, 0.05)
                 transaction_cost_bps = st.slider("Transaction Cost (bps)", 0.0, 100.0, 10.0, 1.0)
                 risk_aversion = st.slider("Risk Aversion", 0.5, 10.0, 3.0, 0.5)
+                objective_labels = {
+                    "Risk-adjusted utility": "maximum_utility",
+                    "Target volatility": "target_volatility",
+                    "Minimum expected shortfall": "minimum_cvar",
+                    "Minimum variance": "minimum_variance",
+                }
+                objective_label = st.selectbox(
+                    "Portfolio construction goal",
+                    list(objective_labels),
+                    help="The mandate constraints are applied independently of the selected goal.",
+                )
+                optimization_target_volatility = st.slider(
+                    "Target annual volatility",
+                    0.02,
+                    0.60,
+                    0.18,
+                    0.01,
+                    format="%.2f",
+                    disabled=objective_labels[objective_label] != "target_volatility",
+                )
+                optimization_cvar_confidence = st.slider(
+                    "Expected shortfall confidence",
+                    0.80,
+                    0.99,
+                    0.95,
+                    0.01,
+                    disabled=objective_labels[objective_label] != "minimum_cvar",
+                )
+                apply_strategy_rulebook = st.checkbox(
+                    "Apply active Client Mandate / Strategy Rulebook",
+                    value=False,
+                    help="Uses saved exclusions, approval, sector, cash, beta, position and turnover rules.",
+                )
+                return_model_labels = {
+                    "Conservative historical estimate": "shrunk_historical",
+                    "Black-Litterman views": "black_litterman",
+                }
+                return_model_label = st.selectbox(
+                    "Expected-return estimate",
+                    list(return_model_labels),
+                    help=(
+                        "Black-Litterman uses the entered current weights as its neutral reference; "
+                        "they are not claimed to be market-cap weights."
+                    ),
+                )
+                black_litterman_views_text = st.text_input(
+                    "Black-Litterman absolute views",
+                    value="",
+                    placeholder="MSFT=10, NVDA=12",
+                    help="Expected annual returns in percent. Leave empty for equilibrium returns only.",
+                    disabled=return_model_labels[return_model_label] != "black_litterman",
+                )
+                black_litterman_confidence = st.slider(
+                    "View confidence",
+                    0.05,
+                    1.00,
+                    0.60,
+                    0.05,
+                    disabled=return_model_labels[return_model_label] != "black_litterman",
+                )
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
                 n_simulations = st.slider("Simulation Count", 200, 15000, 10000, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
@@ -1989,6 +2197,27 @@ def _render_quant_configuration() -> None:
             manual_bonds = parse_manual_bond_rows(manual_bond_rows, as_of=end_date)
             tickers = _parse_tickers(tickers_text, allow_empty=bool(manual_bonds))
             weights = _parse_weights(weights_text, tickers) if tickers else np.asarray([], dtype=float)
+            strategy_rulebook = None
+            optimizer_asset_metadata = None
+            black_litterman_views = (
+                _parse_black_litterman_views(black_litterman_views_text)
+                if return_model_labels[return_model_label] == "black_litterman"
+                else {}
+            )
+            if apply_strategy_rulebook:
+                strategy_data = _load_strategy_workspace_data()
+                from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
+
+                raw_strategy = _strategy_payload(strategy_data.get("strategy_record"))
+                if not raw_strategy:
+                    raise ValueError(
+                        "No active Strategy Rulebook is saved. Configure one in Strategy & Decisions first."
+                    )
+                strategy_rulebook = normalize_strategy_rulebook(
+                    raw_strategy,
+                    _strategy_payload(strategy_data.get("mandate_record")),
+                )
+                optimizer_asset_metadata = _build_optimizer_asset_metadata(strategy_data)
             with st.spinner("Fetching data and running full quant stack..."):
                 st.session_state[QUANT_RESULT_KEY] = _compute_quant_run(
                     tickers=tickers, weights=weights, benchmark_ticker=benchmark_ticker,
@@ -2000,6 +2229,14 @@ def _render_quant_configuration() -> None:
                     random_seed=int(random_seed),
                     jump_intensity=float(jump_intensity), jump_mean=float(jump_mean), jump_volatility=float(jump_volatility),
                     manual_bonds=manual_bonds,
+                    optimization_objective=objective_labels[objective_label],
+                    optimization_target_volatility=float(optimization_target_volatility),
+                    optimization_cvar_confidence=float(optimization_cvar_confidence),
+                    strategy_rulebook=strategy_rulebook,
+                    optimizer_asset_metadata=optimizer_asset_metadata,
+                    optimization_expected_return_model=return_model_labels[return_model_label],
+                    black_litterman_views=black_litterman_views,
+                    black_litterman_confidence=float(black_litterman_confidence),
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -2073,6 +2310,220 @@ def _render_benchmark_analytics(result: dict, advanced: bool) -> None:
             st.write(f"Observations: **{metrics.get('observations', 0)}**  |  Avg correlation: **{_fmt_float(metrics.get('avg_correlation'))}**  |  Effective holdings: **{_fmt_float(metrics.get('effective_holdings'))}**")
             st.dataframe(result["correlation"].round(3), use_container_width=True)
             st.dataframe(result["returns"].tail(15), use_container_width=True)
+
+
+def _render_mandate_aware_optimizer(result: dict, advanced: bool) -> None:
+    optimized = result.get("mandate_aware", {})
+    st.markdown("### Mandate-Aware Portfolio Construction")
+    objective_labels = {
+        "maximum_utility": "Risk-adjusted utility",
+        "target_volatility": "Target volatility",
+        "minimum_cvar": "Minimum expected shortfall",
+        "minimum_variance": "Minimum variance",
+        "minimum_tracking_error": "Minimum tracking error",
+    }
+    _render_mandate_aware_optimizer_body(
+        result,
+        advanced,
+        optimized,
+        objective_labels,
+    )
+
+
+_QUANT_RESEARCH_MODULES = {
+    "Methodology & Validation",
+    "Models & Signals",
+    "News Sentiment",
+    "Backtest",
+}
+
+
+def _run_quant_research_stack(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach the network/model research stack only when its UI is requested."""
+    started_at = time.perf_counter()
+    analytics = importlib.import_module("src.analytics")
+    returns = pd.DataFrame(result["returns"])
+    portfolio_returns = pd.Series(result["portfolio_returns"], dtype=float)
+    inputs = dict(result.get("inputs", {}))
+    requested_tickers = [str(item) for item in result.get("requested_tickers", [])]
+    news_tickers = [ticker for ticker in requested_tickers if ticker in returns.columns]
+    config = {
+        "tickers": list(returns.columns),
+        "news_tickers": news_tickers,
+        "security_types": dict(result.get("security_types", {})),
+        "weights": np.asarray(result.get("weights", []), dtype=float).tolist(),
+        "start_date": date.fromisoformat(str(inputs["start_date"])),
+        "end_date": date.fromisoformat(str(inputs["end_date"])),
+        "risk_free_rate": float(inputs.get("risk_free_rate", 0.03)),
+        "portfolio_metrics": dict(result.get("metrics", {})),
+        "transaction_cost_bps": float(inputs.get("transaction_cost_bps", 10.0)),
+        "news_max_items": 80,
+        "news_api_key": "",
+    }
+    try:
+        config["news_api_key"] = str(
+            st.secrets.get("NEWSAPI_KEY")
+            or st.secrets.get("NEWS_API_KEY")
+            or ""
+        )
+    except Exception:
+        pass
+
+    try:
+        pipeline = _load_modular_pipeline()
+        quant_stack = pipeline.run_quant_stack(
+            portfolio_returns=portfolio_returns,
+            returns_df=returns,
+            config=config,
+            user_id=st.session_state.get("user_id"),
+        )
+    except Exception as stack_error:
+        quant_stack = {"_error": str(stack_error)}
+
+    backtest = (
+        quant_stack.get("backtest", {})
+        if isinstance(quant_stack, dict) and "_error" not in quant_stack
+        else {}
+    )
+    result["quant_stack"] = quant_stack
+    result["model_validation"] = analytics.build_model_validation_report(
+        portfolio_returns=portfolio_returns,
+        simulation_stats=dict(result.get("simulation_stats") or {}),
+        backtest=backtest,
+        risk_free_rate=float(inputs.get("risk_free_rate", 0.03)),
+        random_seed=int(inputs.get("random_seed", 42)),
+    )
+    result.setdefault("runtime", {})["research_stack_seconds"] = float(
+        time.perf_counter() - started_at
+    )
+    return result
+
+
+def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach full seeded simulation paths only when a simulation view is opened."""
+    started_at = time.perf_counter()
+    analytics = importlib.import_module("src.analytics")
+    simulation = importlib.import_module("src.simulation")
+    inputs = dict(result.get("inputs", {}))
+    portfolio_returns = pd.Series(result["portfolio_returns"], dtype=float)
+    metrics = dict(result.get("metrics", {}))
+    current_value = float(inputs.get("current_value", 100_000.0))
+    simulation_days = int(inputs.get("simulation_days", 252))
+    n_simulations = int(inputs.get("n_simulations", 10_000))
+    random_seed = int(inputs.get("random_seed", 42))
+
+    price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
+        current_value=current_value,
+        # GBM expects arithmetic drift; CAGR remains a reporting metric.
+        expected_return=float(portfolio_returns.mean() * 252.0),
+        volatility=float(metrics.get("volatility", 0.0)),
+        time_horizon=simulation_days,
+        n_simulations=n_simulations,
+        random_seed=random_seed,
+    )
+    adv_price_paths, adv_simulation_stats = (
+        simulation.run_advanced_monte_carlo_simulation(
+            current_value=current_value,
+            expected_return=float(metrics.get("annualized_return", 0.0)),
+            volatility=float(metrics.get("volatility", 0.0)),
+            time_horizon=simulation_days,
+            n_simulations=n_simulations,
+            random_seed=random_seed,
+            jump_intensity=float(inputs.get("jump_intensity", 1.5)),
+            jump_mean=float(inputs.get("jump_mean", -0.05)),
+            jump_volatility=float(inputs.get("jump_volatility", 0.08)),
+        )
+    )
+    result["price_paths"] = price_paths
+    result["simulation_stats"] = simulation_stats
+    result["adv_price_paths"] = adv_price_paths
+    result["adv_simulation_stats"] = adv_simulation_stats
+
+    quant_stack = result.get("quant_stack")
+    backtest = (
+        quant_stack.get("backtest", {})
+        if isinstance(quant_stack, dict) and "_error" not in quant_stack
+        else {}
+    )
+    result["model_validation"] = analytics.build_model_validation_report(
+        portfolio_returns=portfolio_returns,
+        simulation_stats=simulation_stats,
+        backtest=backtest,
+        risk_free_rate=float(inputs.get("risk_free_rate", 0.03)),
+        random_seed=random_seed,
+    )
+    result.setdefault("runtime", {})["simulation_seconds"] = float(
+        time.perf_counter() - started_at
+    )
+    return result
+
+
+def _render_mandate_aware_optimizer_body(
+    result: dict,
+    advanced: bool,
+    optimized: dict,
+    objective_labels: Mapping[str, str],
+) -> None:
+    objective = str(optimized.get("objective") or "unknown")
+    st.caption(
+        f"Goal: {objective_labels.get(objective, objective)} · "
+        f"Strategy Rulebook applied: {'yes' if result.get('inputs', {}).get('strategy_rulebook_applied') else 'no'}"
+    )
+    if not optimized.get("success"):
+        st.error(
+            "No valid target portfolio was produced. "
+            f"{optimized.get('message', 'The configured constraints are infeasible or incomplete.')}"
+        )
+        for warning in optimized.get("warnings", []):
+            st.warning(str(warning))
+        return
+
+    kpis = st.columns(6)
+    kpis[0].metric("Expected Return", _fmt_pct(optimized.get("expected_return")))
+    kpis[1].metric("Volatility", _fmt_pct(optimized.get("volatility")))
+    kpis[2].metric("Sharpe", _fmt_float(optimized.get("sharpe_ratio")))
+    kpis[3].metric("Daily CVaR", _fmt_pct(optimized.get("historical_cvar_daily")))
+    kpis[4].metric("Turnover", _fmt_pct(optimized.get("turnover")))
+    kpis[5].metric("Cost Drag", _fmt_pct(optimized.get("transaction_cost_drag")))
+
+    symbols = list(optimized.get("symbols", []))
+    current = optimized.get("current_weights")
+    if current is None:
+        current = np.zeros(len(symbols), dtype=float)
+    weights_frame = _weights_frame(symbols, current, optimized.get("weights", []))
+    st.markdown("#### Recommended Allocation and Trades")
+    _render_weight_table(weights_frame)
+    st.bar_chart(
+        weights_frame.set_index("Ticker")[["Current Weight", "Optimized Weight"]],
+        use_container_width=True,
+        height=360,
+    )
+
+    report = pd.DataFrame(optimized.get("constraint_report", []))
+    if not report.empty:
+        st.markdown("#### Constraint Audit")
+        report_view = report.copy()
+        for column in ("actual", "minimum", "maximum"):
+            if column in report_view:
+                report_view[column] = report_view[column].map(
+                    lambda value: "—" if value is None or pd.isna(value) else _fmt_pct(value)
+                )
+        st.dataframe(report_view, use_container_width=True, hide_index=True)
+        binding = report[report["binding"] == True]  # noqa: E712
+        if not binding.empty:
+            st.info(
+                "Binding constraints: " + ", ".join(binding["name"].astype(str))
+            )
+    for warning in optimized.get("warnings", []):
+        st.warning(str(warning))
+    if advanced:
+        with st.expander("Solver and Estimation Diagnostics"):
+            st.json({
+                "solver": optimized.get("solver"),
+                "status": optimized.get("status"),
+                "expected_return_model": optimized.get("expected_return_model"),
+                "estimation": optimized.get("estimation", {}),
+            })
 
 
 def _render_cost_aware_rebalance(result: dict, advanced: bool) -> None:
@@ -2291,11 +2742,6 @@ def _render_models_signals(result: dict) -> None:
 def _render_robustness_check(result: dict) -> None:
     """Render Robustness Validation."""
     st.markdown("### Robustness Check (Walk-Forward Validation)")
-    qs = result.get("quant_stack", {})
-    if not qs:
-        st.info("Run the Quant Engine to populate data.")
-        return
-        
     portfolio_timeseries = result.get("portfolio_timeseries", pd.DataFrame())
     if portfolio_timeseries.empty or "cumulative_return" not in portfolio_timeseries.columns:
         st.warning("Portfolio returns not available for robustness validation.")
@@ -2447,11 +2893,6 @@ def _render_backtest(result: dict) -> None:
 def _render_run_history(result: dict) -> None:
     """Render run history from modular stack."""
     st.markdown("### Run History")
-    qs = result.get("quant_stack", {})
-    if not qs:
-        st.info("Run the Quant Engine to populate history.")
-        return
-
     try:
         history_mod = _load_modular_history()
         records = history_mod.list_run_records(base_dir="data/run_history", limit=40, user_id=st.session_state.get("user_id"))
@@ -2833,14 +3274,23 @@ def _render_efficient_frontier(result: dict) -> None:
     metrics = result.get("metrics", {})
     inputs = result.get("inputs", {})
     risk_free_rate = float(inputs.get("risk_free_rate", 0.03))
+    requested_max_weight = float(inputs.get("requested_max_weight", inputs.get("max_weight", 1.0)))
+    effective_max_weight = float(inputs.get("max_weight", requested_max_weight))
+    if effective_max_weight > requested_max_weight + 1e-12:
+        st.warning(
+            "The requested maximum position weight was infeasible for this universe; "
+            f"the displayed run used {effective_max_weight:.2%}."
+        )
 
     # Optimal portfolio KPIs
     st.markdown("#### Optimal Portfolio Comparison")
     comp_data = []
     for label, d, color in [
-        (" Current", {"expected_return": metrics.get("annualized_return", 0),
+        (" Current", result.get("current_optimization_metrics", {
+                        "expected_return": metrics.get("annualized_return", 0),
                         "volatility": metrics.get("volatility", 0),
-                        "sharpe_ratio": metrics.get("sharpe_ratio", 0)}, "#64748b"),
+                        "sharpe_ratio": metrics.get("sharpe_ratio", 0),
+                    }), "#64748b"),
         (" Max Sharpe", ms, "#22c55e"),
         (" Min Variance", mv, "#3b82f6"),
         (" Cost-Aware", ca, "#f59e0b"),
@@ -2853,13 +3303,59 @@ def _render_efficient_frontier(result: dict) -> None:
         })
     st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
 
-    # Compute frontier
-    try:
-        ef_module = importlib.import_module("src.optimization.efficient_frontier")
-        frontier_points = ef_module.calculate_efficient_frontier(returns_df, n_points=50)
-    except Exception as e:
-        st.warning(f"Could not compute efficient frontier: {e}")
-        frontier_points = []
+    validation = result.get("optimization_validation")
+    if isinstance(validation, dict) and validation.get("metrics"):
+        st.markdown("#### Rolling Out-of-Sample Validation")
+        validation_metrics = validation["metrics"]
+        equal_metrics = validation.get("equal_weight_metrics", {})
+        failed_windows = [
+            window
+            for window in validation.get("windows", [])
+            if not window.get("optimizer_success", False)
+        ]
+        if failed_windows:
+            st.warning(
+                f"The optimizer failed in {len(failed_windows)} rolling window(s); "
+                "those windows retained the previously drifted allocation."
+            )
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Portfolio": "Optimized after costs",
+                    "Annualized Return": _fmt_pct(validation_metrics.get("annualized_return")),
+                    "Volatility": _fmt_pct(validation_metrics.get("volatility")),
+                    "Sharpe": _fmt_float(validation_metrics.get("sharpe_ratio")),
+                    "Max Drawdown": _fmt_pct(validation_metrics.get("max_drawdown")),
+                    "Turnover": _fmt_pct(validation_metrics.get("total_turnover")),
+                },
+                {
+                    "Portfolio": "Equal Weight after costs",
+                    "Annualized Return": _fmt_pct(equal_metrics.get("annualized_return")),
+                    "Volatility": _fmt_pct(equal_metrics.get("volatility")),
+                    "Sharpe": _fmt_float(equal_metrics.get("sharpe_ratio")),
+                    "Max Drawdown": _fmt_pct(equal_metrics.get("max_drawdown")),
+                    "Turnover": _fmt_pct(equal_metrics.get("total_turnover")),
+                },
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Each target allocation is estimated only from the preceding training window; "
+            "the following quarter is evaluated after proportional transaction costs. "
+            "The equal-weight line is a neutral comparator and may not satisfy the active mandate. "
+            "The selected asset universe is current rather than point-in-time, so this test does "
+            "not remove universe-selection or survivorship bias."
+        )
+    elif isinstance(validation, dict) and validation.get("success") is False:
+        st.warning(
+            "Rolling out-of-sample validation was not available: "
+            f"{validation.get('error', 'the optimizer did not produce valid windows')}"
+        )
+
+    frontier_points = result.get("frontier", [])
+    if not frontier_points:
+        st.info("Run the Quant Engine again to calculate the cached efficient frontier.")
 
     if HAS_PLOTLY and frontier_points:
         frontier_returns = [pt["return"] for pt in frontier_points]
@@ -2923,8 +3419,8 @@ def _render_efficient_frontier(result: dict) -> None:
 
         # 3D surface
         try:
-            cloud_df = ef_module.sample_portfolio_cloud(returns_df, n_samples=2000, risk_free_rate=risk_free_rate)
-            if not cloud_df.empty:
+            cloud_df = result.get("portfolio_cloud")
+            if isinstance(cloud_df, pd.DataFrame) and not cloud_df.empty:
                 st.markdown("#### 3D Risk-Return-Sharpe Surface")
                 fig_3d = go.Figure(data=[go.Scatter3d(
                     x=cloud_df["volatility"], y=cloud_df["expected_return"],
@@ -4064,6 +4560,21 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
         return
 
     st.success(f"Latest run: {result.get('generated_at', 'unknown')}")
+    runtime = dict(result.get("runtime", {}))
+    runtime_parts = []
+    if runtime.get("core_seconds") is not None:
+        runtime_parts.append(f"portfolio engine {float(runtime['core_seconds']):.2f}s")
+    if runtime.get("simulation_seconds") is not None:
+        runtime_parts.append(f"simulations {float(runtime['simulation_seconds']):.2f}s")
+    else:
+        runtime_parts.append("simulations load only when opened")
+    if runtime.get("research_stack_seconds") is not None:
+        runtime_parts.append(
+            f"research stack {float(runtime['research_stack_seconds']):.2f}s"
+        )
+    else:
+        runtime_parts.append("research stack loads only when opened")
+    st.caption("Run time: " + " · ".join(runtime_parts))
     advanced = st.checkbox("Show advanced diagnostics", key=diag_key)
     requested_max = float(result.get("inputs", {}).get("requested_max_weight", result.get("inputs", {}).get("max_weight", 1.0)))
     effective_max = float(result.get("inputs", {}).get("max_weight", requested_max))
@@ -4112,12 +4623,32 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             st.success("Stack ")
         elif qs and "_error" in qs:
             st.error("Stack ")
+        else:
+            st.caption("Research stack: on demand")
+
+    result_updated = False
+    if (
+        selected in {"Simulation", "Methodology & Validation"}
+        and result.get("price_paths") is None
+    ):
+        with st.spinner("Running the full seeded simulation set..."):
+            result = _run_quant_simulations(result)
+        result_updated = True
+    if selected in _QUANT_RESEARCH_MODULES and result.get("quant_stack") is None:
+        with st.spinner("Running models, causal backtest, and news research..."):
+            result = _run_quant_research_stack(result)
+        result_updated = True
+    if result_updated:
+        st.session_state[QUANT_RESULT_KEY] = result
+        st.rerun()
 
     with content_col:
         if selected == "Methodology & Validation":
             _render_methodology_validation(result)
         elif selected == "Benchmark Analytics":
             _render_benchmark_analytics(result, advanced)
+        elif selected == "Mandate-Aware Optimizer":
+            _render_mandate_aware_optimizer(result, advanced)
         elif selected == "Cost-Aware Rebalance":
             _render_cost_aware_rebalance(result, advanced)
         elif selected == "Performance Attribution":
@@ -4284,6 +4815,35 @@ def _strategy_payload(record: Any) -> dict[str, Any]:
         return {}
     payload = record.get("payload")
     return dict(payload) if isinstance(payload, dict) else dict(record)
+
+
+def _build_optimizer_asset_metadata(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Combine thesis evidence and approval decisions for optimizer constraints."""
+    metadata: dict[str, dict[str, Any]] = {}
+    approved_records = data.get("approved_securities", [])
+    if isinstance(approved_records, list):
+        for record in approved_records:
+            if not isinstance(record, dict) or not record.get("ticker"):
+                continue
+            ticker = str(record["ticker"]).strip().upper()
+            metadata[ticker] = {
+                **_strategy_payload(record),
+                "approved": bool(record.get("approved", False)),
+            }
+    thesis_records = data.get("theses", [])
+    if isinstance(thesis_records, list):
+        for record in thesis_records:
+            if not isinstance(record, dict) or not record.get("ticker"):
+                continue
+            ticker = str(record["ticker"]).strip().upper()
+            thesis = _strategy_payload(record)
+            existing = metadata.setdefault(ticker, {"approved": False})
+            existing.update({
+                key: thesis[key]
+                for key in ("sector", "asset_type", "security_type", "beta", "tags")
+                if key in thesis
+            })
+    return metadata
 
 
 def _finite_form_number(value: Any, default: float = 0.0) -> float:
@@ -10575,8 +11135,12 @@ def render_wharton_cockpit() -> None:
     # Fetch result from state if available.
     result = st.session_state.get(QUANT_RESULT_KEY, {})
 
-    def _with_quant_context(renderer):
+    def _with_quant_context(renderer, *, require_simulation: bool = False):
         def _render() -> None:
+            if require_simulation and result and result.get("price_paths") is None:
+                with st.spinner("Running the full seeded simulation set..."):
+                    _run_quant_simulations(result)
+                    st.session_state[QUANT_RESULT_KEY] = result
             _render_custom_quant_context(result)
             renderer(result)
 
@@ -10599,8 +11163,8 @@ def render_wharton_cockpit() -> None:
         ("Regime Detection", _with_quant_context(_render_regime_detection)),
         ("Scenario Playground", _with_quant_context(_render_scenario_playground)),
         ("Efficient Frontier", _with_quant_context(_render_efficient_frontier)),
-        ("Monte Carlo", _with_quant_context(_render_monte_carlo)),
-        ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo)),
+        ("Monte Carlo", _with_quant_context(_render_monte_carlo, require_simulation=True)),
+        ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo, require_simulation=True)),
         ("Advanced Analytics", _with_quant_context(_render_advanced_analytics)),
         ("Mind Map", _render_mindmap),
         ("Sub-Projects", lambda: _render_subprojects(profile)),
