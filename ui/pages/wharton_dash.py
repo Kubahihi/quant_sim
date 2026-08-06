@@ -159,7 +159,7 @@ QUANT_MODULES = [
     "Backtest",
     "Run History",
 ]
-QUANT_OPERATOR_USERS = {"Jakub", "Matfyz_Genius"}
+QUANT_OPERATOR_USERS = {"Jakub"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
 
 
@@ -170,13 +170,14 @@ def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str,
 
 
 DEFAULT_USERS = [
-    {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
+    {"username": "Alexandra", "role": "Team Member", "primary_module": "Teamspace"},
     {"username": "Jakub", "role": "Co-Captain", "primary_module": "Quant Engine"},
-    {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
     {"username": "Lukáš", "role": "Geopolitics", "primary_module": "Macro Intelligence"},
-    {"username": "Janek", "role": "Intelligence", "primary_module": "War Room"},
-    {"username": "Matfyz_Genius", "role": "Quant/Math", "primary_module": "Quant Engine"},
+    {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
+    {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
 ]
+
+LEGACY_USERS = {"Janek", "Matfyz_Genius"}
 
 DEFAULT_MINDMAP_NODES = [
     ("node_eu_tech_regulation", "EU Tech Regulation", "Policy"),
@@ -492,6 +493,10 @@ def _initialize_database() -> None:
         """)
 
         # Seed users
+        conn.executemany(
+            "DELETE FROM wharton_users WHERE username = ?",
+            ((username,) for username in LEGACY_USERS),
+        )
         existing_users = {
             str(row["username"]): str(row["password_hash"] or "")
             for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
@@ -579,14 +584,16 @@ def _fetch_users() -> list[sqlite3.Row]:
             """
             SELECT id, username, role, primary_module
             FROM wharton_users
-            ORDER BY
-                CASE username
-                    WHEN 'Matěj' THEN 0
-                    WHEN 'Jakub' THEN 1
-                    ELSE 2
-                END,
-                username COLLATE NOCASE
-            """
+            WHERE username IN (?, ?, ?, ?, ?)
+            ORDER BY CASE username
+                WHEN 'Alexandra' THEN 0
+                WHEN 'Jakub' THEN 1
+                WHEN 'Lukáš' THEN 2
+                WHEN 'Martin' THEN 3
+                WHEN 'Matěj' THEN 4
+            END
+            """,
+            tuple(user["username"] for user in DEFAULT_USERS),
         ).fetchall()
 
 

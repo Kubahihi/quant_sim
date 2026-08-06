@@ -246,14 +246,16 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
         ), f"Hash {h!r} still matches old password — password was NOT re-synced"
 
 
-def test_captains_have_matching_roles_and_matej_is_first_at_login(monkeypatch, tmp_path):
+def test_team_roster_is_alphabetical_and_captains_keep_their_roles(monkeypatch, tmp_path):
     _configure_temp_wharton(monkeypatch, tmp_path)
     wharton_dash.init_db()
 
+    expected_names = ["Alexandra", "Jakub", "Lukáš", "Martin", "Matěj"]
+    assert [user["username"] for user in wharton_dash.DEFAULT_USERS] == expected_names
+
     users = wharton_dash._fetch_users()
 
-    assert [user["username"] for user in users[:2]] == ["Matěj", "Jakub"]
-    assert {user["username"]: user["role"] for user in users[:2]} == {
-        "Matěj": "Co-Captain",
-        "Jakub": "Co-Captain",
-    }
+    assert [user["username"] for user in users] == expected_names
+    roles = {user["username"]: user["role"] for user in users}
+    assert roles["Matěj"] == "Co-Captain"
+    assert roles["Jakub"] == "Co-Captain"

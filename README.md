@@ -109,7 +109,10 @@ TURSO_AUTH_TOKEN = "your-turso-auth-token"
 TURSO_SYNC_INTERVAL_SECONDS = 30
 
 [wharton_users]
+Alexandra = "strong-unique-password"
 Jakub = "strong-unique-password"
+"Lukáš" = "strong-unique-password"
+Martin = "strong-unique-password"
 "Matěj" = "strong-unique-password"
 
 [storage]
