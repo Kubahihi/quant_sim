@@ -9,10 +9,11 @@ import inspect
 import json
 import os
 import sys
+import time
 from typing import Any, Dict, List, Tuple
 
-import numpy as np
-import pandas as pd
+_APP_RUN_STARTED_AT = time.perf_counter()
+
 import streamlit as st
 
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -31,121 +32,18 @@ for module_name, module_obj in list(sys.modules.items()):
     if not resolved.startswith(PROJECT_ROOT):
         sys.modules.pop(module_name, None)
 
-from src.auth.manager import login_user
-from ui.economics_questions import render_economics_questions_section
-from ui.dashboard_shell import (
-    PAGE_DESCRIPTIONS,
-    PAGE_LABELS,
-    PAGE_ORDER,
-    DashboardPreferences,
-    inject_dashboard_styles,
-    render_dashboard_preferences,
+from ui.dashboard_shell import inject_dashboard_styles
+from ui.runtime_diagnostics import (
+    PerformanceTrace,
+    append_trace_history,
+    resolve_build_identity,
+    summarize_trace_history,
 )
-from ui.auth_page import (
-    get_current_user_id,
-    render_logout_button,
-    render_user_info,
-)
-from src.ai import generate_ai_review, resolve_groq_api_key
-from src.analytics import (
-    calculate_active_risk_metrics,
-    build_deterministic_fallback_review,
-    build_news_rows_for_ui,
-    build_portfolio_timeseries,
-    compare_runs,
-    calculate_average_correlation,
-    calculate_concentration_metrics,
-    calculate_correlation_matrix,
-    calculate_return_contribution,
-    calculate_risk_contribution,
-    list_run_records,
-    load_run_record,
-    calculate_portfolio_core_metrics,
-    calculate_portfolio_daily_returns,
-    evaluate_portfolio_score,
-    run_advanced_models,
-    run_quant_stack,
-)
-from src.analytics.scenario_playground import build_scenario_suite, list_scenario_presets
-from src.analytics.risk_metrics import (
-    calculate_max_drawdown,
-    calculate_sharpe_ratio,
-    calculate_volatility,
-)
-from src.analytics.returns import calculate_annualized_return
-import src.data.universe_enrichment as universe_enrichment_module
-import src.data.universe_sources as universe_sources_module
-import src.data.stock_universe as stock_universe_module
-from src.optimization import (
-    calculate_efficient_frontier,
-    optimize_cost_aware_rebalance,
-    calculate_portfolio_statistics,
-    optimize_maximum_sharpe,
-    optimize_minimum_variance,
-    sample_portfolio_cloud,
-)
-import importlib
-import src.simulation.monte_carlo
-importlib.reload(src.simulation.monte_carlo)
-import src.simulation
-importlib.reload(src.simulation)
-from src.simulation import run_monte_carlo_simulation, run_advanced_monte_carlo_simulation
-from src.stock_picker.ai_filter import apply_ai_query, parse_ai_query
-import src.stock_picker.screener as stock_screener_module
-from src.stock_picker.screener import (
-    apply_classic_filters,
-    apply_technical_indicators,
-    calculate_quant_score,
-    rank_stocks,
-)
-from src.portfolio_tracker.manager import (
-    add_position,
-    compute_live_values,
-    generate_rebalance_suggestions,
-    list_portfolios,
-    load_portfolio,
-    remove_position,
-    save_portfolio,
-    update_position,
-)
-from src.swing_tracker import (
-    build_discipline_overview,
-    build_stop_rationale,
-    calculate_position_size_for_trade,
-    calculate_stop_loss,
-    classify_setup_type,
-    close_trade as close_swing_trade,
-    create_trade,
-    generate_stop_rationale as generate_ai_stop_rationale,
-    historical_trade_rows,
-    open_trade_rows,
-    refresh_and_persist as refresh_swing_trades,
-    resolve_swing_tracker_api_key,
-    save_trade_book as save_swing_trade_book,
-    summarize_post_trade_review,
-    summarize_trade_thesis,
-    trades_to_rows,
-    upsert_trade as upsert_swing_trade,
-)
-from src.visualization.charts_2d import (
-    plot_correlation_heatmap,
-    plot_cumulative_returns,
-    plot_drawdown,
-    plot_efficient_frontier,
-    plot_monte_carlo_fan,
-)
-from src.visualization.charts_3d import (
-    plot_monte_carlo_percentile_surface,
-    plot_portfolio_tradeoff_3d,
-)
-from src.visualization.cockpit_charts import (
-    plot_asset_stress_impact,
-    plot_crisis_playback,
-    plot_phase_timeline,
-    plot_scenario_atlas,
-    plot_scenario_fingerprint,
-    plot_scenario_shock_map,
-)
+
+
+_RUNTIME_TRACE = PerformanceTrace(started_at=_APP_RUN_STARTED_AT)
+_BUILD_IDENTITY = resolve_build_identity(PROJECT_ROOT)
+_RUNTIME_HISTORY_KEY = "quant_workspace_runtime_history_v1"
 
 
 DEFAULT_TICKERS = [
@@ -287,10 +185,41 @@ with st.sidebar:
         )
     st.markdown("---")
 
+
+def _render_runtime_diagnostics(*, route: str, stage: str) -> None:
+    """Show privacy-safe server timings for the current and recent reruns."""
+    _RUNTIME_TRACE.mark(stage)
+    snapshot = _RUNTIME_TRACE.snapshot(route=route, stage=stage)
+    history = st.session_state.setdefault(_RUNTIME_HISTORY_KEY, [])
+    append_trace_history(history, snapshot, limit=20)
+    summary = summarize_trace_history(history)
+
+    with st.sidebar.expander("Runtime & build", expanded=False):
+        st.caption(f"Build `{_BUILD_IDENTITY.label}`")
+        st.write(f"Current server run: **{float(snapshot['total_ms']) / 1000.0:.2f} s**")
+        st.caption(
+            f"Recent median {summary['median_ms'] / 1000.0:.2f} s · "
+            f"p95 {summary['p95_ms'] / 1000.0:.2f} s · "
+            f"{int(summary['count'])} run(s)"
+        )
+        st.json({
+            "route": route,
+            "stage": stage,
+            "server_phase_ms": {
+                name: round(float(duration), 1)
+                for name, duration in dict(snapshot["phases_ms"]).items()
+            },
+            "scope": "Server-side Python only; browser and container wake-up are excluded.",
+        })
+
+
+_RUNTIME_TRACE.mark("launcher")
+
 if app_route == "Wharton Cockpit":
     from ui.pages.wharton_dash import render_wharton_cockpit
 
     render_wharton_cockpit()
+    _render_runtime_diagnostics(route=app_route, stage="wharton_ready")
     st.stop()
 
 # ---- Authentication initialization ----
@@ -299,11 +228,10 @@ def _resolve_authenticated_user_id() -> int | None:
     if not token:
         return None
 
-    from src.auth import get_current_user, is_authenticated
+    from src.auth import get_current_user
 
-    if not is_authenticated(token):
-        return None
-
+    # get_current_user already validates the session. Calling is_authenticated
+    # first performed the same database query and session touch twice.
     user = get_current_user(token)
     if not user:
         return None
@@ -341,27 +269,36 @@ def _auto_login_for_smoke_tests() -> int | None:
         return None
 
 
-def _bootstrap_authentication() -> int | None:
+@st.cache_resource(show_spinner=False)
+def _initialize_auth_storage() -> dict[str, Any]:
     from src.auth import init_auth_database
     from src.auth.migrations import (
         get_migration_status,
         migrate_existing_data,
-        migrate_local_files_to_database,
     )
 
     init_auth_database()
     status = get_migration_status()
     if not status.get("completed"):
-        result = migrate_existing_data()
-        if result.get("success") and not result.get("already_migrated"):
-            st.info(f"{result.get('files_migrated', {}).get('total', 0)} files migrated.")
+        return migrate_existing_data()
+    return {"success": True, "already_migrated": True}
 
+
+def _bootstrap_authentication() -> int | None:
     user_id = _resolve_authenticated_user_id()
     if user_id is None:
         user_id = _auto_login_for_smoke_tests()
 
     # On first login after deployment, migrate any existing local files to the DB
     if user_id is not None:
+        from src.auth.migrations import migrate_local_files_to_database
+
+        migration_result = _initialize_auth_storage()
+        if migration_result.get("success") and not migration_result.get("already_migrated"):
+            st.info(
+                f"{migration_result.get('files_migrated', {}).get('total', 0)} files migrated."
+            )
+
         migration_session_key = f"db_migration_done_{user_id}"
         if not st.session_state.get(migration_session_key):
             try:
@@ -377,8 +314,65 @@ user_id = _bootstrap_authentication()
 if user_id is None:
     from ui.auth_page import render_login_form
 
-    render_login_form()
+    render_login_form(prepare_auth_storage=_initialize_auth_storage)
+    _render_runtime_diagnostics(route=app_route, stage="login_ready")
     st.stop()
+
+_RUNTIME_TRACE.mark("authentication")
+
+# The launcher above stays intentionally light. Load the analytical stack only
+# after the Quant Platform route is selected and authentication has succeeded.
+# This avoids importing scipy/statsmodels/arch/cvxpy and every tracker when the
+# user opens Wharton Cockpit or only needs the login screen.
+import numpy as np
+import pandas as pd
+
+from ui.dashboard_shell import (
+    PAGE_DESCRIPTIONS,
+    PAGE_LABELS,
+    PAGE_ORDER,
+    DashboardPreferences,
+    render_dashboard_preferences,
+)
+from ui.auth_page import (
+    get_current_user_id,
+    render_logout_button,
+    render_user_info,
+)
+from src.analytics import (
+    calculate_active_risk_metrics,
+    build_deterministic_fallback_review,
+    build_news_rows_for_ui,
+    build_portfolio_timeseries,
+    compare_runs,
+    calculate_average_correlation,
+    calculate_concentration_metrics,
+    calculate_correlation_matrix,
+    calculate_return_contribution,
+    calculate_risk_contribution,
+    list_run_records,
+    load_run_record,
+    calculate_portfolio_core_metrics,
+    calculate_portfolio_daily_returns,
+    evaluate_portfolio_score,
+)
+from src.analytics.scenario_playground import build_scenario_suite, list_scenario_presets
+from src.analytics.risk_metrics import (
+    calculate_max_drawdown,
+    calculate_sharpe_ratio,
+    calculate_volatility,
+)
+from src.analytics.returns import calculate_annualized_return
+from src.portfolio_tracker.manager import (
+    add_position,
+    compute_live_values,
+    generate_rebalance_suggestions,
+    list_portfolios,
+    load_portfolio,
+    remove_position,
+    save_portfolio,
+    update_position,
+)
 
 # Show user info and logout in sidebar if logged in
 with st.sidebar:
@@ -810,6 +804,25 @@ def _compute_analysis(
     rebalance_cost_bps: float,
     rebalance_risk_aversion: float,
 ) -> Dict[str, Any]:
+    # These dependencies are only needed for an explicit analysis run. Keeping
+    # them out of app startup removes scipy optimizers and optional forecasting
+    # libraries from the empty-dashboard path.
+    from src.ai import generate_ai_review, resolve_groq_api_key
+    from src.analytics import run_advanced_models, run_quant_stack
+    from src.optimization import (
+        calculate_efficient_frontier,
+        estimate_portfolio_inputs,
+        optimize_cost_aware_rebalance,
+        calculate_portfolio_statistics,
+        optimize_maximum_sharpe,
+        optimize_minimum_variance,
+        sample_portfolio_cloud,
+    )
+    from src.simulation import (
+        run_advanced_monte_carlo_simulation,
+        run_monte_carlo_simulation,
+    )
+
     prices = fetch_market_data_cached(tuple(tickers), start_date, end_date)
     if prices.empty:
         raise ValueError("No market data fetched. Please check tickers and date range.")
@@ -964,21 +977,29 @@ def _compute_analysis(
         returns=returns,
         current_weights=weights,
         risk_free_rate=risk_free_rate,
-        max_weight=rebalance_max_weight,
+        max_weight=effective_max_weight,
         turnover_limit=rebalance_turnover_limit,
         transaction_cost_bps=rebalance_cost_bps,
         risk_aversion=rebalance_risk_aversion,
+        portfolio_estimates=shared_estimates,
     )
-    frontier = calculate_efficient_frontier(returns, n_points=30)
+    frontier = calculate_efficient_frontier(
+        returns,
+        n_points=30,
+        max_weight=effective_max_weight,
+        risk_free_rate=risk_free_rate,
+        portfolio_estimates=shared_estimates,
+    )
 
     portfolio_cloud = sample_portfolio_cloud(
         returns,
         n_samples=portfolio_samples,
         risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
     )
-
-    mean_returns = returns.mean().values * 252
-    cov_matrix = returns.cov().values * 252
+    mean_returns = shared_estimates.mean_returns
+    cov_matrix = shared_estimates.covariance
 
     def build_portfolio_marker(
         name: str,
@@ -1619,11 +1640,13 @@ def _build_universe_health_rows(universe_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _reload_stock_picker_modules() -> Tuple[Any, Any]:
-    importlib.reload(universe_sources_module)
-    importlib.reload(universe_enrichment_module)
-    refreshed_universe_module = importlib.reload(stock_universe_module)
-    refreshed_screener_module = importlib.reload(stock_screener_module)
-    return refreshed_universe_module, refreshed_screener_module
+    # Kept as a compatibility seam for tests and callers. Python already reuses
+    # the loaded modules; reloading them on every screen action invalidated
+    # caches and added avoidable work.
+    return (
+        importlib.import_module("src.data.stock_universe"),
+        importlib.import_module("src.stock_picker.screener"),
+    )
 
 
 def _render_universe_overview(
@@ -1876,12 +1899,14 @@ def _render_screener_bulk_actions(
 
 
 def _render_stock_picker_tab() -> None:
+    from src.stock_picker.ai_filter import apply_ai_query, parse_ai_query
+
     st.subheader("Stock Screener")
     st.caption(
         "Daily cached equity universe with staged filtering: broad cached filters first, "
         "technical enrichment only for the shortlist."
     )
-    universe_api = stock_universe_module
+    universe_api, screener_module = _reload_stock_picker_modules()
 
     refresh_col, age_col, auto_col, status_col = st.columns([1, 1, 1.1, 2])
     with age_col:
@@ -1911,7 +1936,7 @@ def _render_stock_picker_tab() -> None:
         try:
             universe_api, _ = _reload_stock_picker_modules()
         except Exception:
-            universe_api = stock_universe_module
+            pass
 
         universe_api.get_universe.clear()
         universe_api.load_universe_snapshot.clear()
@@ -2129,10 +2154,7 @@ def _render_stock_picker_tab() -> None:
                 )
 
             if run_classic:
-                try:
-                    screener_api = importlib.reload(stock_screener_module)
-                except Exception:
-                    screener_api = stock_screener_module
+                screener_api = screener_module
 
                 valuation_filters = {}
                 if use_valuation:
@@ -2209,7 +2231,7 @@ def _render_stock_picker_tab() -> None:
                         and not isinstance(exc, NameError)
                     ):
                         raise
-                    screener_api = importlib.reload(stock_screener_module)
+                    screener_api = screener_module
                     filtered = screener_api.apply_classic_filters(
                         df=screenable_universe_df,
                         market_cap_range=active_market_cap_range,
@@ -2254,7 +2276,7 @@ def _render_stock_picker_tab() -> None:
                                 and not isinstance(exc, NameError)
                             ):
                                 raise
-                            screener_api = importlib.reload(stock_screener_module)
+                            screener_api = screener_module
                             technical = screener_api.apply_technical_indicators(ranked.head(shortlist_size))
                     technical_cols = [
                         column
@@ -2485,6 +2507,26 @@ def _render_portfolio_tracker_tab() -> None:
 
 
 def _render_swing_tracker_tab() -> None:
+    from src.swing_tracker import (
+        build_discipline_overview,
+        build_stop_rationale,
+        calculate_position_size_for_trade,
+        calculate_stop_loss,
+        classify_setup_type,
+        close_trade as close_swing_trade,
+        create_trade,
+        generate_stop_rationale as generate_ai_stop_rationale,
+        historical_trade_rows,
+        open_trade_rows,
+        refresh_and_persist as refresh_swing_trades,
+        resolve_swing_tracker_api_key,
+        save_trade_book as save_swing_trade_book,
+        summarize_post_trade_review,
+        summarize_trade_thesis,
+        trades_to_rows,
+        upsert_trade as upsert_swing_trade,
+    )
+
     st.subheader("Swing Tracker")
     st.caption(
         "Discretionary swing-trade journal with stop rationale discipline, "
@@ -3349,17 +3391,26 @@ def _render_workspace_hub(analysis_result: Dict[str, Any] | None) -> None:
         "Operational tools live here so screening, portfolio maintenance, and trade journaling"
         " stay available without cluttering the analysis pages."
     )
-    workspace_tabs = st.tabs(["Stock Picker", "Portfolio Tracker", "Swing Tracker", "Economics Coach"])
-    with workspace_tabs[0]:
+    workspace = st.radio(
+        "Workspace tool",
+        options=["Stock Picker", "Portfolio Tracker", "Swing Tracker", "Economics Coach"],
+        index=1,
+        key="workspace_hub_active_tool",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if workspace == "Stock Picker":
         _render_stock_picker_tab()
-    with workspace_tabs[1]:
+    elif workspace == "Portfolio Tracker":
         _render_portfolio_tracker_tab()
-    with workspace_tabs[2]:
+    elif workspace == "Swing Tracker":
         _render_swing_tracker_tab()
-    with workspace_tabs[3]:
+    else:
         if analysis_result is None:
             st.info("Run one portfolio analysis first to generate context-aware economics questions.")
         else:
+            from ui.economics_questions import render_economics_questions_section
+
             render_economics_questions_section(analysis_result)
 
 
@@ -4511,6 +4562,7 @@ if run_clicked:
     if input_errors:
         for item in input_errors:
             st.error(item)
+        _render_runtime_diagnostics(route=app_route, stage="input_error")
         st.stop()
 
     with st.spinner("Running full portfolio analysis..."):
@@ -4538,6 +4590,7 @@ if run_clicked:
             st.rerun()
         except Exception as exc:
             st.error(f"Portfolio evaluation failed: {exc}")
+            _render_runtime_diagnostics(route=app_route, stage="analysis_error")
             st.stop()
 
 
@@ -4545,6 +4598,29 @@ analysis_result = st.session_state.get("analysis_result")
 
 if analysis_result is None:
     _render_empty_dashboard_state(dashboard_preferences)
+    _render_runtime_diagnostics(route=app_route, stage="workspace_ready")
     st.stop()
 
+# Chart libraries are only required once analysis output is visible.
+from src.visualization.charts_2d import (
+    plot_correlation_heatmap,
+    plot_cumulative_returns,
+    plot_drawdown,
+    plot_efficient_frontier,
+    plot_monte_carlo_fan,
+)
+from src.visualization.charts_3d import (
+    plot_monte_carlo_percentile_surface,
+    plot_portfolio_tradeoff_3d,
+)
+from src.visualization.cockpit_charts import (
+    plot_asset_stress_impact,
+    plot_crisis_playback,
+    plot_phase_timeline,
+    plot_scenario_atlas,
+    plot_scenario_fingerprint,
+    plot_scenario_shock_map,
+)
+
 _render_modular_dashboard(analysis_result, dashboard_preferences)
+_render_runtime_diagnostics(route=app_route, stage="analysis_ready")

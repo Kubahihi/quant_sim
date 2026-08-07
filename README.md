@@ -15,10 +15,18 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - behaviorální profil klienta v Strategy & Decisions: transparentni dotaznik, reakce na drawdown, kontrola souladu s deklarovanou toleranci a konkretni rozhodovaci guardraily
 - Wharton bond case s kontrolou zpusobilosti ve WInS, vazbou na cil klienta, position-sizing limitem, pitch-defense otazkami, relative-value shortlistem a exportem pracovniho investicniho memo
 - rucni jednotlive dluhopisy primo v Quant Enginu: smluvni parametry, YTW/durace/DV01 a transparentni ETF proxy pro kovarianci, optimalizaci, Monte Carlo a stresove scenare
+- liquidity-aware portfolio construction s 30dennim dollar-ADV, spreadem, square-root market impactem a limitem ucasti na dennim objemu
+- executable trade plan s celymi loty, minimalni hodnotou obchodu, cash kontrolou, poctem pozic a tax-aware vyberem lotu
+- volitelna point-in-time rolling validace s lagovanou historii clenu univerza a fail-closed kontrolou chybejicich delisting returnu
+- produkcni Runtime & build panel s identifikaci commitu a serverovym medianem/p95 poslednich rerunu
 
 Konvence oceneni a prace s dluhopisovymi daty jsou popsane v [docs/FIXED_INCOME.md](docs/FIXED_INCOME.md).
 Metodika komoditnich proxy, stresu pozice a jejich omezeni je popsana v [docs/COMMODITIES.md](docs/COMMODITIES.md).
 Metodika menovych expozic, rizikovych metrik, stresu a optimalizace hedge je popsana v [docs/CURRENCY_RISK.md](docs/CURRENCY_RISK.md).
+
+Metodika konstrukce portfolia, sdilenych odhadu, omezeni a rolling
+out-of-sample reoptimalizace je popsana v
+[docs/PORTFOLIO_OPTIMIZATION.md](docs/PORTFOLIO_OPTIMIZATION.md).
 Metodika behaviorálního profilu, skore, evidence a governance omezeni je popsana v [docs/BEHAVIORAL_PROFILE.md](docs/BEHAVIORAL_PROFILE.md).
 
 ## 1) Jak projekt spustit lokalne
@@ -98,9 +106,13 @@ streamlit run ui/streamlit_app.py
 ```toml
 TURSO_DATABASE_URL = "libsql://your-database.turso.io"
 TURSO_AUTH_TOKEN = "your-turso-auth-token"
+TURSO_SYNC_INTERVAL_SECONDS = 30
 
 [wharton_users]
+Alexandra = "strong-unique-password"
 Jakub = "strong-unique-password"
+"Lukáš" = "strong-unique-password"
+Martin = "strong-unique-password"
 "Matěj" = "strong-unique-password"
 
 [storage]
@@ -123,7 +135,10 @@ Decision log, historie jeho uprav, data dashboardu a verzovane makro snapshoty
 pro regionalni analyzu se ukladaji do sdilene Turso/libSQL databaze, jakmile
 jsou nastaveny `TURSO_DATABASE_URL` a `TURSO_AUTH_TOKEN`. Aplikace pri startu
 automaticky vytvori nebo zaktualizuje tabulky a po kazdem ulozeni synchronizuje
-zmeny online. Makro snapshoty pro referencni rok 2024 maji sestihodinovou
+zmeny online. Zmeny z jinych bezicich replik stahuje nejvyse jednou za interval
+`TURSO_SYNC_INTERVAL_SECONDS` (vychozi hodnota je 30 sekund), aby kazdy Streamlit
+rerun necekal na sit. Vlastni uspesne zapisy jsou v dane instanci viditelne
+okamzite. Makro snapshoty pro referencni rok 2024 maji sestihodinovou
 expiraci; stejna data tak sdileji vsechny bezici instance a po expiraci se
 automaticky obnovi z primarnich zdroju.
 

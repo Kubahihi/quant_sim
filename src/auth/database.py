@@ -10,9 +10,11 @@ from __future__ import annotations
 import os
 import secrets
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # Database path - stored in project data directory
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +26,60 @@ if os.environ.get("AUTH_TEST_DB_PATH"):
 
 # Session expiry time (24 hours)
 SESSION_EXPIRY_HOURS = 24
+SESSION_TOUCH_INTERVAL = timedelta(minutes=5)
+
+# Embedded replicas are local databases. Pulling the remote replica before every
+# short-lived connection turns each Streamlit rerun into a chain of network
+# round-trips. Keep replicas fresh without syncing more than once per interval.
+DEFAULT_TURSO_SYNC_INTERVAL_SECONDS = 30.0
+_REMOTE_SYNC_LOCK = threading.Lock()
+_LAST_REMOTE_SYNC_BY_DATABASE: dict[str, float] = {}
+_AUTH_INITIALIZATION_LOCK = threading.Lock()
+_INITIALIZED_AUTH_DATABASES: set[str] = set()
+
+
+def _remote_sync_interval_seconds() -> float:
+    raw_value = os.environ.get("TURSO_SYNC_INTERVAL_SECONDS")
+    if raw_value is None:
+        try:
+            import streamlit as st
+
+            raw_value = st.secrets.get("TURSO_SYNC_INTERVAL_SECONDS")
+        except Exception:
+            raw_value = None
+    if raw_value is None:
+        raw_value = str(DEFAULT_TURSO_SYNC_INTERVAL_SECONDS)
+    try:
+        return max(0.0, float(raw_value))
+    except (TypeError, ValueError):
+        return DEFAULT_TURSO_SYNC_INTERVAL_SECONDS
+
+
+def _sync_remote_if_due(conn: Any, database_key: str) -> Any:
+    """Sync an embedded replica at most once per configured interval."""
+    with _REMOTE_SYNC_LOCK:
+        now = time.monotonic()
+        last_sync = _LAST_REMOTE_SYNC_BY_DATABASE.get(database_key)
+        if (
+            last_sync is not None
+            and now - last_sync < _remote_sync_interval_seconds()
+        ):
+            return None
+
+        result = conn.sync()
+        _LAST_REMOTE_SYNC_BY_DATABASE[database_key] = time.monotonic()
+        return result
+
+
+def _session_touch_is_due(last_accessed: Any, now: datetime) -> bool:
+    """Return whether a session heartbeat needs to be persisted."""
+    try:
+        previous = datetime.fromisoformat(str(last_accessed))
+    except (TypeError, ValueError):
+        return True
+    if previous.tzinfo is None:
+        previous = previous.replace(tzinfo=timezone.utc)
+    return now - previous.astimezone(timezone.utc) >= SESSION_TOUCH_INTERVAL
 
 
 def _row_to_dict(cursor, row) -> dict[str, Any] | None:
@@ -75,8 +131,9 @@ class LibsqlCursorWrapper:
 
 class LibsqlConnectionWrapper:
     """Wraps a libsql connection to return DictRow objects when fetching."""
-    def __init__(self, conn):
+    def __init__(self, conn, database_key: str | None = None):
         self._conn = conn
+        self._database_key = database_key
     def __getattr__(self, name):
         return getattr(self._conn, name)
     def __enter__(self):
@@ -98,6 +155,10 @@ class LibsqlConnectionWrapper:
         return LibsqlCursorWrapper(cursor)
     def cursor(self):
         return LibsqlCursorWrapper(self._conn.cursor())
+    def sync(self):
+        if self._database_key is None:
+            return self._conn.sync()
+        return _sync_remote_if_due(self._conn, self._database_key)
 
 
 def _get_db_path() -> Path:
@@ -116,12 +177,12 @@ def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
         turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
     except Exception:
         pass
-    
+
     if not turso_url:
         turso_url = os.environ.get("TURSO_DATABASE_URL")
     if not turso_token:
         turso_token = os.environ.get("TURSO_AUTH_TOKEN")
-    
+
     if turso_url and turso_token:
         try:
             import libsql_experimental as libsql
@@ -131,16 +192,19 @@ def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
             except ImportError:
                 libsql = sqlite3
                 turso_url = None
-        
+
         if turso_url:
             conn = libsql.connect(str(db_path), sync_url=turso_url, auth_token=turso_token)
-            conn.sync()
+            database_key = str(Path(db_path).resolve())
+            wrapped_conn = LibsqlConnectionWrapper(conn, database_key=database_key)
+            wrapped_conn.sync()
             try:
                 conn.row_factory = sqlite3.Row
             except AttributeError:
-                # libsql_experimental doesn't support row_factory, use wrapper
-                return LibsqlConnectionWrapper(conn)
-            return conn
+                pass
+            # Always use the wrapper so explicit sync calls elsewhere in the app
+            # share the same throttle instead of causing extra network waits.
+            return wrapped_conn
 
     # Local SQLite fallback
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
@@ -157,9 +221,14 @@ def _get_connection() -> sqlite3.Connection:
 
 def init_auth_database() -> None:
     """Initialize the authentication database schema."""
-    conn = _get_connection()
-    try:
-        conn.executescript("""
+    database_key = str(_get_db_path().resolve())
+    with _AUTH_INITIALIZATION_LOCK:
+        if database_key in _INITIALIZED_AUTH_DATABASES:
+            return
+
+        conn = _get_connection()
+        try:
+            conn.executescript("""
             -- Users table
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,15 +259,15 @@ def init_auth_database() -> None:
             );
 
             -- Index for faster session lookups
-            CREATE INDEX IF NOT EXISTS idx_sessions_user_id 
+            CREATE INDEX IF NOT EXISTS idx_sessions_user_id
             ON sessions(user_id);
-            
+
             -- Index for session cleanup
-            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at 
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at
             ON sessions(expires_at);
 
             -- Index for brute-force tracking
-            CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time 
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time
             ON login_attempts(username, timestamp);
 
             -- Generic User Data table (for portfolios, swing_tracker, run_history)
@@ -212,12 +281,14 @@ def init_auth_database() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 UNIQUE (user_id, data_type, file_name)
             );
-        """)
-        conn.commit()
-        if hasattr(conn, 'sync'):
-            conn.sync()
-    finally:
-        conn.close()
+            """)
+            conn.commit()
+            if hasattr(conn, 'sync'):
+                conn.sync()
+        finally:
+            conn.close()
+
+        _INITIALIZED_AUTH_DATABASES.add(database_key)
 
 
 def create_user(
@@ -227,10 +298,10 @@ def create_user(
 ) -> dict[str, Any]:
     """
     Create a new user in the database.
-    
+
     Returns:
         dict with user info if successful
-        
+
     Raises:
         sqlite3.IntegrityError if username or email already exists
     """
@@ -247,7 +318,7 @@ def create_user(
         conn.commit()
         if hasattr(conn, 'sync'):
             conn.sync()
-        
+
         user_id = cursor.lastrowid
         return {
             "id": user_id,
@@ -255,6 +326,137 @@ def create_user(
             "email": email,
             "created_at": created_at,
         }
+    finally:
+        conn.close()
+
+
+def register_user_once(
+    username: str,
+    email: str,
+    password_hasher: Callable[[], str],
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Check uniqueness and create a user with one database connection.
+
+    The password callback is evaluated only after both uniqueness checks pass,
+    so duplicate registrations do not pay the bcrypt cost.
+    """
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            SELECT username, email
+            FROM users
+            WHERE is_active = 1 AND (username = ? OR email = ?)
+            """,
+            (username, email),
+        )
+        existing = [_row_to_dict(cursor, row) or {} for row in cursor.fetchall()]
+        if any(str(row.get("username")) == username for row in existing):
+            return None, "username_exists"
+        if any(str(row.get("email")) == email for row in existing):
+            return None, "email_exists"
+
+        password_hash = str(password_hasher())
+        if not password_hash:
+            raise ValueError("password_hasher returned an empty hash.")
+        created_at = datetime.now(timezone.utc).isoformat()
+        insert_cursor = conn.execute(
+            """
+            INSERT INTO users (username, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (username, email, password_hash, created_at),
+        )
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
+        return {
+            "id": insert_cursor.lastrowid,
+            "username": username,
+            "email": email,
+            "created_at": created_at,
+        }, "ok"
+    finally:
+        conn.close()
+
+
+def authenticate_user_once(
+    username: str,
+    password_verifier: Callable[[str], bool],
+    *,
+    maximum_failed_attempts: int = 5,
+    failure_window_minutes: int = 10,
+) -> tuple[Optional[str], Optional[dict[str, Any]], str]:
+    """Validate credentials, audit the attempt, and create a session once.
+
+    One connection and one commit replace the previous chain of independent
+    rate-limit, user lookup, audit, and session-creation connections.
+    """
+    if maximum_failed_attempts < 1:
+        raise ValueError("maximum_failed_attempts must be positive.")
+    if failure_window_minutes < 1:
+        raise ValueError("failure_window_minutes must be positive.")
+
+    conn = _get_connection()
+    try:
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(minutes=failure_window_minutes)).isoformat()
+        failed_cursor = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM login_attempts
+            WHERE username = ? AND success = 0 AND timestamp > ?
+            """,
+            (username, since),
+        )
+        if int(failed_cursor.fetchone()[0]) >= maximum_failed_attempts:
+            return None, None, "rate_limited"
+
+        user_cursor = conn.execute(
+            """
+            SELECT id, username, email, password_hash, created_at, is_active
+            FROM users
+            WHERE username = ? AND is_active = 1
+            """,
+            (username,),
+        )
+        user = _row_to_dict(user_cursor, user_cursor.fetchone())
+        password_matches = bool(
+            user is not None
+            and password_verifier(str(user.get("password_hash") or ""))
+        )
+        conn.execute(
+            """
+            INSERT INTO login_attempts (username, timestamp, success, ip_address)
+            VALUES (?, ?, ?, ?)
+            """,
+            (username, now.isoformat(), 1 if password_matches else 0, None),
+        )
+
+        token: Optional[str] = None
+        safe_user: Optional[dict[str, Any]] = None
+        status = "invalid_credentials"
+        if password_matches and user is not None:
+            token = secrets.token_urlsafe(32)
+            expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
+            conn.execute(
+                """
+                INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (token, int(user["id"]), now.isoformat(), expires_at, now.isoformat()),
+            )
+            safe_user = {
+                key: value
+                for key, value in user.items()
+                if key != "password_hash"
+            }
+            status = "ok"
+
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
+        return token, safe_user, status
     finally:
         conn.close()
 
@@ -313,7 +515,7 @@ def get_user_by_email(email: str) -> Optional[dict[str, Any]]:
 def create_session(user_id: int) -> str:
     """
     Create a new session for a user.
-    
+
     Returns:
         Session token string
     """
@@ -324,7 +526,7 @@ def create_session(user_id: int) -> str:
         now = datetime.now(timezone.utc)
         created_at = now.isoformat()
         expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
-        
+
         conn.execute(
             """
             INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
@@ -343,37 +545,38 @@ def create_session(user_id: int) -> str:
 def validate_session_token(token: str) -> bool:
     """
     Validate a session token.
-    
+
     Updates last_accessed time if valid.
-    
+
     Returns:
         True if token is valid and not expired
     """
     conn = _get_connection()
     try:
-        now = datetime.now(timezone.utc).isoformat()
-        
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+
         # Check if session exists and is not expired
         cursor = conn.execute(
             """
-            SELECT s.token, s.user_id, s.expires_at, u.is_active
+            SELECT s.token, s.user_id, s.expires_at, s.last_accessed, u.is_active
             FROM sessions s
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > ? AND u.is_active = 1
             """,
-            (token, now),
+            (token, now_iso),
         )
         row = cursor.fetchone()
-        
+
         if row:
-            # Update last accessed time
-            conn.execute(
-                "UPDATE sessions SET last_accessed = ? WHERE token = ?",
-                (now, token),
-            )
-            conn.commit()
-            if hasattr(conn, 'sync'):
-                conn.sync()
+            if _session_touch_is_due(row["last_accessed"], now):
+                conn.execute(
+                    "UPDATE sessions SET last_accessed = ? WHERE token = ?",
+                    (now_iso, token),
+                )
+                conn.commit()
+                if hasattr(conn, 'sync'):
+                    conn.sync()
             return True
         return False
     finally:
@@ -383,34 +586,39 @@ def validate_session_token(token: str) -> bool:
 def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
     """
     Get the user associated with a session token.
-    
+
     Returns None if token is invalid or expired.
     """
     conn = _get_connection()
     try:
-        now = datetime.now(timezone.utc).isoformat()
-        
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+
         cursor = conn.execute(
             """
-            SELECT u.id, u.username, u.email, u.created_at
+            SELECT u.id, u.username, u.email, u.created_at,
+                   s.last_accessed AS _last_accessed
             FROM sessions s
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > ? AND u.is_active = 1
             """,
-            (token, now),
+            (token, now_iso),
         )
         row = cursor.fetchone()
-        
+
         if row:
-            # Update last accessed time
-            conn.execute(
-                "UPDATE sessions SET last_accessed = ? WHERE token = ?",
-                (now, token),
-            )
-            conn.commit()
-            if hasattr(conn, 'sync'):
-                conn.sync()
-            return _row_to_dict(cursor, row)
+            if _session_touch_is_due(row["_last_accessed"], now):
+                conn.execute(
+                    "UPDATE sessions SET last_accessed = ? WHERE token = ?",
+                    (now_iso, token),
+                )
+                conn.commit()
+                if hasattr(conn, 'sync'):
+                    conn.sync()
+            user = _row_to_dict(cursor, row)
+            if user is not None:
+                user.pop("_last_accessed", None)
+            return user
         return None
     finally:
         conn.close()
@@ -443,7 +651,7 @@ def revoke_all_user_sessions(user_id: int) -> None:
 def cleanup_expired_sessions() -> int:
     """
     Remove expired sessions from the database.
-    
+
     Returns:
         Number of sessions cleaned up
     """
@@ -590,4 +798,4 @@ def delete_user_data(user_id: int, data_type: str, file_name: str) -> bool:
             conn.sync()
         return cursor.rowcount > 0
     finally:
-        conn.close()
+        conn.close()

@@ -99,3 +99,40 @@ class YahooFetcher(BaseFetcher):
                 prices[symbol] = fetch_result.data["close"]
         
         return pd.DataFrame(prices)
+
+    def fetch_close_prices_with_liquidity(
+        self,
+        symbols: list[str],
+        start_date: datetime,
+        end_date: datetime,
+        *,
+        adv_window: int = 30,
+    ) -> dict[str, object]:
+        """Fetch close prices and causal rolling average daily dollar volume."""
+        if not isinstance(adv_window, int) or adv_window < 1:
+            raise ValueError("adv_window must be a positive integer.")
+        prices: dict[str, pd.Series] = {}
+        adv_history: dict[str, pd.Series] = {}
+        latest_adv: dict[str, float] = {}
+        for symbol in symbols:
+            data = self.fetch_prices(symbol, start_date, end_date)
+            if data.empty:
+                continue
+            close = pd.to_numeric(data["close"], errors="coerce")
+            volume = pd.to_numeric(data["volume"], errors="coerce")
+            dollar_volume = (close * volume).where(lambda values: values > 0)
+            rolling_adv = dollar_volume.rolling(
+                window=adv_window,
+                min_periods=min(5, adv_window),
+            ).mean()
+            prices[symbol] = close
+            adv_history[symbol] = rolling_adv
+            valid_adv = rolling_adv.dropna()
+            if not valid_adv.empty:
+                latest_adv[symbol] = float(valid_adv.iloc[-1])
+        return {
+            "prices": pd.DataFrame(prices),
+            "average_daily_dollar_volume": latest_adv,
+            "adv_history": pd.DataFrame(adv_history),
+            "adv_window": adv_window,
+        }

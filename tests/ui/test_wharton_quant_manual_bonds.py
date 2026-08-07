@@ -29,6 +29,23 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
         return prices[[symbol for symbol in symbols if symbol in prices.columns]].copy()
 
     monkeypatch.setattr(wharton_dash, "_fetch_close_prices_cached", fake_prices)
+    monkeypatch.setattr(
+        wharton_dash,
+        "_fetch_market_data_cached",
+        lambda symbols, start_date, end_date: {
+            "prices": fake_prices(symbols, start_date, end_date),
+            "average_daily_dollar_volume": {
+                symbol: 10_000_000.0 for symbol in symbols if symbol in prices.columns
+            },
+            "adv_history": pd.DataFrame(
+                {
+                    symbol: 10_000_000.0
+                    for symbol in symbols if symbol in prices.columns
+                },
+                index=index,
+            ),
+        },
+    )
     def fake_optimization(returns, **kwargs):
         weights = np.repeat(1.0 / returns.shape[1], returns.shape[1])
         return {
@@ -45,6 +62,45 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
         optimize_minimum_variance=fake_optimization,
         optimize_maximum_sharpe=fake_optimization,
         optimize_cost_aware_rebalance=fake_optimization,
+        calculate_efficient_frontier=lambda returns, **kwargs: [],
+        sample_portfolio_cloud=lambda returns, **kwargs: pd.DataFrame(),
+        run_optimization_walk_forward=lambda returns, **kwargs: {
+            "success": True,
+            "metrics": {},
+            "equal_weight_metrics": {},
+        },
+        estimate_portfolio_inputs=lambda returns: SimpleNamespace(
+            mean_returns=returns.mean().to_numpy(dtype=float) * 252.0,
+            covariance=returns.cov().to_numpy(dtype=float) * 252.0,
+        ),
+        calculate_portfolio_statistics=lambda weights, mean_returns, cov_matrix, **kwargs: {
+            "return": float(np.asarray(weights) @ mean_returns),
+            "volatility": float(
+                np.sqrt(np.asarray(weights) @ cov_matrix @ np.asarray(weights))
+            ),
+            "sharpe_ratio": 0.0,
+        },
+        optimize_portfolio=lambda returns, current_weights, **kwargs: {
+            **fake_optimization(returns),
+            "objective": kwargs.get("objective", "maximum_utility"),
+            "current_weights": np.asarray(current_weights, dtype=float),
+            "historical_cvar_daily": 0.0,
+            "transaction_cost_drag": 0.0,
+            "constraint_report": [],
+            "warnings": [],
+        },
+        build_execution_plan=lambda *args, **kwargs: {
+            "success": True,
+            "trades": [],
+            "warnings": [],
+            "holding_count": len(args[0]),
+            "cash": 0.0,
+            "cash_weight": 0.0,
+            "total_execution_cost": 0.0,
+            "total_execution_cost_drag": 0.0,
+            "estimated_tax": 0.0,
+            "tracking_difference_l1": 0.0,
+        },
     )
     monkeypatch.setattr(
         wharton_dash,
@@ -88,7 +144,7 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
         end_date=date(2026, 8, 3),
         risk_free_rate=0.03,
         current_value=100_000.0,
-        max_weight=0.80,
+        max_weight=0.34,
         turnover_limit=0.50,
         transaction_cost_bps=10.0,
         risk_aversion=3.0,
@@ -99,6 +155,7 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
         jump_mean=-0.05,
         jump_volatility=0.08,
         manual_bonds=bonds,
+        strategy_rulebook={"min_cash_weight": 0.10},
     )
 
     assert result["tickers"] == ["SPY", "BOND:US0000000001"]
@@ -108,3 +165,19 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
     assert result["manual_bond_metrics"].loc[0, "DV01USD"] == pytest.approx(10.5)
     assert result["returns"].columns.tolist() == ["SPY", "BOND:US0000000001"]
     assert result["inputs"]["manual_bond_count"] == 1
+    assert result["inputs"]["max_weight"] == pytest.approx(0.50)
+    assert result["inputs"]["mandate_max_weight"] == pytest.approx(0.34)
+    assert result["inputs"]["synthetic_cash_proxy"] is True
+    assert result["mandate_aware"]["symbols"][-1] == "CASH"
+    assert any("synthetic" in warning for warning in result["mandate_aware"]["warnings"])
+    assert result["quant_stack"] is None
+
+    enriched = wharton_dash._run_quant_research_stack(result)
+    assert enriched["quant_stack"] == {"backtest": {}}
+    assert enriched["runtime"]["research_stack_seconds"] >= 0.0
+
+    simulated = wharton_dash._run_quant_simulations(enriched)
+    assert simulated["price_paths"].shape == (31, 200)
+    assert simulated["adv_price_paths"].shape == (31, 200)
+    assert simulated["simulation_stats"]["random_seed"] == 42
+    assert simulated["runtime"]["simulation_seconds"] >= 0.0

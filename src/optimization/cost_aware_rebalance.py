@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Optional
 
+from loguru import logger
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-
-TRADING_DAYS = 252
+from .constraints import build_weight_bounds, validate_weight_solution
+from .estimators import (
+    DEFAULT_COVARIANCE_SHRINKAGE,
+    DEFAULT_RETURN_SHRINKAGE,
+    PortfolioEstimates,
+    resolve_portfolio_estimates,
+)
 
 
 def optimize_cost_aware_rebalance(
@@ -18,103 +24,155 @@ def optimize_cost_aware_rebalance(
     turnover_limit: float = 0.30,
     transaction_cost_bps: float = 10.0,
     risk_aversion: float = 3.0,
-) -> Dict[str, Any]:
-    """
-    Rebalance optimizer with explicit turnover and transaction-cost awareness.
-
-    Objective (maximize):
-      expected_return - risk_aversion * variance - transaction_cost * turnover
-    """
-    if returns.empty:
-        return {
-            "success": False,
-            "message": "returns are empty",
-            "weights": np.array([]),
-            "symbols": [],
-        }
-
-    n_assets = int(returns.shape[1])
+    covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
+    return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
+    portfolio_estimates: Optional[PortfolioEstimates] = None,
+) -> dict[str, Any]:
+    """Optimize a long-only rebalance after turnover and proportional costs."""
+    estimates = resolve_portfolio_estimates(
+        returns,
+        portfolio_estimates=portfolio_estimates,
+        covariance_shrinkage=covariance_shrinkage,
+        return_shrinkage=return_shrinkage,
+    )
+    n_assets = len(estimates.symbols)
     raw_weights = np.asarray(current_weights, dtype=float)
-    if raw_weights.size != n_assets:
+    if raw_weights.ndim != 1 or raw_weights.size != n_assets:
         raise ValueError("Current weights length must match number of return columns.")
+    if not np.all(np.isfinite(raw_weights)):
+        raise ValueError("Current weights must be finite.")
+    if np.any(raw_weights < 0):
+        raise ValueError("Current weights must be non-negative for a long-only rebalance.")
 
     total_weight = float(raw_weights.sum())
-    if np.isclose(total_weight, 0.0):
-        base_weights = np.array([1.0 / n_assets] * n_assets, dtype=float)
+    if total_weight <= 0:
+        base_weights = np.full(n_assets, 1.0 / n_assets, dtype=float)
     else:
         base_weights = raw_weights / total_weight
 
-    ann_mean_returns = returns.mean().to_numpy(dtype=float) * TRADING_DAYS
-    ann_cov = returns.cov().to_numpy(dtype=float) * TRADING_DAYS
+    bounds = build_weight_bounds(
+        n_assets,
+        allow_short=False,
+        max_weight=max_weight,
+    )
+    expected_returns = estimates.mean_returns
+    covariance = estimates.covariance
     tx_cost_rate = max(0.0, float(transaction_cost_bps)) / 10_000.0
     risk_penalty = max(0.0, float(risk_aversion))
+    turnover_cap = float(turnover_limit)
+    if not np.isfinite(turnover_cap) or turnover_cap < 0:
+        raise ValueError("turnover_limit must be non-negative.")
 
-    max_w_requested = float(max_weight)
-    min_feasible = 1.0 / n_assets
-    max_w_effective = max(max_w_requested, min_feasible)
-    bounds = [(0.0, max_w_effective) for _ in range(n_assets)]
-
-    turnover_cap = max(0.0, float(turnover_limit))
-
-    def _turnover(weights: np.ndarray) -> float:
+    def turnover(weights: np.ndarray) -> float:
         return float(np.sum(np.abs(weights - base_weights)))
 
-    def _objective(weights: np.ndarray) -> float:
-        expected_return = float(weights @ ann_mean_returns)
-        variance = float(weights.T @ ann_cov @ weights)
-        turnover = _turnover(weights)
-        transaction_cost_drag = tx_cost_rate * turnover
+    def objective(weights: np.ndarray) -> float:
+        expected_return = float(weights @ expected_returns)
+        variance = float(weights @ covariance @ weights)
+        transaction_cost_drag = tx_cost_rate * turnover(weights)
         utility = expected_return - risk_penalty * variance - transaction_cost_drag
         return -utility
 
-    constraints = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
-    if turnover_cap > 0:
-        constraints.append({"type": "ineq", "fun": lambda w: float(turnover_cap - _turnover(w))})
+    constraints: list[dict[str, Any]] = [
+        {"type": "eq", "fun": lambda weights: float(np.sum(weights) - 1.0)}
+    ]
+    constraints.append({
+        "type": "ineq",
+        "fun": lambda weights: float(turnover_cap - turnover(weights)),
+    })
+
+    # SLSQP clips an infeasible starting point to the bounds. Equal weights are
+    # feasible by construction and give the solver a safe alternative when the
+    # current portfolio breaches a newly introduced position cap.
+    equal_weights = np.full(n_assets, 1.0 / n_assets, dtype=float)
+    x0 = base_weights.copy()
+    if any(
+        value < lower or value > upper
+        for value, (lower, upper) in zip(x0, bounds, strict=False)
+    ):
+        x0 = equal_weights
 
     result = minimize(
-        _objective,
-        x0=base_weights.copy(),
+        objective,
+        x0=x0,
         method="SLSQP",
         bounds=bounds,
         constraints=constraints,
-        options={"maxiter": 1000},
+        options={"maxiter": 1000, "ftol": 1e-12},
     )
 
-    optimized_weights = np.asarray(result.x, dtype=float) if result.success else base_weights
-    optimized_weights = np.clip(optimized_weights, 0.0, None)
-    weight_sum = float(optimized_weights.sum())
-    if not np.isclose(weight_sum, 0.0):
-        optimized_weights = optimized_weights / weight_sum
+    if not result.success:
+        logger.warning(f"Cost-aware optimization failed: {result.message}")
+        return {
+            "weights": np.array([], dtype=float),
+            "current_weights": base_weights,
+            "symbols": list(estimates.symbols),
+            "expected_return": float("nan"),
+            "volatility": float("nan"),
+            "sharpe_ratio": float("nan"),
+            "success": False,
+            "message": str(result.message),
+            "estimation": estimates.metadata(),
+        }
 
-    expected_return = float(optimized_weights @ ann_mean_returns)
-    variance = float(optimized_weights.T @ ann_cov @ optimized_weights)
+    try:
+        optimized_weights = validate_weight_solution(result.x, bounds, tolerance=1e-6)
+    except ValueError as exc:
+        logger.warning(f"Cost-aware solution rejected: {exc}")
+        return {
+            "weights": np.array([], dtype=float),
+            "current_weights": base_weights,
+            "symbols": list(estimates.symbols),
+            "expected_return": float("nan"),
+            "volatility": float("nan"),
+            "sharpe_ratio": float("nan"),
+            "success": False,
+            "message": str(exc),
+            "estimation": estimates.metadata(),
+        }
+
+    realized_turnover = turnover(optimized_weights)
+    if realized_turnover > turnover_cap + 1e-6:
+        message = "solver weights violate the turnover limit."
+        logger.warning(f"Cost-aware solution rejected: {message}")
+        return {
+            "weights": np.array([], dtype=float),
+            "current_weights": base_weights,
+            "symbols": list(estimates.symbols),
+            "expected_return": float("nan"),
+            "volatility": float("nan"),
+            "sharpe_ratio": float("nan"),
+            "success": False,
+            "message": message,
+            "estimation": estimates.metadata(),
+        }
+
+    expected_return = float(optimized_weights @ expected_returns)
+    variance = float(optimized_weights @ covariance @ optimized_weights)
     volatility = float(np.sqrt(max(variance, 0.0)))
-    turnover = _turnover(optimized_weights)
-    transaction_cost_drag = float(tx_cost_rate * turnover)
+    transaction_cost_drag = float(tx_cost_rate * realized_turnover)
     sharpe_ratio = (
-        float((expected_return - risk_free_rate) / volatility) if volatility > 0 else 0.0
+        (expected_return - float(risk_free_rate)) / volatility
+        if volatility > 0
+        else 0.0
     )
-
     utility = expected_return - risk_penalty * variance - transaction_cost_drag
-    status_message = result.message if not result.success else "ok"
-    if max_w_effective > max_w_requested + 1e-12:
-        status_message = (
-            f"{status_message}; max_weight raised to {max_w_effective:.4f} for feasibility"
-        )
 
     return {
         "weights": optimized_weights,
-        "symbols": returns.columns.tolist(),
+        "current_weights": base_weights,
+        "symbols": list(estimates.symbols),
         "expected_return": expected_return,
         "volatility": volatility,
-        "sharpe_ratio": sharpe_ratio,
-        "turnover": float(turnover),
+        "sharpe_ratio": float(sharpe_ratio),
+        "turnover": float(realized_turnover),
         "turnover_limit": turnover_cap,
-        "max_weight": max_w_effective,
+        "max_weight": float(max_weight),
         "transaction_cost_bps": float(transaction_cost_bps),
         "transaction_cost_drag": transaction_cost_drag,
         "risk_aversion": risk_penalty,
         "utility_score": float(utility),
-        "success": bool(result.success),
-        "message": str(status_message),
+        "success": True,
+        "message": str(result.message),
+        "estimation": estimates.metadata(),
     }

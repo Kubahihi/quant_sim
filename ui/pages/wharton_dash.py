@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from copy import deepcopy
 from html import escape
+from io import BytesIO
 import hashlib
 import importlib
 import json
@@ -10,7 +11,8 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Any
+import time
+from typing import Any, Mapping
 import uuid
 import secrets
 
@@ -145,18 +147,19 @@ TASK_PRIORITY_COLORS = {
 }
 GRAPH_NODE_TYPES = ["Policy", "Company", "Model", "Market", "Risk", "Research", "Other"]
 QUANT_MODULES = [
-    "Methodology & Validation",
+    "Mandate-Aware Optimizer",
     "Benchmark Analytics",
     "Cost-Aware Rebalance",
     "Performance Attribution",
     "Simulation",
+    "Methodology & Validation",
     "Models & Signals",
     "News Sentiment",
     "Robustness Check",
     "Backtest",
     "Run History",
 ]
-QUANT_OPERATOR_USERS = {"Jakub", "Matfyz_Genius"}
+QUANT_OPERATOR_USERS = {"Jakub"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
 
 
@@ -167,13 +170,14 @@ def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str,
 
 
 DEFAULT_USERS = [
-    {"username": "Jakub", "role": "Co-Captain / Quant", "primary_module": "Quant Engine"},
-    {"username": "Matěj", "role": "Co-Captain / Strategy", "primary_module": "Dashboard & Strategy"},
-    {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
+    {"username": "Alexandra", "role": "Team Member", "primary_module": "Teamspace"},
+    {"username": "Jakub", "role": "Co-Captain", "primary_module": "Quant Engine"},
     {"username": "Lukáš", "role": "Geopolitics", "primary_module": "Macro Intelligence"},
-    {"username": "Janek", "role": "Intelligence", "primary_module": "War Room"},
-    {"username": "Matfyz_Genius", "role": "Quant/Math", "primary_module": "Quant Engine"},
+    {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
+    {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
 ]
+
+LEGACY_USERS = {"Janek", "Matfyz_Genius"}
 
 DEFAULT_MINDMAP_NODES = [
     ("node_eu_tech_regulation", "EU Tech Regulation", "Policy"),
@@ -209,7 +213,7 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_db() -> None:
+def _initialize_database() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     with get_connection() as conn:
@@ -489,6 +493,10 @@ def init_db() -> None:
         """)
 
         # Seed users
+        conn.executemany(
+            "DELETE FROM wharton_users WHERE username = ?",
+            ((username,) for username in LEGACY_USERS),
+        )
         existing_users = {
             str(row["username"]): str(row["password_hash"] or "")
             for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
@@ -504,6 +512,10 @@ def init_db() -> None:
 
             if existing_users.get(user["username"]):
                 if not _should_sync_seeded_passwords():
+                    conn.execute(
+                        "UPDATE wharton_users SET role = ?, primary_module = ? WHERE username = ?",
+                        (user["role"], user["primary_module"], user["username"]),
+                    )
                     continue
                 stored_hash = existing_users[user["username"]]
                 if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
@@ -548,12 +560,40 @@ def init_db() -> None:
             conn.sync()
 
 
+@st.cache_resource(show_spinner=False)
+def _initialize_database_once(database_path: str, upload_path: str) -> None:
+    """Initialize a production database once per process and configured path."""
+    _initialize_database()
+
+
+def init_db() -> None:
+    # Development and tests intentionally support repeated initialization so a
+    # changed seeded password is applied immediately. Production schema setup is
+    # stable for a deployed process and should not run on every widget rerun.
+    if _is_development_mode():
+        _initialize_database()
+        return
+    _initialize_database_once(str(DB_PATH.resolve()), str(UPLOAD_DIR.resolve()))
+
+
 # ─── Auth ────────────────────────────────────────────────────────────────────
 
 def _fetch_users() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
-            "SELECT id, username, role, primary_module FROM wharton_users ORDER BY username COLLATE NOCASE"
+            """
+            SELECT id, username, role, primary_module
+            FROM wharton_users
+            WHERE username IN (?, ?, ?, ?, ?)
+            ORDER BY CASE username
+                WHEN 'Alexandra' THEN 0
+                WHEN 'Jakub' THEN 1
+                WHEN 'Lukáš' THEN 2
+                WHEN 'Martin' THEN 3
+                WHEN 'Matěj' THEN 4
+            END
+            """,
+            tuple(user["username"] for user in DEFAULT_USERS),
         ).fetchall()
 
 
@@ -591,10 +631,12 @@ def _logout() -> None:
 
 
 def _render_login() -> None:
-    users = _fetch_users()
-    usernames = [str(u["username"]) for u in users]
+    # The team roster is static configuration, so the anonymous landing page
+    # does not need a remote database connection.  Database/schema setup is
+    # deferred until a user actually submits the form.
+    usernames = [str(user["username"]) for user in DEFAULT_USERS]
     if not usernames:
-        st.error("No users found. Restart the app.")
+        st.error("No users configured. Restart the app.")
         st.stop()
 
     _, center, _ = st.columns([1, 1.15, 1])
@@ -632,7 +674,16 @@ def _render_login() -> None:
         return
 
     if submitted:
-        from src.auth.database import log_login_attempt, get_recent_failed_attempts
+        # Authentication and brute-force tracking require their schemas, but
+        # anonymous visitors should never pay this remote initialization cost.
+        init_db()
+        from src.auth.database import (
+            get_recent_failed_attempts,
+            init_auth_database,
+            log_login_attempt,
+        )
+
+        init_auth_database()
         
         failed_attempts = get_recent_failed_attempts(username, minutes=LOGIN_ATTEMPT_WINDOW_MINUTES)
         if failed_attempts >= MAX_LOGIN_ATTEMPTS:
@@ -1248,21 +1299,14 @@ def _render_chat(profile: dict[str, str | int]) -> None:
 
 # ─── File Vault (Storage Backend Integration) ─────────────────────────────────
 
-# Import storage backend
-from src.storage import (
-    init_storage_db,
-    save_uploaded_file as storage_save_file,
-    download_file as storage_download_file,
-    file_exists as storage_file_exists,
-    list_files_with_status,
-    StorageFileNotFoundError,
-    FileValidationError,
-)
+def _storage_api():
+    """Load the optional file-vault stack only when that panel is used."""
+    return importlib.import_module("src.storage")
 
 
 def _init_file_vault_storage():
     """Initialize storage layer for file vault."""
-    init_storage_db(str(DB_PATH))
+    _storage_api().init_storage_db(str(DB_PATH))
 
 
 def _safe_filename(filename: str) -> str:
@@ -1295,8 +1339,9 @@ def _save_uploaded_file(
     tags: str = "",
 ) -> None:
     """Save uploaded file using the new storage backend."""
+    storage = _storage_api()
     try:
-        result = storage_save_file(
+        storage.save_uploaded_file(
             uploaded_file=uploaded_file,
             uploaded_by=uploaded_by,
             db_path=str(DB_PATH),
@@ -1304,13 +1349,13 @@ def _save_uploaded_file(
             description=description,
             tags=tags,
         )
-    except FileValidationError as e:
+    except storage.FileValidationError as e:
         raise ValueError(str(e))
 
 
 def _fetch_file_rows() -> list[dict]:
     """Fetch file rows with storage status."""
-    return list_files_with_status(db_path=str(DB_PATH))
+    return _storage_api().list_files_with_status(db_path=str(DB_PATH))
 
 
 def _fetch_file_rows_legacy() -> list[sqlite3.Row]:
@@ -1323,6 +1368,7 @@ def _fetch_file_rows_legacy() -> list[sqlite3.Row]:
 
 
 def _render_file_center(profile: dict[str, str | int]) -> None:
+    storage = _storage_api()
     st.markdown("### Persistent File Vault")
     st.caption(f"Files stored in `{UPLOAD_DIR}/` · indexed in SQLite · max {MAX_FILE_SIZE_MB} MB · allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
 
@@ -1432,7 +1478,10 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
         with col2:
             if status == "available":
                 try:
-                    content, download_name, content_type = storage_download_file(file_id, db_path=str(DB_PATH))
+                    content, download_name, content_type = storage.download_file(
+                        file_id,
+                        db_path=str(DB_PATH),
+                    )
                     st.download_button(
                         "Download",
                         data=content,
@@ -1441,7 +1490,7 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
                         key=f"dl_{file_id}",
                         use_container_width=True,
                     )
-                except (StorageFileNotFoundError, FileNotFoundError) as e:
+                except (storage.StorageFileNotFoundError, FileNotFoundError) as e:
                     st.error(f"Download failed: {e}")
 
 
@@ -1586,12 +1635,6 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 # ─── Quant Engine ─────────────────────────────────────────────────────────────
 
 def _load_quant_modules() -> dict[str, Any]:
-    import sys
-    if "src.analytics.model_validation" in sys.modules:
-        importlib.reload(sys.modules["src.analytics.model_validation"])
-    if "src.analytics" in sys.modules:
-        importlib.reload(sys.modules["src.analytics"])
-
     return {
         "analytics": importlib.import_module("src.analytics"),
         "optimization": importlib.import_module("src.optimization"),
@@ -1615,6 +1658,19 @@ def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date)
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_market_data_cached(
+    symbols: tuple,
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    modules = _load_quant_modules()
+    fetcher = modules["yahoo_fetcher"].YahooFetcher()
+    return fetcher.fetch_close_prices_with_liquidity(
+        list(symbols), start_date, end_date, adv_window=30
+    )
+
+
 def _parse_tickers(raw: str, *, allow_empty: bool = False) -> list[str]:
     tickers, seen = [], set()
     for chunk in raw.replace(",", "\n").splitlines():
@@ -1636,6 +1692,31 @@ def _parse_weights(raw: str, tickers: list[str]) -> np.ndarray:
     if w.sum() > 1.5: w = w / 100.0
     if np.isclose(w.sum(), 0.0): raise ValueError("Weights cannot sum to zero.")
     return w / w.sum()
+
+
+def _parse_black_litterman_views(raw: str) -> dict[str, float]:
+    """Parse TICKER=annual-return-percent entries into decimal absolute views."""
+    views: dict[str, float] = {}
+    if not str(raw or "").strip():
+        return views
+    chunks = str(raw).replace(";", "\n").replace(",", "\n").splitlines()
+    for chunk in chunks:
+        entry = chunk.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(
+                "Black-Litterman views must use TICKER=annual return %, for example MSFT=10."
+            )
+        ticker, raw_value = entry.split("=", 1)
+        symbol = ticker.strip().upper()
+        if not symbol or symbol in views:
+            raise ValueError("Black-Litterman view tickers must be unique and non-empty.")
+        value = float(raw_value.strip().replace("%", "")) / 100.0
+        if not np.isfinite(value):
+            raise ValueError(f"Black-Litterman view for {symbol} must be finite.")
+        views[symbol] = value
+    return views
 
 
 def _align_weights(tickers: list, weights: np.ndarray, columns: list) -> np.ndarray:
@@ -1667,9 +1748,38 @@ def _compute_quant_run(
     transaction_cost_bps, risk_aversion, simulation_days, n_simulations, random_seed,
     jump_intensity, jump_mean, jump_volatility,
     manual_bonds=None,
+    optimization_objective="maximum_utility",
+    optimization_target_volatility=0.18,
+    optimization_cvar_confidence=0.95,
+    strategy_rulebook=None,
+    optimizer_asset_metadata=None,
+    optimization_expected_return_model="shrunk_historical",
+    black_litterman_views=None,
+    black_litterman_confidence=0.60,
+    execution_model_enabled=True,
+    half_spread_bps=3.0,
+    market_impact_bps=20.0,
+    max_adv_participation=0.05,
+    minimum_trade_value=100.0,
+    maximum_holdings=None,
+    lot_size=1.0,
+    tax_lots=None,
+    short_term_tax_rate=0.35,
+    long_term_tax_rate=0.20,
+    universe_membership=None,
 ) -> dict[str, Any]:
+    run_started_at = time.perf_counter()
+    phase_started_at = run_started_at
+    runtime_phases: dict[str, float] = {}
+
+    def mark_runtime_phase(name: str) -> None:
+        nonlocal phase_started_at
+        now = time.perf_counter()
+        runtime_phases[name] = float(now - phase_started_at)
+        phase_started_at = now
+
     modules = _load_quant_modules()
-    analytics, optimization, simulation = modules["analytics"], modules["optimization"], modules["simulation"]
+    analytics, optimization = modules["analytics"], modules["optimization"]
 
     from src.portfolio_tracker.manual_bond_quant import (
         build_manual_bond_metrics_table,
@@ -1682,15 +1792,34 @@ def _compute_quant_run(
         str(item.get("proxy_ticker") or "").strip().upper()
         for item in manual_bonds if str(item.get("proxy_ticker") or "").strip()
     })
-    data_symbols = list(dict.fromkeys([*tickers, *proxy_tickers]))
+    current_data_symbols = list(dict.fromkeys([*tickers, *proxy_tickers]))
+    point_in_time_symbols = (
+        [str(column).strip().upper() for column in universe_membership.columns]
+        if isinstance(universe_membership, pd.DataFrame)
+        else []
+    )
+    data_symbols = list(dict.fromkeys([*current_data_symbols, *point_in_time_symbols]))
     if not data_symbols:
         raise ValueError("Enter at least one market ticker or manual individual bond.")
-    prices = _fetch_close_prices_cached(tuple(data_symbols), start_date, end_date)
-    if prices.empty: raise ValueError("No price data returned.")
-    prices = prices.sort_index().ffill().dropna(how="all")
+    market_data = _fetch_market_data_cached(tuple(data_symbols), start_date, end_date)
+    all_prices = pd.DataFrame(market_data.get("prices", pd.DataFrame()))
+    if all_prices.empty: raise ValueError("No price data returned.")
+    all_prices = all_prices.sort_index().dropna(how="all")
+    prices = all_prices[
+        [symbol for symbol in current_data_symbols if symbol in all_prices.columns]
+    ].ffill()
     available_data = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
     prices = prices[available_data].dropna(how="any")
     if prices.empty: raise ValueError("Not enough aligned data.")
+    latest_adv = {
+        str(symbol): float(value)
+        for symbol, value in dict(
+            market_data.get("average_daily_dollar_volume", {})
+        ).items()
+        if np.isfinite(float(value)) and float(value) > 0
+    }
+    adv_history = pd.DataFrame(market_data.get("adv_history", pd.DataFrame()))
+    mark_runtime_phase("market_data")
 
     data_returns = prices.pct_change().dropna(how="any")
     available_market = [ticker for ticker in tickers if ticker in data_returns.columns]
@@ -1731,6 +1860,8 @@ def _compute_quant_run(
     )
     return_contribution = analytics.calculate_return_contribution(returns, aligned_w)
     risk_contribution = analytics.calculate_risk_contribution(returns, aligned_w)
+    mark_runtime_phase("analytics")
+    shared_estimates = optimization.estimate_portfolio_inputs(returns)
     effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
     min_variance = optimization.optimize_minimum_variance(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
     max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
@@ -1738,25 +1869,20 @@ def _compute_quant_run(
         returns=returns, current_weights=aligned_w, risk_free_rate=risk_free_rate,
         max_weight=effective_max_weight, turnover_limit=turnover_limit,
         transaction_cost_bps=transaction_cost_bps, risk_aversion=risk_aversion,
+        portfolio_estimates=shared_estimates,
     )
-    portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
-    price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
-        current_value=current_value,
-        # GBM expects arithmetic drift; CAGR remains the headline realized
-        # return metric but is not the correct drift estimator here.
-        expected_return=float(portfolio_returns.mean() * 252.0),
-        volatility=float(core_metrics.get("volatility", 0.0)),
-        time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
+    current_optimization_stats = optimization.calculate_portfolio_statistics(
+        weights=aligned_w,
+        mean_returns=shared_estimates.mean_returns,
+        cov_matrix=shared_estimates.covariance,
+        risk_free_rate=risk_free_rate,
+        symbols=list(returns.columns),
     )
-    
-    adv_price_paths, adv_simulation_stats = simulation.run_advanced_monte_carlo_simulation(
-        current_value=current_value,
-        expected_return=float(core_metrics.get("annualized_return", 0.0)),
-        volatility=float(core_metrics.get("volatility", 0.0)),
-        time_horizon=simulation_days, n_simulations=n_simulations, random_seed=random_seed,
-        jump_intensity=jump_intensity, jump_mean=jump_mean, jump_volatility=jump_volatility,
-    )
-
+    current_optimization_metrics = {
+        "expected_return": current_optimization_stats["return"],
+        "volatility": current_optimization_stats["volatility"],
+        "sharpe_ratio": current_optimization_stats["sharpe_ratio"],
+    }
     from src.analytics.scenario_playground import classify_asset_role
 
     role_security_labels = {
@@ -1775,51 +1901,303 @@ def _compute_quant_run(
         )
         for column in returns.columns
     }
-
-    # Run full modular quant stack (models, signals, news, backtest, history)
-    quant_stack_result = None
-    try:
-        pipeline = _load_modular_pipeline()
-        config = {
-            "tickers": list(returns.columns),
-            "news_tickers": available_market,
-            "security_types": security_types,
-            "weights": aligned_w.tolist(),
-            "start_date": start_date,
-            "end_date": end_date,
-            "risk_free_rate": risk_free_rate,
-            "portfolio_metrics": {**core_metrics, **concentration, "avg_correlation": avg_corr},
-            "transaction_cost_bps": transaction_cost_bps,
-            "news_max_items": 80,
-            "news_api_key": "",
-        }
-        try:
-            news_api_key = str(st.secrets.get("NEWS_API_KEY", ""))
-            news_api_key = str(st.secrets.get("NEWSAPI_KEY", "")) # Standardize on NEWSAPI_KEY
-            if news_api_key: config["news_api_key"] = news_api_key
-        except Exception:
-            pass
-        quant_stack_result = pipeline.run_quant_stack(
-            portfolio_returns=portfolio_returns,
-            returns_df=returns,
-            config=config,
-            user_id=st.session_state.get("user_id"),
+    engine_returns = returns.copy()
+    engine_current_weights = aligned_w.copy()
+    synthetic_cash_proxy = False
+    engine_metadata = {
+        str(symbol): dict((optimizer_asset_metadata or {}).get(str(symbol), {}))
+        for symbol in returns.columns
+    }
+    for symbol, security_type in security_types.items():
+        engine_metadata.setdefault(str(symbol), {}).setdefault(
+            "asset_type", "Stock" if security_type == "Market" else security_type
         )
-    except Exception as stack_err:
-        quant_stack_result = {"_error": str(stack_err)}
+    active_strategy = dict(strategy_rulebook or {})
+    if float(active_strategy.get("min_cash_weight") or 0.0) > 0 and "CASH" not in engine_returns:
+        engine_returns["CASH"] = float(risk_free_rate) / 252.0
+        engine_current_weights = np.append(engine_current_weights, 0.0)
+        synthetic_cash_proxy = True
+        engine_metadata["CASH"] = {
+            "asset_type": "cash",
+            "is_cash": True,
+            "beta": 0.0,
+            "approved": True,
+            "tags": ["liquidity"],
+        }
+    engine_effective_max_weight = max(
+        float(max_weight), 1.0 / float(engine_returns.shape[1])
+    )
+    engine_liquidity_adv: dict[str, float] = {}
+    missing_liquidity_symbols: list[str] = []
+    for symbol in engine_returns.columns:
+        symbol_name = str(symbol)
+        if symbol_name == "CASH":
+            engine_liquidity_adv[symbol_name] = float(current_value) * 1_000.0
+        elif symbol_name in latest_adv:
+            engine_liquidity_adv[symbol_name] = float(latest_adv[symbol_name])
+        else:
+            missing_liquidity_symbols.append(symbol_name)
+    liquidity_model_ready = bool(
+        execution_model_enabled and not missing_liquidity_symbols
+    )
+    try:
+        portfolio_estimates = None
+        if str(optimization_expected_return_model) == "black_litterman":
+            supplied_views = dict(black_litterman_views or {})
+            portfolio_estimates = optimization.estimate_black_litterman_inputs(
+                engine_returns,
+                market_weights=engine_current_weights,
+                views=supplied_views,
+                view_confidences={
+                    symbol: float(black_litterman_confidence)
+                    for symbol in supplied_views
+                },
+                risk_aversion=risk_aversion,
+            )
+        elif tuple(str(column) for column in engine_returns.columns) == tuple(
+            str(column) for column in returns.columns
+        ):
+            portfolio_estimates = shared_estimates
+        else:
+            portfolio_estimates = optimization.estimate_portfolio_inputs(
+                engine_returns
+            )
+        mandate_aware = optimization.optimize_portfolio(
+            engine_returns,
+            objective=str(optimization_objective),
+            strategy=active_strategy or None,
+            asset_metadata=engine_metadata,
+            current_weights=engine_current_weights,
+            max_weight=engine_effective_max_weight,
+            turnover_limit=turnover_limit,
+            transaction_cost_bps=transaction_cost_bps,
+            half_spread_bps=(float(half_spread_bps) if liquidity_model_ready else 0.0),
+            market_impact_bps=(float(market_impact_bps) if liquidity_model_ready else 0.0),
+            average_daily_dollar_volume=(
+                engine_liquidity_adv if liquidity_model_ready else None
+            ),
+            portfolio_value=(float(current_value) if liquidity_model_ready else None),
+            max_adv_participation=(
+                float(max_adv_participation) if liquidity_model_ready else None
+            ),
+            risk_free_rate=risk_free_rate,
+            risk_aversion=risk_aversion,
+            target_volatility=(
+                float(optimization_target_volatility)
+                if str(optimization_objective) == "target_volatility"
+                else None
+            ),
+            cvar_confidence=float(optimization_cvar_confidence),
+            portfolio_estimates=portfolio_estimates,
+        )
+    except Exception as mandate_error:
+        mandate_aware = {
+            "success": False,
+            "weights": np.array([], dtype=float),
+            "symbols": list(engine_returns.columns),
+            "objective": str(optimization_objective),
+            "message": str(mandate_error),
+            "warnings": [],
+        }
+    if synthetic_cash_proxy:
+        mandate_aware["warnings"] = [
+            *list(mandate_aware.get("warnings", [])),
+            "Cash is modeled as a synthetic constant daily risk-free return, not as a "
+            "historical money-market instrument.",
+        ]
+    if execution_model_enabled and missing_liquidity_symbols:
+        mandate_aware["warnings"] = [
+            *list(mandate_aware.get("warnings", [])),
+            "Liquidity-aware optimization was not applied because 30-day dollar-volume "
+            "data is unavailable for: " + ", ".join(missing_liquidity_symbols) + ".",
+        ]
 
-    backtest_for_validation = (
-        quant_stack_result.get("backtest", {})
-        if isinstance(quant_stack_result, dict) and "_error" not in quant_stack_result
-        else {}
-    )
-    model_validation = analytics.build_model_validation_report(
-        portfolio_returns=portfolio_returns,
-        simulation_stats=simulation_stats,
-        backtest=backtest_for_validation,
+    execution_plan = None
+    if mandate_aware.get("success"):
+        execution_prices: dict[str, float] = {}
+        for symbol in mandate_aware.get("symbols", []):
+            symbol_name = str(symbol)
+            if symbol_name == "CASH":
+                execution_prices[symbol_name] = 1.0
+            elif symbol_name in all_prices.columns:
+                valid_prices = pd.to_numeric(
+                    all_prices[symbol_name], errors="coerce"
+                ).dropna()
+                if not valid_prices.empty:
+                    execution_prices[symbol_name] = float(valid_prices.iloc[-1])
+        if len(execution_prices) == len(mandate_aware.get("symbols", [])):
+            strategy_max_holdings = active_strategy.get("max_holdings")
+            strategy_min_holdings = active_strategy.get("min_holdings")
+            requested_max_holdings = (
+                int(maximum_holdings)
+                if maximum_holdings is not None and int(maximum_holdings) > 0
+                else None
+            )
+            effective_max_holdings = (
+                min(
+                    value
+                    for value in (
+                        requested_max_holdings,
+                        int(strategy_max_holdings) if strategy_max_holdings is not None else None,
+                    )
+                    if value is not None
+                )
+                if requested_max_holdings is not None or strategy_max_holdings is not None
+                else None
+            )
+            try:
+                execution_plan = optimization.build_execution_plan(
+                    mandate_aware["symbols"],
+                    mandate_aware["weights"],
+                    prices=execution_prices,
+                    portfolio_value=float(current_value),
+                    current_weights=engine_current_weights,
+                    lot_sizes={
+                        str(symbol): (0.01 if str(symbol) == "CASH" else float(lot_size))
+                        for symbol in mandate_aware["symbols"]
+                    },
+                    minimum_trade_value=float(minimum_trade_value),
+                    maximum_holdings=effective_max_holdings,
+                    minimum_holdings=(
+                        int(strategy_min_holdings)
+                        if strategy_min_holdings is not None
+                        else None
+                    ),
+                    average_daily_dollar_volume=(
+                        engine_liquidity_adv if liquidity_model_ready else None
+                    ),
+                    maximum_adv_participation=(
+                        float(max_adv_participation) if liquidity_model_ready else None
+                    ),
+                    transaction_cost_bps=float(transaction_cost_bps),
+                    half_spread_bps=(
+                        float(half_spread_bps) if liquidity_model_ready else 0.0
+                    ),
+                    market_impact_bps=(
+                        float(market_impact_bps) if liquidity_model_ready else 0.0
+                    ),
+                    tax_lots=tax_lots,
+                    short_term_tax_rate=float(short_term_tax_rate),
+                    long_term_tax_rate=float(long_term_tax_rate),
+                    as_of=end_date,
+                )
+            except Exception as execution_error:
+                execution_plan = {
+                    "success": False,
+                    "message": str(execution_error),
+                    "warnings": [],
+                }
+        else:
+            execution_plan = {
+                "success": False,
+                "message": (
+                    "Executable lots require a current price for every optimized asset; "
+                    "manual instruments need instrument-specific lot inputs."
+                ),
+                "warnings": [],
+            }
+    frontier = optimization.calculate_efficient_frontier(
+        returns,
+        n_points=50,
+        max_weight=effective_max_weight,
         risk_free_rate=risk_free_rate,
-        random_seed=random_seed,
+        portfolio_estimates=shared_estimates,
     )
+    portfolio_cloud = optimization.sample_portfolio_cloud(
+        returns,
+        n_samples=2000,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
+    optimization_validation = None
+    validation_returns = engine_returns
+    validation_membership = None
+    validation_metadata = engine_metadata
+    validation_adv_history = None
+    if isinstance(universe_membership, pd.DataFrame):
+        pit_symbols = [str(column).strip().upper() for column in universe_membership.columns]
+        missing_pit_prices = [symbol for symbol in pit_symbols if symbol not in all_prices.columns]
+        if missing_pit_prices:
+            optimization_validation = {
+                "success": False,
+                "error": "No price history was returned for point-in-time symbol(s): "
+                + ", ".join(missing_pit_prices),
+            }
+        else:
+            validation_returns = (
+                all_prices[pit_symbols]
+                .sort_index()
+                .pct_change(fill_method=None)
+                .dropna(how="all")
+            )
+            validation_membership = universe_membership[pit_symbols]
+            validation_metadata = {
+                symbol: dict((optimizer_asset_metadata or {}).get(symbol, {}))
+                for symbol in pit_symbols
+            }
+            for symbol in pit_symbols:
+                validation_metadata[symbol].setdefault("asset_type", "Stock")
+            if all(symbol in adv_history.columns for symbol in pit_symbols):
+                validation_adv_history = adv_history[pit_symbols]
+    elif all(str(symbol) in adv_history.columns for symbol in engine_returns.columns):
+        validation_adv_history = adv_history[
+            [str(symbol) for symbol in engine_returns.columns]
+        ]
+
+    validation_liquidity_ready = bool(
+        execution_model_enabled and validation_adv_history is not None
+    )
+    if optimization_validation is None and len(validation_returns) > 146:
+        validation_train_periods = min(756, max(126, len(validation_returns) // 2))
+        if len(validation_returns) > validation_train_periods:
+            try:
+                optimization_validation = optimization.run_optimization_walk_forward(
+                    validation_returns,
+                    optimizer=str(optimization_objective),
+                    train_periods=validation_train_periods,
+                    rebalance_periods=63,
+                    max_weight=engine_effective_max_weight,
+                    risk_free_rate=risk_free_rate,
+                    transaction_cost_bps=transaction_cost_bps,
+                    strategy=active_strategy or None,
+                    asset_metadata=validation_metadata,
+                    turnover_limit=turnover_limit,
+                    half_spread_bps=(
+                        float(half_spread_bps) if validation_liquidity_ready else 0.0
+                    ),
+                    market_impact_bps=(
+                        float(market_impact_bps) if validation_liquidity_ready else 0.0
+                    ),
+                    average_daily_dollar_volume=(
+                        validation_adv_history if validation_liquidity_ready else None
+                    ),
+                    portfolio_value=float(current_value),
+                    max_adv_participation=(
+                        float(max_adv_participation)
+                        if validation_liquidity_ready
+                        else None
+                    ),
+                    risk_aversion=risk_aversion,
+                    target_volatility=(
+                        float(optimization_target_volatility)
+                        if str(optimization_objective) == "target_volatility"
+                        else None
+                    ),
+                    cvar_confidence=float(optimization_cvar_confidence),
+                    expected_return_model=str(optimization_expected_return_model),
+                    black_litterman_views=dict(black_litterman_views or {}),
+                    black_litterman_confidence=float(black_litterman_confidence),
+                    universe_membership=validation_membership,
+                    membership_lag_periods=1,
+                )
+            except Exception as validation_error:
+                optimization_validation = {
+                    "success": False,
+                    "error": str(validation_error),
+                }
+    mark_runtime_phase("optimization_and_validation")
+    portfolio_timeseries = analytics.build_portfolio_timeseries(portfolio_returns, initial_value=current_value)
 
     metrics = {
         **core_metrics, **concentration,
@@ -1858,20 +2236,55 @@ def _compute_quant_run(
         "min_variance": min_variance,
         "max_sharpe": max_sharpe,
         "cost_aware": cost_aware,
-        "price_paths": price_paths,
-        "simulation_stats": simulation_stats,
-        "model_validation": model_validation,
-        "adv_price_paths": adv_price_paths,
-        "adv_simulation_stats": adv_simulation_stats,
-        "quant_stack": quant_stack_result,
+        "current_optimization_metrics": current_optimization_metrics,
+        "mandate_aware": mandate_aware,
+        "execution_plan": execution_plan,
+        "frontier": frontier,
+        "portfolio_cloud": portfolio_cloud,
+        "optimization_validation": optimization_validation,
+        "price_paths": None,
+        "simulation_stats": None,
+        "model_validation": {},
+        "adv_price_paths": None,
+        "adv_simulation_stats": None,
+        "quant_stack": None,
+        "runtime": {
+            "core_seconds": float(time.perf_counter() - run_started_at),
+            "phases_seconds": runtime_phases,
+            "simulation_seconds": None,
+            "research_stack_seconds": None,
+        },
         "inputs": {
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
             "risk_free_rate": risk_free_rate, "current_value": current_value,
             "max_weight": effective_max_weight, "requested_max_weight": max_weight,
+            "mandate_max_weight": engine_effective_max_weight,
+            "synthetic_cash_proxy": synthetic_cash_proxy,
             "turnover_limit": turnover_limit,
             "transaction_cost_bps": transaction_cost_bps, "risk_aversion": risk_aversion,
+            "optimization_objective": str(optimization_objective),
+            "optimization_target_volatility": float(optimization_target_volatility),
+            "optimization_cvar_confidence": float(optimization_cvar_confidence),
+            "strategy_rulebook_applied": bool(active_strategy),
+            "optimization_expected_return_model": str(optimization_expected_return_model),
+            "black_litterman_views": dict(black_litterman_views or {}),
+            "black_litterman_confidence": float(black_litterman_confidence),
+            "execution_model_enabled": bool(execution_model_enabled),
+            "liquidity_model_ready": liquidity_model_ready,
+            "half_spread_bps": float(half_spread_bps),
+            "market_impact_bps": float(market_impact_bps),
+            "max_adv_participation": float(max_adv_participation),
+            "minimum_trade_value": float(minimum_trade_value),
+            "maximum_holdings": maximum_holdings,
+            "lot_size": float(lot_size),
+            "short_term_tax_rate": float(short_term_tax_rate),
+            "long_term_tax_rate": float(long_term_tax_rate),
+            "point_in_time_universe_supplied": isinstance(universe_membership, pd.DataFrame),
             "simulation_days": simulation_days, "n_simulations": n_simulations,
             "random_seed": random_seed,
+            "jump_intensity": jump_intensity,
+            "jump_mean": jump_mean,
+            "jump_volatility": jump_volatility,
             "manual_bond_count": len(manual_bonds),
             "manual_bond_proxy_method": "Proxy returns rescaled to entered annual volatility and shifted to yield to worst less entered expected credit loss",
         },
@@ -1908,6 +2321,66 @@ def _render_quant_configuration() -> None:
                 turnover_limit = st.slider("Turnover Limit", 0.05, 2.0, 0.30, 0.05)
                 transaction_cost_bps = st.slider("Transaction Cost (bps)", 0.0, 100.0, 10.0, 1.0)
                 risk_aversion = st.slider("Risk Aversion", 0.5, 10.0, 3.0, 0.5)
+                objective_labels = {
+                    "Risk-adjusted utility": "maximum_utility",
+                    "Target volatility": "target_volatility",
+                    "Minimum expected shortfall": "minimum_cvar",
+                    "Minimum variance": "minimum_variance",
+                }
+                objective_label = st.selectbox(
+                    "Portfolio construction goal",
+                    list(objective_labels),
+                    help="The mandate constraints are applied independently of the selected goal.",
+                )
+                optimization_target_volatility = st.slider(
+                    "Target annual volatility",
+                    0.02,
+                    0.60,
+                    0.18,
+                    0.01,
+                    format="%.2f",
+                    disabled=objective_labels[objective_label] != "target_volatility",
+                )
+                optimization_cvar_confidence = st.slider(
+                    "Expected shortfall confidence",
+                    0.80,
+                    0.99,
+                    0.95,
+                    0.01,
+                    disabled=objective_labels[objective_label] != "minimum_cvar",
+                )
+                apply_strategy_rulebook = st.checkbox(
+                    "Apply active Client Mandate / Strategy Rulebook",
+                    value=False,
+                    help="Uses saved exclusions, approval, sector, cash, beta, position and turnover rules.",
+                )
+                return_model_labels = {
+                    "Conservative historical estimate": "shrunk_historical",
+                    "Black-Litterman views": "black_litterman",
+                }
+                return_model_label = st.selectbox(
+                    "Expected-return estimate",
+                    list(return_model_labels),
+                    help=(
+                        "Black-Litterman uses the entered current weights as its neutral reference; "
+                        "they are not claimed to be market-cap weights."
+                    ),
+                )
+                black_litterman_views_text = st.text_input(
+                    "Black-Litterman absolute views",
+                    value="",
+                    placeholder="MSFT=10, NVDA=12",
+                    help="Expected annual returns in percent. Leave empty for equilibrium returns only.",
+                    disabled=return_model_labels[return_model_label] != "black_litterman",
+                )
+                black_litterman_confidence = st.slider(
+                    "View confidence",
+                    0.05,
+                    1.00,
+                    0.60,
+                    0.05,
+                    disabled=return_model_labels[return_model_label] != "black_litterman",
+                )
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
                 n_simulations = st.slider("Simulation Count", 200, 15000, 10000, 100)
                 random_seed = st.number_input("Seed", min_value=0, value=42, step=1)
@@ -1915,6 +2388,69 @@ def _render_quant_configuration() -> None:
                 jump_intensity = st.slider("Jump Intensity (λ)", 0.0, 5.0, 1.5, 0.1)
                 jump_mean = st.slider("Mean Jump Size (μ_J)", -0.5, 0.0, -0.05, 0.01)
                 jump_volatility = st.slider("Jump Volatility (σ_J)", 0.0, 0.3, 0.08, 0.01)
+            with st.expander("Execution realism and point-in-time validation", expanded=False):
+                execution_col, history_col = st.columns(2, gap="large")
+                with execution_col:
+                    execution_model_enabled = st.checkbox(
+                        "Model liquidity, spread, and market impact",
+                        value=True,
+                    )
+                    half_spread_bps = st.number_input(
+                        "Estimated half-spread (bps)", min_value=0.0,
+                        value=3.0, step=0.5,
+                        disabled=not execution_model_enabled,
+                    )
+                    market_impact_bps = st.number_input(
+                        "Square-root impact coefficient (bps)", min_value=0.0,
+                        value=20.0, step=1.0,
+                        disabled=not execution_model_enabled,
+                    )
+                    max_adv_participation_pct = st.number_input(
+                        "Maximum trade / 30-day ADV (%)",
+                        min_value=0.1, max_value=100.0, value=5.0, step=0.5,
+                        disabled=not execution_model_enabled,
+                    )
+                    minimum_trade_value = st.number_input(
+                        "Minimum trade value ($)", min_value=0.0,
+                        value=100.0, step=50.0,
+                    )
+                    maximum_holdings_input = st.number_input(
+                        "Maximum executed holdings (0 = no additional cap)",
+                        min_value=0, value=0, step=1,
+                    )
+                    lot_size = st.number_input(
+                        "Share lot size", min_value=0.0001,
+                        value=1.0, step=1.0,
+                    )
+                with history_col:
+                    tax_lots_file = st.file_uploader(
+                        "Tax lots CSV (optional)", type=["csv"],
+                        key="wharton_quant_tax_lots_csv",
+                        help=(
+                            "Columns: Ticker, Shares, Cost Basis Per Share, Acquired At. "
+                            "Lots are selected by lowest estimated tax per sold share."
+                        ),
+                    )
+                    short_term_tax_rate_pct = st.number_input(
+                        "Short-term tax rate (%)", min_value=0.0,
+                        max_value=100.0, value=35.0, step=1.0,
+                    )
+                    long_term_tax_rate_pct = st.number_input(
+                        "Long-term tax rate (%)", min_value=0.0,
+                        max_value=100.0, value=20.0, step=1.0,
+                    )
+                    universe_membership_file = st.file_uploader(
+                        "Point-in-time universe CSV (optional)", type=["csv"],
+                        key="wharton_quant_pit_universe_csv",
+                        help=(
+                            "Long form: Date, Ticker, Is Member. Wide form: Date plus one "
+                            "boolean column per ticker. Include the union of historical constituents."
+                        ),
+                    )
+                    st.caption(
+                        "Membership is lagged by one trading observation and forward-filled only; "
+                        "future membership is never back-filled."
+                    )
             st.markdown("#### Manual Individual Bonds")
             st.caption(
                 "Add bonds without exchange tickers. Their explicit weights reduce the market sleeve. "
@@ -1967,6 +2503,39 @@ def _render_quant_configuration() -> None:
             manual_bonds = parse_manual_bond_rows(manual_bond_rows, as_of=end_date)
             tickers = _parse_tickers(tickers_text, allow_empty=bool(manual_bonds))
             weights = _parse_weights(weights_text, tickers) if tickers else np.asarray([], dtype=float)
+            strategy_rulebook = None
+            optimizer_asset_metadata = None
+            black_litterman_views = (
+                _parse_black_litterman_views(black_litterman_views_text)
+                if return_model_labels[return_model_label] == "black_litterman"
+                else {}
+            )
+            tax_lots = None
+            if tax_lots_file is not None:
+                tax_lots = _load_quant_modules()["optimization"].parse_tax_lots(
+                    pd.read_csv(BytesIO(tax_lots_file.getvalue()))
+                )
+            universe_membership = None
+            if universe_membership_file is not None:
+                universe_membership = _load_quant_modules()[
+                    "optimization"
+                ].parse_point_in_time_membership(
+                    pd.read_csv(BytesIO(universe_membership_file.getvalue()))
+                )
+            if apply_strategy_rulebook:
+                strategy_data = _load_strategy_workspace_data()
+                from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
+
+                raw_strategy = _strategy_payload(strategy_data.get("strategy_record"))
+                if not raw_strategy:
+                    raise ValueError(
+                        "No active Strategy Rulebook is saved. Configure one in Strategy & Decisions first."
+                    )
+                strategy_rulebook = normalize_strategy_rulebook(
+                    raw_strategy,
+                    _strategy_payload(strategy_data.get("mandate_record")),
+                )
+                optimizer_asset_metadata = _build_optimizer_asset_metadata(strategy_data)
             with st.spinner("Fetching data and running full quant stack..."):
                 st.session_state[QUANT_RESULT_KEY] = _compute_quant_run(
                     tickers=tickers, weights=weights, benchmark_ticker=benchmark_ticker,
@@ -1978,6 +2547,29 @@ def _render_quant_configuration() -> None:
                     random_seed=int(random_seed),
                     jump_intensity=float(jump_intensity), jump_mean=float(jump_mean), jump_volatility=float(jump_volatility),
                     manual_bonds=manual_bonds,
+                    optimization_objective=objective_labels[objective_label],
+                    optimization_target_volatility=float(optimization_target_volatility),
+                    optimization_cvar_confidence=float(optimization_cvar_confidence),
+                    strategy_rulebook=strategy_rulebook,
+                    optimizer_asset_metadata=optimizer_asset_metadata,
+                    optimization_expected_return_model=return_model_labels[return_model_label],
+                    black_litterman_views=black_litterman_views,
+                    black_litterman_confidence=float(black_litterman_confidence),
+                    execution_model_enabled=bool(execution_model_enabled),
+                    half_spread_bps=float(half_spread_bps),
+                    market_impact_bps=float(market_impact_bps),
+                    max_adv_participation=float(max_adv_participation_pct) / 100.0,
+                    minimum_trade_value=float(minimum_trade_value),
+                    maximum_holdings=(
+                        int(maximum_holdings_input)
+                        if int(maximum_holdings_input) > 0
+                        else None
+                    ),
+                    lot_size=float(lot_size),
+                    tax_lots=tax_lots,
+                    short_term_tax_rate=float(short_term_tax_rate_pct) / 100.0,
+                    long_term_tax_rate=float(long_term_tax_rate_pct) / 100.0,
+                    universe_membership=universe_membership,
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -2051,6 +2643,289 @@ def _render_benchmark_analytics(result: dict, advanced: bool) -> None:
             st.write(f"Observations: **{metrics.get('observations', 0)}**  |  Avg correlation: **{_fmt_float(metrics.get('avg_correlation'))}**  |  Effective holdings: **{_fmt_float(metrics.get('effective_holdings'))}**")
             st.dataframe(result["correlation"].round(3), use_container_width=True)
             st.dataframe(result["returns"].tail(15), use_container_width=True)
+
+
+def _render_mandate_aware_optimizer(result: dict, advanced: bool) -> None:
+    optimized = result.get("mandate_aware", {})
+    st.markdown("### Mandate-Aware Portfolio Construction")
+    objective_labels = {
+        "maximum_utility": "Risk-adjusted utility",
+        "target_volatility": "Target volatility",
+        "minimum_cvar": "Minimum expected shortfall",
+        "minimum_variance": "Minimum variance",
+        "minimum_tracking_error": "Minimum tracking error",
+    }
+    _render_mandate_aware_optimizer_body(
+        result,
+        advanced,
+        optimized,
+        objective_labels,
+    )
+
+
+_QUANT_RESEARCH_MODULES = {
+    "Methodology & Validation",
+    "Models & Signals",
+    "News Sentiment",
+    "Backtest",
+}
+
+
+def _run_quant_research_stack(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach the network/model research stack only when its UI is requested."""
+    started_at = time.perf_counter()
+    analytics = importlib.import_module("src.analytics")
+    returns = pd.DataFrame(result["returns"])
+    portfolio_returns = pd.Series(result["portfolio_returns"], dtype=float)
+    inputs = dict(result.get("inputs", {}))
+    requested_tickers = [str(item) for item in result.get("requested_tickers", [])]
+    news_tickers = [ticker for ticker in requested_tickers if ticker in returns.columns]
+    config = {
+        "tickers": list(returns.columns),
+        "news_tickers": news_tickers,
+        "security_types": dict(result.get("security_types", {})),
+        "weights": np.asarray(result.get("weights", []), dtype=float).tolist(),
+        "start_date": date.fromisoformat(str(inputs["start_date"])),
+        "end_date": date.fromisoformat(str(inputs["end_date"])),
+        "risk_free_rate": float(inputs.get("risk_free_rate", 0.03)),
+        "portfolio_metrics": dict(result.get("metrics", {})),
+        "transaction_cost_bps": float(inputs.get("transaction_cost_bps", 10.0)),
+        "news_max_items": 80,
+        "news_api_key": "",
+    }
+    try:
+        config["news_api_key"] = str(
+            st.secrets.get("NEWSAPI_KEY")
+            or st.secrets.get("NEWS_API_KEY")
+            or ""
+        )
+    except Exception:
+        pass
+
+    try:
+        pipeline = _load_modular_pipeline()
+        quant_stack = pipeline.run_quant_stack(
+            portfolio_returns=portfolio_returns,
+            returns_df=returns,
+            config=config,
+            user_id=st.session_state.get("user_id"),
+        )
+    except Exception as stack_error:
+        quant_stack = {"_error": str(stack_error)}
+
+    backtest = (
+        quant_stack.get("backtest", {})
+        if isinstance(quant_stack, dict) and "_error" not in quant_stack
+        else {}
+    )
+    result["quant_stack"] = quant_stack
+    result["model_validation"] = analytics.build_model_validation_report(
+        portfolio_returns=portfolio_returns,
+        simulation_stats=dict(result.get("simulation_stats") or {}),
+        backtest=backtest,
+        risk_free_rate=float(inputs.get("risk_free_rate", 0.03)),
+        random_seed=int(inputs.get("random_seed", 42)),
+    )
+    result.setdefault("runtime", {})["research_stack_seconds"] = float(
+        time.perf_counter() - started_at
+    )
+    return result
+
+
+def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach full seeded simulation paths only when a simulation view is opened."""
+    started_at = time.perf_counter()
+    analytics = importlib.import_module("src.analytics")
+    simulation = importlib.import_module("src.simulation")
+    inputs = dict(result.get("inputs", {}))
+    portfolio_returns = pd.Series(result["portfolio_returns"], dtype=float)
+    metrics = dict(result.get("metrics", {}))
+    current_value = float(inputs.get("current_value", 100_000.0))
+    simulation_days = int(inputs.get("simulation_days", 252))
+    n_simulations = int(inputs.get("n_simulations", 10_000))
+    random_seed = int(inputs.get("random_seed", 42))
+
+    price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
+        current_value=current_value,
+        # GBM expects arithmetic drift; CAGR remains a reporting metric.
+        expected_return=float(portfolio_returns.mean() * 252.0),
+        volatility=float(metrics.get("volatility", 0.0)),
+        time_horizon=simulation_days,
+        n_simulations=n_simulations,
+        random_seed=random_seed,
+    )
+    adv_price_paths, adv_simulation_stats = (
+        simulation.run_advanced_monte_carlo_simulation(
+            current_value=current_value,
+            expected_return=float(metrics.get("annualized_return", 0.0)),
+            volatility=float(metrics.get("volatility", 0.0)),
+            time_horizon=simulation_days,
+            n_simulations=n_simulations,
+            random_seed=random_seed,
+            jump_intensity=float(inputs.get("jump_intensity", 1.5)),
+            jump_mean=float(inputs.get("jump_mean", -0.05)),
+            jump_volatility=float(inputs.get("jump_volatility", 0.08)),
+        )
+    )
+    result["price_paths"] = price_paths
+    result["simulation_stats"] = simulation_stats
+    result["adv_price_paths"] = adv_price_paths
+    result["adv_simulation_stats"] = adv_simulation_stats
+
+    quant_stack = result.get("quant_stack")
+    backtest = (
+        quant_stack.get("backtest", {})
+        if isinstance(quant_stack, dict) and "_error" not in quant_stack
+        else {}
+    )
+    result["model_validation"] = analytics.build_model_validation_report(
+        portfolio_returns=portfolio_returns,
+        simulation_stats=simulation_stats,
+        backtest=backtest,
+        risk_free_rate=float(inputs.get("risk_free_rate", 0.03)),
+        random_seed=random_seed,
+    )
+    result.setdefault("runtime", {})["simulation_seconds"] = float(
+        time.perf_counter() - started_at
+    )
+    return result
+
+
+def _render_mandate_aware_optimizer_body(
+    result: dict,
+    advanced: bool,
+    optimized: dict,
+    objective_labels: Mapping[str, str],
+) -> None:
+    objective = str(optimized.get("objective") or "unknown")
+    st.caption(
+        f"Goal: {objective_labels.get(objective, objective)} · "
+        f"Strategy Rulebook applied: {'yes' if result.get('inputs', {}).get('strategy_rulebook_applied') else 'no'}"
+    )
+    if not optimized.get("success"):
+        st.error(
+            "No valid target portfolio was produced. "
+            f"{optimized.get('message', 'The configured constraints are infeasible or incomplete.')}"
+        )
+        for warning in optimized.get("warnings", []):
+            st.warning(str(warning))
+        return
+
+    kpis = st.columns(6)
+    kpis[0].metric("Expected Return", _fmt_pct(optimized.get("expected_return")))
+    kpis[1].metric("Volatility", _fmt_pct(optimized.get("volatility")))
+    kpis[2].metric("Sharpe", _fmt_float(optimized.get("sharpe_ratio")))
+    kpis[3].metric("Daily CVaR", _fmt_pct(optimized.get("historical_cvar_daily")))
+    kpis[4].metric("Turnover", _fmt_pct(optimized.get("turnover")))
+    kpis[5].metric("Cost Drag", _fmt_pct(optimized.get("transaction_cost_drag")))
+
+    symbols = list(optimized.get("symbols", []))
+    current = optimized.get("current_weights")
+    if current is None:
+        current = np.zeros(len(symbols), dtype=float)
+    weights_frame = _weights_frame(symbols, current, optimized.get("weights", []))
+    st.markdown("#### Recommended Allocation and Trades")
+    _render_weight_table(weights_frame)
+    st.bar_chart(
+        weights_frame.set_index("Ticker")[["Current Weight", "Optimized Weight"]],
+        use_container_width=True,
+        height=360,
+    )
+
+    execution_plan = result.get("execution_plan")
+    if isinstance(execution_plan, dict):
+        st.markdown("#### Executable Trade Plan")
+        if execution_plan.get("success"):
+            execution_kpis = st.columns(5)
+            execution_kpis[0].metric(
+                "Holdings", int(execution_plan.get("holding_count", 0))
+            )
+            execution_kpis[1].metric(
+                "Residual Cash", _fmt_pct(execution_plan.get("cash_weight"))
+            )
+            execution_kpis[2].metric(
+                "Execution Cost", _fmt_pct(execution_plan.get("total_execution_cost_drag"))
+            )
+            execution_kpis[3].metric(
+                "Estimated Tax", f"${float(execution_plan.get('estimated_tax', 0.0)):,.0f}"
+            )
+            execution_kpis[4].metric(
+                "Target Difference", _fmt_pct(execution_plan.get("tracking_difference_l1"))
+            )
+            trade_rows = []
+            for trade in execution_plan.get("trades", []):
+                trade_rows.append({
+                    "Ticker": trade.get("symbol"),
+                    "Side": trade.get("side"),
+                    "Shares": trade.get("shares"),
+                    "Price": trade.get("price"),
+                    "Notional": trade.get("notional"),
+                    "ADV Participation": trade.get("adv_participation"),
+                    "Commission": trade.get("commission_cost"),
+                    "Spread": trade.get("spread_cost"),
+                    "Market Impact": trade.get("market_impact_cost"),
+                    "Realized Gain": trade.get("realized_gain"),
+                    "Estimated Tax": trade.get("estimated_tax"),
+                })
+            trades_frame = pd.DataFrame(trade_rows)
+            if trades_frame.empty:
+                st.info("No trade clears the configured lot and minimum-notional rules.")
+            else:
+                display_trades = trades_frame.copy()
+                display_trades["ADV Participation"] = display_trades[
+                    "ADV Participation"
+                ].map(_fmt_pct)
+                for column in (
+                    "Price", "Notional", "Commission", "Spread",
+                    "Market Impact", "Realized Gain", "Estimated Tax",
+                ):
+                    display_trades[column] = display_trades[column].map(
+                        lambda value: f"${float(value or 0.0):,.2f}"
+                    )
+                st.dataframe(display_trades, use_container_width=True, hide_index=True)
+            for warning in execution_plan.get("warnings", []):
+                st.warning(str(warning))
+            if advanced:
+                with st.expander("Tax-lot selections and execution assumptions"):
+                    st.json({
+                        "assumptions": execution_plan.get("assumptions", {}),
+                        "tax_lot_allocations": {
+                            str(trade.get("symbol")): trade.get("tax_lot_allocations", [])
+                            for trade in execution_plan.get("trades", [])
+                            if trade.get("tax_lot_allocations")
+                        },
+                    })
+        else:
+            st.warning(
+                "Executable trade plan was not available: "
+                f"{execution_plan.get('message', 'missing execution inputs')}"
+            )
+
+    report = pd.DataFrame(optimized.get("constraint_report", []))
+    if not report.empty:
+        st.markdown("#### Constraint Audit")
+        report_view = report.copy()
+        for column in ("actual", "minimum", "maximum"):
+            if column in report_view:
+                report_view[column] = report_view[column].map(
+                    lambda value: "—" if value is None or pd.isna(value) else _fmt_pct(value)
+                )
+        st.dataframe(report_view, use_container_width=True, hide_index=True)
+        binding = report[report["binding"] == True]  # noqa: E712
+        if not binding.empty:
+            st.info(
+                "Binding constraints: " + ", ".join(binding["name"].astype(str))
+            )
+    for warning in optimized.get("warnings", []):
+        st.warning(str(warning))
+    if advanced:
+        with st.expander("Solver and Estimation Diagnostics"):
+            st.json({
+                "solver": optimized.get("solver"),
+                "status": optimized.get("status"),
+                "expected_return_model": optimized.get("expected_return_model"),
+                "estimation": optimized.get("estimation", {}),
+            })
 
 
 def _render_cost_aware_rebalance(result: dict, advanced: bool) -> None:
@@ -2269,11 +3144,6 @@ def _render_models_signals(result: dict) -> None:
 def _render_robustness_check(result: dict) -> None:
     """Render Robustness Validation."""
     st.markdown("### Robustness Check (Walk-Forward Validation)")
-    qs = result.get("quant_stack", {})
-    if not qs:
-        st.info("Run the Quant Engine to populate data.")
-        return
-        
     portfolio_timeseries = result.get("portfolio_timeseries", pd.DataFrame())
     if portfolio_timeseries.empty or "cumulative_return" not in portfolio_timeseries.columns:
         st.warning("Portfolio returns not available for robustness validation.")
@@ -2425,11 +3295,6 @@ def _render_backtest(result: dict) -> None:
 def _render_run_history(result: dict) -> None:
     """Render run history from modular stack."""
     st.markdown("### Run History")
-    qs = result.get("quant_stack", {})
-    if not qs:
-        st.info("Run the Quant Engine to populate history.")
-        return
-
     try:
         history_mod = _load_modular_history()
         records = history_mod.list_run_records(base_dir="data/run_history", limit=40, user_id=st.session_state.get("user_id"))
@@ -2811,14 +3676,23 @@ def _render_efficient_frontier(result: dict) -> None:
     metrics = result.get("metrics", {})
     inputs = result.get("inputs", {})
     risk_free_rate = float(inputs.get("risk_free_rate", 0.03))
+    requested_max_weight = float(inputs.get("requested_max_weight", inputs.get("max_weight", 1.0)))
+    effective_max_weight = float(inputs.get("max_weight", requested_max_weight))
+    if effective_max_weight > requested_max_weight + 1e-12:
+        st.warning(
+            "The requested maximum position weight was infeasible for this universe; "
+            f"the displayed run used {effective_max_weight:.2%}."
+        )
 
     # Optimal portfolio KPIs
     st.markdown("#### Optimal Portfolio Comparison")
     comp_data = []
     for label, d, color in [
-        (" Current", {"expected_return": metrics.get("annualized_return", 0),
+        (" Current", result.get("current_optimization_metrics", {
+                        "expected_return": metrics.get("annualized_return", 0),
                         "volatility": metrics.get("volatility", 0),
-                        "sharpe_ratio": metrics.get("sharpe_ratio", 0)}, "#64748b"),
+                        "sharpe_ratio": metrics.get("sharpe_ratio", 0),
+                    }), "#64748b"),
         (" Max Sharpe", ms, "#22c55e"),
         (" Min Variance", mv, "#3b82f6"),
         (" Cost-Aware", ca, "#f59e0b"),
@@ -2831,13 +3705,68 @@ def _render_efficient_frontier(result: dict) -> None:
         })
     st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
 
-    # Compute frontier
-    try:
-        ef_module = importlib.import_module("src.optimization.efficient_frontier")
-        frontier_points = ef_module.calculate_efficient_frontier(returns_df, n_points=50)
-    except Exception as e:
-        st.warning(f"Could not compute efficient frontier: {e}")
-        frontier_points = []
+    validation = result.get("optimization_validation")
+    if isinstance(validation, dict) and validation.get("metrics"):
+        st.markdown("#### Rolling Out-of-Sample Validation")
+        validation_metrics = validation["metrics"]
+        equal_metrics = validation.get("equal_weight_metrics", {})
+        failed_windows = [
+            window
+            for window in validation.get("windows", [])
+            if not window.get("optimizer_success", False)
+        ]
+        if failed_windows:
+            st.warning(
+                f"The optimizer failed in {len(failed_windows)} rolling window(s); "
+                "those windows retained the previously drifted allocation."
+            )
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Portfolio": "Optimized after costs",
+                    "Annualized Return": _fmt_pct(validation_metrics.get("annualized_return")),
+                    "Volatility": _fmt_pct(validation_metrics.get("volatility")),
+                    "Sharpe": _fmt_float(validation_metrics.get("sharpe_ratio")),
+                    "Max Drawdown": _fmt_pct(validation_metrics.get("max_drawdown")),
+                    "Turnover": _fmt_pct(validation_metrics.get("total_turnover")),
+                },
+                {
+                    "Portfolio": "Equal Weight after costs",
+                    "Annualized Return": _fmt_pct(equal_metrics.get("annualized_return")),
+                    "Volatility": _fmt_pct(equal_metrics.get("volatility")),
+                    "Sharpe": _fmt_float(equal_metrics.get("sharpe_ratio")),
+                    "Max Drawdown": _fmt_pct(equal_metrics.get("max_drawdown")),
+                    "Turnover": _fmt_pct(equal_metrics.get("total_turnover")),
+                },
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
+        if validation.get("survivorship_bias_controlled"):
+            st.success(
+                "Point-in-time universe control is active. Membership is lagged by "
+                f"{int(validation.get('membership_lag_periods') or 1)} observation(s), "
+                "and each target uses only the preceding training window."
+            )
+        else:
+            st.warning(
+                "The selected universe is current rather than point-in-time; this rolling "
+                "test remains exposed to universe-selection and survivorship bias."
+            )
+        st.caption(
+            "The following quarter is evaluated after commission, spread, and market-impact "
+            "costs when liquidity inputs are available. The equal-weight line is a neutral "
+            "comparator and may not satisfy the active mandate."
+        )
+    elif isinstance(validation, dict) and validation.get("success") is False:
+        st.warning(
+            "Rolling out-of-sample validation was not available: "
+            f"{validation.get('error', 'the optimizer did not produce valid windows')}"
+        )
+
+    frontier_points = result.get("frontier", [])
+    if not frontier_points:
+        st.info("Run the Quant Engine again to calculate the cached efficient frontier.")
 
     if HAS_PLOTLY and frontier_points:
         frontier_returns = [pt["return"] for pt in frontier_points]
@@ -2901,8 +3830,8 @@ def _render_efficient_frontier(result: dict) -> None:
 
         # 3D surface
         try:
-            cloud_df = ef_module.sample_portfolio_cloud(returns_df, n_samples=2000, risk_free_rate=risk_free_rate)
-            if not cloud_df.empty:
+            cloud_df = result.get("portfolio_cloud")
+            if isinstance(cloud_df, pd.DataFrame) and not cloud_df.empty:
                 st.markdown("#### 3D Risk-Return-Sharpe Surface")
                 fig_3d = go.Figure(data=[go.Scatter3d(
                     x=cloud_df["volatility"], y=cloud_df["expected_return"],
@@ -2983,10 +3912,9 @@ def _render_risk_cockpit(result: dict) -> None:
 
     clean_returns = pd.Series(portfolio_returns).dropna().astype(float)
     
-    # Import risk metrics dynamically and reload to avoid stale cache in Streamlit
+    # Import risk metrics dynamically only when this panel is rendered.
     try:
         risk_mod = importlib.import_module("src.analytics.risk_metrics")
-        importlib.reload(risk_mod)
     except ImportError as e:
         st.error(f"Failed to load risk module: {e}")
         return
@@ -4043,6 +4971,36 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
         return
 
     st.success(f"Latest run: {result.get('generated_at', 'unknown')}")
+    runtime = dict(result.get("runtime", {}))
+    runtime_parts = []
+    if runtime.get("core_seconds") is not None:
+        runtime_parts.append(f"portfolio engine {float(runtime['core_seconds']):.2f}s")
+    if runtime.get("simulation_seconds") is not None:
+        runtime_parts.append(f"simulations {float(runtime['simulation_seconds']):.2f}s")
+    else:
+        runtime_parts.append("simulations load only when opened")
+    if runtime.get("research_stack_seconds") is not None:
+        runtime_parts.append(
+            f"research stack {float(runtime['research_stack_seconds']):.2f}s"
+        )
+    else:
+        runtime_parts.append("research stack loads only when opened")
+    st.caption("Run time: " + " · ".join(runtime_parts))
+    runtime_phases = dict(runtime.get("phases_seconds", {}))
+    if runtime_phases:
+        with st.expander("Performance breakdown", expanded=False):
+            st.dataframe(
+                pd.DataFrame([
+                    {"Phase": name.replace("_", " ").title(), "Seconds": float(seconds)}
+                    for name, seconds in runtime_phases.items()
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "These are server-side Python phases. Container wake-up and browser rendering "
+                "are measured separately by the Runtime & build panel."
+            )
     advanced = st.checkbox("Show advanced diagnostics", key=diag_key)
     requested_max = float(result.get("inputs", {}).get("requested_max_weight", result.get("inputs", {}).get("max_weight", 1.0)))
     effective_max = float(result.get("inputs", {}).get("max_weight", requested_max))
@@ -4091,12 +5049,32 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             st.success("Stack ")
         elif qs and "_error" in qs:
             st.error("Stack ")
+        else:
+            st.caption("Research stack: on demand")
+
+    result_updated = False
+    if (
+        selected in {"Simulation", "Methodology & Validation"}
+        and result.get("price_paths") is None
+    ):
+        with st.spinner("Running the full seeded simulation set..."):
+            result = _run_quant_simulations(result)
+        result_updated = True
+    if selected in _QUANT_RESEARCH_MODULES and result.get("quant_stack") is None:
+        with st.spinner("Running models, causal backtest, and news research..."):
+            result = _run_quant_research_stack(result)
+        result_updated = True
+    if result_updated:
+        st.session_state[QUANT_RESULT_KEY] = result
+        st.rerun()
 
     with content_col:
         if selected == "Methodology & Validation":
             _render_methodology_validation(result)
         elif selected == "Benchmark Analytics":
             _render_benchmark_analytics(result, advanced)
+        elif selected == "Mandate-Aware Optimizer":
+            _render_mandate_aware_optimizer(result, advanced)
         elif selected == "Cost-Aware Rebalance":
             _render_cost_aware_rebalance(result, advanced)
         elif selected == "Performance Attribution":
@@ -4263,6 +5241,35 @@ def _strategy_payload(record: Any) -> dict[str, Any]:
         return {}
     payload = record.get("payload")
     return dict(payload) if isinstance(payload, dict) else dict(record)
+
+
+def _build_optimizer_asset_metadata(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Combine thesis evidence and approval decisions for optimizer constraints."""
+    metadata: dict[str, dict[str, Any]] = {}
+    approved_records = data.get("approved_securities", [])
+    if isinstance(approved_records, list):
+        for record in approved_records:
+            if not isinstance(record, dict) or not record.get("ticker"):
+                continue
+            ticker = str(record["ticker"]).strip().upper()
+            metadata[ticker] = {
+                **_strategy_payload(record),
+                "approved": bool(record.get("approved", False)),
+            }
+    thesis_records = data.get("theses", [])
+    if isinstance(thesis_records, list):
+        for record in thesis_records:
+            if not isinstance(record, dict) or not record.get("ticker"):
+                continue
+            ticker = str(record["ticker"]).strip().upper()
+            thesis = _strategy_payload(record)
+            existing = metadata.setdefault(ticker, {"approved": False})
+            existing.update({
+                key: thesis[key]
+                for key in ("sector", "asset_type", "security_type", "beta", "tags")
+                if key in thesis
+            })
+    return metadata
 
 
 def _finite_form_number(value: Any, default: float = 0.0) -> float:
@@ -10542,20 +11549,27 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
 
 def render_wharton_cockpit() -> None:
     _inject_cockpit_styles()
-    init_db()
 
     profile = _get_current_profile()
     if profile is None:
         _render_login()
         return
 
+    # Full schema and storage initialization is only needed inside the
+    # authenticated cockpit.  Keeping it off the public login route removes a
+    # network round trip and table audit from the first interaction.
+    init_db()
     _render_header(profile)
 
     # Fetch result from state if available.
     result = st.session_state.get(QUANT_RESULT_KEY, {})
 
-    def _with_quant_context(renderer):
+    def _with_quant_context(renderer, *, require_simulation: bool = False):
         def _render() -> None:
+            if require_simulation and result and result.get("price_paths") is None:
+                with st.spinner("Running the full seeded simulation set..."):
+                    _run_quant_simulations(result)
+                    st.session_state[QUANT_RESULT_KEY] = result
             _render_custom_quant_context(result)
             renderer(result)
 
@@ -10578,8 +11592,8 @@ def render_wharton_cockpit() -> None:
         ("Regime Detection", _with_quant_context(_render_regime_detection)),
         ("Scenario Playground", _with_quant_context(_render_scenario_playground)),
         ("Efficient Frontier", _with_quant_context(_render_efficient_frontier)),
-        ("Monte Carlo", _with_quant_context(_render_monte_carlo)),
-        ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo)),
+        ("Monte Carlo", _with_quant_context(_render_monte_carlo, require_simulation=True)),
+        ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo, require_simulation=True)),
         ("Advanced Analytics", _with_quant_context(_render_advanced_analytics)),
         ("Mind Map", _render_mindmap),
         ("Sub-Projects", lambda: _render_subprojects(profile)),

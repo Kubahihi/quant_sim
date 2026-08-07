@@ -20,17 +20,12 @@ except ImportError:
     BCRYPT_AVAILABLE = False
 
 from .database import (
+    authenticate_user_once,
     init_auth_database,
-    create_user,
-    get_user_by_username,
-    get_user_by_id,
     get_user_by_session_token,
-    create_session,
+    register_user_once,
     revoke_session,
     revoke_all_user_sessions,
-    user_exists,
-    log_login_attempt,
-    get_recent_failed_attempts,
 )
 
 
@@ -174,21 +169,21 @@ def register_user(
     if confirm_password and password != confirm_password:
         errors.append("Passwords do not match")
     
-    # Check if username exists
-    if user_exists(username=username):
-        errors.append("Username already exists")
-    
-    # Check if email exists
-    if user_exists(email=email):
-        errors.append("Email already registered")
-    
     if errors:
         return None, errors
-    
-    # Hash password and create user
-    password_hash = hash_password(password)
+
     try:
-        user = create_user(username, email, password_hash)
+        user, status = register_user_once(
+            username,
+            email,
+            lambda: hash_password(password),
+        )
+        if status == "username_exists":
+            return None, ["Username already exists"]
+        if status == "email_exists":
+            return None, ["Email already registered"]
+        if user is None:
+            return None, ["Registration failed"]
         return user, []
     except Exception as e:
         return None, [f"Registration failed: {str(e)}"]
@@ -217,29 +212,16 @@ def login_user(
     # Initialize database if needed
     init_auth_database()
     
-    # Check for brute-force (max 5 failed attempts in 10 minutes)
-    if get_recent_failed_attempts(username) >= 5:
-        return None, None, ["Too many failed attempts. Please try again in 10 minutes."]
-
-    # Get user
-    user = get_user_by_username(username)
-    if not user:
-        log_login_attempt(username, False)
-        return None, None, ["Invalid username or password"]
-    
-    # Verify password
-    is_valid = verify_password(password, user["password_hash"])
-    log_login_attempt(username, is_valid)
-
-    if not is_valid:
-        return None, None, ["Invalid username or password"]
-    
-    # Create session
     try:
-        token = create_session(user["id"])
-        # Remove password_hash from returned user dict
-        user_safe = {k: v for k, v in user.items() if k != "password_hash"}
-        return token, user_safe, []
+        token, user, status = authenticate_user_once(
+            username,
+            lambda password_hash: verify_password(password, password_hash),
+        )
+        if status == "rate_limited":
+            return None, None, ["Too many failed attempts. Please try again in 10 minutes."]
+        if status != "ok" or token is None or user is None:
+            return None, None, ["Invalid username or password"]
+        return token, user, []
     except Exception as e:
         return None, None, [f"Login failed: {str(e)}"]
 
@@ -261,9 +243,10 @@ def get_current_user(session_token: str) -> Optional[dict[str, Any]]:
     if not session_token:
         return None
     
-    # Initialize database if needed
+    # Initialize database if needed. The database layer memoizes successful
+    # schema initialization per database path.
     init_auth_database()
-    
+
     return get_user_by_session_token(session_token)
 
 

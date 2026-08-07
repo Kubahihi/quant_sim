@@ -391,7 +391,7 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, t
     monkeypatch.setattr(
         src.optimization,
         "optimize_maximum_sharpe",
-        lambda returns, risk_free_rate=0.0: {
+        lambda returns, risk_free_rate=0.0, **kwargs: {
             "success": True,
             "symbols": list(returns.columns),
             "weights": [1.0 / len(returns.columns)] * len(returns.columns),
@@ -400,8 +400,16 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, t
             "sharpe_ratio": 0.62,
         },
     )
-    monkeypatch.setattr(src.optimization, "calculate_efficient_frontier", lambda returns, n_points=30: [])
-    monkeypatch.setattr(src.optimization, "sample_portfolio_cloud", lambda returns, n_samples, risk_free_rate=0.0: [])
+    monkeypatch.setattr(
+        src.optimization,
+        "calculate_efficient_frontier",
+        lambda returns, n_points=30, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        src.optimization,
+        "sample_portfolio_cloud",
+        lambda returns, n_samples, risk_free_rate=0.0, **kwargs: [],
+    )
     monkeypatch.setattr(
         src.simulation,
         "run_monte_carlo_simulation",
