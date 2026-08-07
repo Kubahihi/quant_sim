@@ -5,7 +5,8 @@ import os
 import re
 from typing import Any, Dict, Mapping, Optional
 
-from openai import OpenAI
+# openai is an optional dependency — imported lazily inside generate_ai_review()
+# so that importing this module never fails when the package is absent.
 
 
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -158,6 +159,8 @@ def generate_ai_review(
         }
 
     try:
+        from openai import OpenAI  # noqa: PLC0415 — intentional lazy import
+
         client = OpenAI(
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",

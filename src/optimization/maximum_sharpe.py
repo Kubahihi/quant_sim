@@ -6,6 +6,18 @@ from loguru import logger
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+from typing import Dict, Optional
+
+from ._shared import _clean_returns
+
+
+TRADING_DAYS = 252.0
+
+
+def _shrink_expected_returns(sample_mean: np.ndarray, shrinkage: float) -> np.ndarray:
+    shrinkage = float(np.clip(shrinkage, 0.0, 1.0))
+    grand_mean = float(np.mean(sample_mean))
+    return (1.0 - shrinkage) * sample_mean + shrinkage * grand_mean
 
 from .constraints import build_weight_bounds, validate_weight_solution
 from .estimators import (
