@@ -7,6 +7,7 @@ from io import BytesIO
 import hashlib
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -20,6 +21,9 @@ import bcrypt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
@@ -1863,8 +1867,18 @@ def _compute_quant_run(
     mark_runtime_phase("analytics")
     shared_estimates = optimization.estimate_portfolio_inputs(returns)
     effective_max_weight = max(float(max_weight), 1.0 / float(returns.shape[1]))
-    min_variance = optimization.optimize_minimum_variance(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
-    max_sharpe = optimization.optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate, max_weight=effective_max_weight)
+    min_variance = optimization.optimize_minimum_variance(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
+    max_sharpe = optimization.optimize_maximum_sharpe(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
     cost_aware = optimization.optimize_cost_aware_rebalance(
         returns=returns, current_weights=aligned_w, risk_free_rate=risk_free_rate,
         max_weight=effective_max_weight, turnover_limit=turnover_limit,
@@ -2574,6 +2588,7 @@ def _render_quant_configuration() -> None:
             st.success("Quant engine run complete.")
             st.rerun()
         except Exception as exc:
+            LOGGER.exception("Full Quant Engine run failed")
             st.session_state[QUANT_ERROR_KEY] = str(exc)
 
 
