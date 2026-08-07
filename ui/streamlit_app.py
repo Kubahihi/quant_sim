@@ -971,8 +971,28 @@ def _compute_analysis(
     )
     adv_simulation_percentiles = _create_simulation_percentiles(adv_price_paths)
 
-    min_var_result = optimize_minimum_variance(returns, risk_free_rate=risk_free_rate)
-    max_sharpe_result = optimize_maximum_sharpe(returns, risk_free_rate=risk_free_rate)
+    effective_max_weight = max(
+        float(rebalance_max_weight),
+        1.0 / float(returns.shape[1]),
+    )
+    if effective_max_weight > float(rebalance_max_weight) + 1e-12:
+        alignment_warnings.append(
+            "Maximum asset weight was below the feasible minimum and was raised "
+            f"to {effective_max_weight:.2%}."
+        )
+    shared_estimates = estimate_portfolio_inputs(returns)
+    min_var_result = optimize_minimum_variance(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
+    max_sharpe_result = optimize_maximum_sharpe(
+        returns,
+        risk_free_rate=risk_free_rate,
+        max_weight=effective_max_weight,
+        portfolio_estimates=shared_estimates,
+    )
     cost_aware_rebalance = optimize_cost_aware_rebalance(
         returns=returns,
         current_weights=weights,

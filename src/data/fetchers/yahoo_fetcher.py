@@ -115,9 +115,10 @@ class YahooFetcher(BaseFetcher):
         adv_history: dict[str, pd.Series] = {}
         latest_adv: dict[str, float] = {}
         for symbol in symbols:
-            data = self.fetch_prices(symbol, start_date, end_date)
-            if data.empty:
+            fetch_result = self.fetch_prices(symbol, start_date, end_date)
+            if not fetch_result.success or fetch_result.data.empty:
                 continue
+            data = fetch_result.data
             close = pd.to_numeric(data["close"], errors="coerce")
             volume = pd.to_numeric(data["volume"], errors="coerce")
             dollar_volume = (close * volume).where(lambda values: values > 0)

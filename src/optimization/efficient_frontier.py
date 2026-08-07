@@ -119,23 +119,16 @@ def sample_portfolio_cloud(
     return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
     portfolio_estimates: Optional[PortfolioEstimates] = None,
 ) -> pd.DataFrame:
-    """Sample a large set of long-only portfolios for 3D visualization."""
-    clean_returns = (
-        pd.DataFrame(returns)
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna(how="any")
+    """Sample long-only portfolios using the same inputs as the optimizers."""
+    if not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
+        raise ValueError("n_samples must be a positive integer.")
+    estimates = resolve_portfolio_estimates(
+        returns,
+        portfolio_estimates=portfolio_estimates,
+        covariance_shrinkage=covariance_shrinkage,
+        return_shrinkage=return_shrinkage,
     )
-    if clean_returns.empty or clean_returns.shape[1] == 0:
-        raise ValueError(
-            "returns must contain finite observations for at least one asset."
-        )
-    if clean_returns.shape[0] < 2:
-        raise ValueError("returns must contain at least two observations.")
-
-    clean_returns = clean_returns.astype(float)
-    n_assets = clean_returns.shape[1]
-    mean_returns = clean_returns.mean().values * TRADING_DAYS
-    cov_matrix = clean_returns.cov().values * TRADING_DAYS
+    n_assets = len(estimates.symbols)
     rng = np.random.default_rng(random_seed)
     weights = rng.dirichlet(np.ones(n_assets), size=n_samples)
     if max_weight is not None:

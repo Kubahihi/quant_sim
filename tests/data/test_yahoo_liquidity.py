@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.fetchers.yahoo_fetcher import YahooFetcher
+from src.data.fetchers.yahoo_fetcher import FetchResult, YahooFetcher
 
 
 def test_close_and_liquidity_fetch_reuses_each_ohlcv_download_once(monkeypatch) -> None:
@@ -13,13 +13,16 @@ def test_close_and_liquidity_fetch_reuses_each_ohlcv_download_once(monkeypatch) 
 
     def fake_fetch(symbol, start_date, end_date, interval="1d"):
         calls.append(symbol)
-        return pd.DataFrame({
-            "open": np.full(10, 10.0),
-            "high": np.full(10, 10.5),
-            "low": np.full(10, 9.5),
-            "close": np.full(10, 10.0 if symbol == "A" else 20.0),
-            "volume": np.arange(1, 11, dtype=float) * 1_000.0,
-        }, index=dates)
+        return FetchResult(
+            data=pd.DataFrame({
+                "open": np.full(10, 10.0),
+                "high": np.full(10, 10.5),
+                "low": np.full(10, 9.5),
+                "close": np.full(10, 10.0 if symbol == "A" else 20.0),
+                "volume": np.arange(1, 11, dtype=float) * 1_000.0,
+            }, index=dates),
+            success=True,
+        )
 
     fetcher = YahooFetcher()
     monkeypatch.setattr(fetcher, "fetch_prices", fake_fetch)
