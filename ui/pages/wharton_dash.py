@@ -495,7 +495,7 @@ def _initialize_database() -> None:
         # Seed users
         conn.executemany(
             "DELETE FROM wharton_users WHERE username = ?",
-            ((username,) for username in LEGACY_USERS),
+            [(username,) for username in sorted(LEGACY_USERS)],
         )
         existing_users = {
             str(row["username"]): str(row["password_hash"] or "")
