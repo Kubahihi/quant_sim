@@ -141,6 +141,47 @@ def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-te
     return db_path
 
 
+def test_init_db_materializes_executemany_parameters_for_libsql(monkeypatch, tmp_path):
+    db_path = _configure_temp_wharton(monkeypatch, tmp_path)
+
+    class StrictBatchConnection:
+        """Model libSQL's requirement that executemany receives a sequence."""
+
+        def __init__(self, path: Path):
+            self._connection = sqlite3.connect(path)
+            self._connection.row_factory = sqlite3.Row
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._connection.__exit__(exc_type, exc_value, traceback)
+
+        def executemany(self, sql, parameters):
+            if not isinstance(parameters, (list, tuple)):
+                raise TypeError("parameters must be a sequence")
+            return self._connection.executemany(sql, parameters)
+
+    monkeypatch.setattr(
+        wharton_dash,
+        "get_connection",
+        lambda: StrictBatchConnection(db_path),
+    )
+
+    wharton_dash.init_db()
+
+    with sqlite3.connect(db_path) as connection:
+        usernames = {
+            row[0]
+            for row in connection.execute("SELECT username FROM wharton_users")
+        }
+    assert usernames == {user["username"] for user in wharton_dash.DEFAULT_USERS}
+
+
 def test_init_db_uses_configured_paths_when_cwd_changes(monkeypatch, tmp_path):
     db_path = _configure_temp_wharton(monkeypatch, tmp_path)
     runner_cwd = tmp_path / "runner"
