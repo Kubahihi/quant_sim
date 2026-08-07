@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Optional
 import pandas as pd
 import yfinance as yf
 from loguru import logger

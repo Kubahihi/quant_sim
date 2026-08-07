@@ -28,6 +28,12 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
     def fake_prices(symbols, start_date, end_date):
         return prices[[symbol for symbol in symbols if symbol in prices.columns]].copy()
 
+    shared_estimates = SimpleNamespace(
+        mean_returns=prices.pct_change().dropna().mean().to_numpy(dtype=float) * 252.0,
+        covariance=prices.pct_change().dropna().cov().to_numpy(dtype=float) * 252.0,
+    )
+    optimizer_estimates = []
+
     monkeypatch.setattr(wharton_dash, "_fetch_close_prices_cached", fake_prices)
     monkeypatch.setattr(
         wharton_dash,
@@ -47,6 +53,7 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
         },
     )
     def fake_optimization(returns, **kwargs):
+        optimizer_estimates.append(kwargs.get("portfolio_estimates"))
         weights = np.repeat(1.0 / returns.shape[1], returns.shape[1])
         return {
             "weights": weights,
@@ -69,10 +76,7 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
             "metrics": {},
             "equal_weight_metrics": {},
         },
-        estimate_portfolio_inputs=lambda returns: SimpleNamespace(
-            mean_returns=returns.mean().to_numpy(dtype=float) * 252.0,
-            covariance=returns.cov().to_numpy(dtype=float) * 252.0,
-        ),
+        estimate_portfolio_inputs=lambda returns: shared_estimates,
         calculate_portfolio_statistics=lambda weights, mean_returns, cov_matrix, **kwargs: {
             "return": float(np.asarray(weights) @ mean_returns),
             "volatility": float(
@@ -168,6 +172,7 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
     assert result["inputs"]["max_weight"] == pytest.approx(0.50)
     assert result["inputs"]["mandate_max_weight"] == pytest.approx(0.34)
     assert result["inputs"]["synthetic_cash_proxy"] is True
+    assert optimizer_estimates[:3] == [shared_estimates] * 3
     assert result["mandate_aware"]["symbols"][-1] == "CASH"
     assert any("synthetic" in warning for warning in result["mandate_aware"]["warnings"])
     assert result["quant_stack"] is None
