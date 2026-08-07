@@ -15,6 +15,15 @@ class FetchResult:
     success: bool
     error: str = ""
 
+    @property
+    def empty(self) -> bool:
+        """Preserve read compatibility with callers that expected a DataFrame."""
+        return bool(self.data.empty)
+
+    def __getitem__(self, key):
+        """Forward column reads to the wrapped DataFrame."""
+        return self.data[key]
+
 
 class YahooFetcher(BaseFetcher):
     """Yahoo Finance data fetcher"""

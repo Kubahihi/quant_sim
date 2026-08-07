@@ -7,6 +7,15 @@ import pytest
 from src.data.fetchers.yahoo_fetcher import FetchResult, YahooFetcher
 
 
+def test_fetch_result_preserves_dataframe_read_compatibility() -> None:
+    frame = pd.DataFrame({"close": [10.0, 11.0]})
+    result = FetchResult(data=frame, success=True)
+
+    assert result.empty is False
+    pd.testing.assert_series_equal(result["close"], frame["close"])
+    assert FetchResult(data=pd.DataFrame(), success=False).empty is True
+
+
 def test_close_and_liquidity_fetch_reuses_each_ohlcv_download_once(monkeypatch) -> None:
     dates = pd.date_range("2026-01-02", periods=10, freq="B")
     calls: list[str] = []
