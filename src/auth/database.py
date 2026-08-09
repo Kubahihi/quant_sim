@@ -7,6 +7,7 @@ connection handling, and data access functions.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import sqlite3
@@ -40,6 +41,24 @@ _REMOTE_SYNC_LOCK = threading.Lock()
 _LAST_REMOTE_SYNC_BY_DATABASE: dict[str, float] = {}
 _AUTH_INITIALIZATION_LOCK = threading.Lock()
 _INITIALIZED_AUTH_DATABASES: set[str] = set()
+
+
+def _session_token_digest(token: str) -> str:
+    """Return the non-reversible database representation of a session token."""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _migrate_plaintext_session_tokens(connection: Any) -> None:
+    """Hash legacy session rows in place while preserving active client tokens."""
+    rows = connection.execute(
+        "SELECT token FROM sessions WHERE token NOT LIKE 'sha256:%'"
+    ).fetchall()
+    for row in rows:
+        plaintext_token = str(row[0])
+        connection.execute(
+            "UPDATE sessions SET token = ? WHERE token = ?",
+            (_session_token_digest(plaintext_token), plaintext_token),
+        )
 
 
 class ProductionDatabaseConfigError(RuntimeError):
@@ -331,6 +350,7 @@ def init_auth_database() -> None:
                 UNIQUE (user_id, data_type, file_name)
             );
             """)
+            _migrate_plaintext_session_tokens(conn)
             conn.commit()
             if hasattr(conn, 'sync'):
                 conn.sync()
@@ -554,13 +574,20 @@ def authenticate_user_once(
         status = "invalid_credentials"
         if password_matches and user is not None:
             token = secrets.token_urlsafe(32)
+            token_digest = _session_token_digest(token)
             expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
             conn.execute(
                 """
                 INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (token, int(user["id"]), now.isoformat(), expires_at, now.isoformat()),
+                (
+                    token_digest,
+                    int(user["id"]),
+                    now.isoformat(),
+                    expires_at,
+                    now.isoformat(),
+                ),
             )
             safe_user = {
                 key: value
@@ -639,6 +666,7 @@ def create_session(user_id: int) -> str:
     try:
         # Generate secure random token
         token = secrets.token_urlsafe(32)
+        token_digest = _session_token_digest(token)
         now = datetime.now(timezone.utc)
         created_at = now.isoformat()
         expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
@@ -648,7 +676,7 @@ def create_session(user_id: int) -> str:
             INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (token, user_id, created_at, expires_at, created_at),
+            (token_digest, user_id, created_at, expires_at, created_at),
         )
         conn.commit()
         if hasattr(conn, 'sync'):
@@ -669,6 +697,7 @@ def validate_session_token(token: str) -> bool:
     """
     conn = _get_connection()
     try:
+        token_digest = _session_token_digest(token)
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
@@ -680,7 +709,7 @@ def validate_session_token(token: str) -> bool:
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > ? AND u.is_active = 1
             """,
-            (token, now_iso),
+            (token_digest, now_iso),
         )
         row = cursor.fetchone()
 
@@ -688,7 +717,7 @@ def validate_session_token(token: str) -> bool:
             if _session_touch_is_due(row["last_accessed"], now):
                 conn.execute(
                     "UPDATE sessions SET last_accessed = ? WHERE token = ?",
-                    (now_iso, token),
+                    (now_iso, token_digest),
                 )
                 conn.commit()
                 if hasattr(conn, 'sync'):
@@ -707,6 +736,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
     """
     conn = _get_connection()
     try:
+        token_digest = _session_token_digest(token)
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
@@ -718,7 +748,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > ? AND u.is_active = 1
             """,
-            (token, now_iso),
+            (token_digest, now_iso),
         )
         row = cursor.fetchone()
 
@@ -726,7 +756,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
             if _session_touch_is_due(row["_last_accessed"], now):
                 conn.execute(
                     "UPDATE sessions SET last_accessed = ? WHERE token = ?",
-                    (now_iso, token),
+                    (now_iso, token_digest),
                 )
                 conn.commit()
                 if hasattr(conn, 'sync'):
@@ -744,7 +774,10 @@ def revoke_session(token: str) -> None:
     """Revoke (delete) a session token."""
     conn = _get_connection()
     try:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.execute(
+            "DELETE FROM sessions WHERE token = ?",
+            (_session_token_digest(token),),
+        )
         conn.commit()
         if hasattr(conn, 'sync'):
             conn.sync()

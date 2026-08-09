@@ -287,6 +287,8 @@ requirements.txt
   warning-free beh a minimalne 57% celkove coverage.
 - Pred release se kontroluje cela Git historie na unikla tajemstvi a presne
   instalovane zavislosti na zname bezpecnostni zranitelnosti.
+- Release artefakt obsahuje overeny CycloneDX SBOM a uplny licencni inventar
+  vsech produkcnich balicku.
 - Uspesny release vytvari 90denni artefakt svazany s plnym commit SHA a SHA-256
   hashi vsech nasazovanych souboru. GitHub attestation potvrzuje jeho puvod a
   stejny manifest overuje rollback kandidata.

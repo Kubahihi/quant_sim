@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   security:
+    name: Security gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -37,10 +38,10 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@v5
         with:
-          fail-on-severity: low
-          show-patched-versions: true
+          config-file: ./.github/dependency-review-config.yml
 
   quality:
+    name: Release quality gate
     needs: security
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -76,6 +77,25 @@ jobs:
           --local --strict
           --progress-spinner off
           --cache-dir .uv-cache/pip-audit
+
+      - name: Generate and validate production SBOM
+        run: |
+          .venv/bin/python -m pip_audit \
+            --requirement requirements.txt \
+            --strict --no-deps --disable-pip \
+            --progress-spinner off \
+            --format cyclonedx-json \
+            --output build/release-sbom.cdx.json \
+            --cache-dir .uv-cache/pip-audit
+          .venv/bin/python scripts/validate_sbom.py \
+            --sbom build/release-sbom.cdx.json \
+            --requirements requirements.txt
+
+      - name: Generate production license inventory
+        run: >-
+          .venv/bin/python scripts/generate_license_inventory.py
+          --requirements requirements.txt
+          --output build/release-licenses.json
 
       - name: Validate deployment dependency parity
         run: .venv/bin/python scripts/validate_dependency_manifests.py --check-runtime
@@ -122,11 +142,21 @@ jobs:
         with:
           subject-path: build/release-manifest.json
 
+      - name: Attest release SBOM
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@v4
+        with:
+          subject-path: build/release-manifest.json
+          sbom-path: build/release-sbom.cdx.json
+
       - name: Retain verified release manifest
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: quant-sim-release-${{ github.sha }}
-          path: build/release-manifest.json
+          path: |
+            build/release-manifest.json
+            build/release-sbom.cdx.json
+            build/release-licenses.json
           if-no-files-found: error
           retention-days: 90

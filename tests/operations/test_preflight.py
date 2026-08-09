@@ -56,6 +56,7 @@ def test_config_preflight_can_pass_without_live_mutating_checks(monkeypatch):
     monkeypatch.setattr(preflight, "_check_api_configuration", lambda: None)
     monkeypatch.setattr(preflight, "_check_database_configuration", lambda: None)
     monkeypatch.setattr(preflight, "_check_storage_configuration", lambda: None)
+    monkeypatch.setattr(preflight, "_check_wharton_credentials", lambda: None)
 
     result = preflight.run_production_preflight(live=False)
 
@@ -65,6 +66,7 @@ def test_config_preflight_can_pass_without_live_mutating_checks(monkeypatch):
         "api_configuration",
         "database_configuration",
         "storage_configuration",
+        "wharton_credentials",
     }
 
 
@@ -78,6 +80,7 @@ def test_preflight_hides_exception_details_and_skips_live_checks(monkeypatch):
     monkeypatch.setattr(preflight, "_check_api_configuration", lambda: None)
     monkeypatch.setattr(preflight, "_check_database_configuration", lambda: None)
     monkeypatch.setattr(preflight, "_check_storage_configuration", lambda: None)
+    monkeypatch.setattr(preflight, "_check_wharton_credentials", lambda: None)
     monkeypatch.setattr(
         preflight,
         "_check_live_database",

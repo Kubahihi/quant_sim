@@ -69,6 +69,22 @@ def _check_storage_configuration() -> str | None:
     return None
 
 
+def _check_wharton_credentials() -> str | None:
+    import streamlit as st
+
+    from src.auth.wharton_credentials import validate_wharton_credentials
+
+    try:
+        raw_credentials = st.secrets["wharton_users"]
+    except Exception:
+        return "wharton_credentials_not_configured"
+    try:
+        validate_wharton_credentials(raw_credentials)
+    except Exception:
+        return "wharton_credentials_invalid"
+    return None
+
+
 def _database_tables(connection: Any) -> set[str]:
     rows = connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -138,6 +154,7 @@ def run_production_preflight(
         "api_configuration": _safe_check(_check_api_configuration),
         "database_configuration": _safe_check(_check_database_configuration),
         "storage_configuration": _safe_check(_check_storage_configuration),
+        "wharton_credentials": _safe_check(_check_wharton_credentials),
     }
     configuration_ready = all(
         check["status"] == "healthy" for check in checks.values()

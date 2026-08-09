@@ -1,5 +1,10 @@
 # Production readiness
 
+GitHub must also enforce the protected-branch settings in
+[`GITHUB_RULESET.md`](GITHUB_RULESET.md). The repository supplies stable required
+check names, Code Owners, and a pull-request checklist; verify the server-side
+ruleset before every production release.
+
 ## Deterministic build
 
 The supported runtime is Python 3.12.13. Production dependencies are frozen in
@@ -49,6 +54,11 @@ Required Streamlit `[storage]` settings:
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 
+The `[wharton_users]` section must contain all five named team accounts. Each
+password must be unique, 12–72 UTF-8 bytes, and must not be an example
+placeholder. Missing or unsafe team credentials stop production initialization
+and fail the preflight without printing their values.
+
 If the standalone Flask API is deployed, production also requires:
 
 - authentication enabled;
@@ -66,13 +76,15 @@ The GitHub Actions workflow performs:
 2. pull-request dependency review, blocking vulnerabilities from low severity;
 3. installation of the pinned Python runtime and CI lock file;
 4. compatibility and known-vulnerability audit of the installed environment;
-5. exact-pin and production/development deployment parity validation;
-6. regeneration comparison for both locked manifests;
-7. bytecode compilation;
-8. blocking Ruff correctness checks;
-9. startup of a real headless Streamlit server and its HTTP health probe;
-10. the complete warning-free test suite with a 57% coverage floor;
-11. creation and immediate verification of a commit-bound release manifest.
+5. exact CycloneDX SBOM parity with all production pins;
+6. complete production license evidence and pull-request license policy;
+7. exact-pin and production/development deployment parity validation;
+8. regeneration comparison for both locked manifests;
+9. bytecode compilation;
+10. blocking Ruff correctness checks;
+11. startup of a real headless Streamlit server and its HTTP health probe;
+12. the complete warning-free test suite with a 57% coverage floor;
+13. creation and immediate verification of a commit-bound release manifest.
 
 The secret scanner uses only fingerprint-specific exceptions in
 `.gitleaksignore`; broad rule or path exclusions are forbidden. The dependency
@@ -91,7 +103,11 @@ requests verify the same mechanism but do not retain an artifact.
 CI also creates a GitHub artifact attestation for the retained manifest. This
 cryptographically binds the downloaded file to the repository, workflow and
 commit that produced it; the manifest's internal hashes alone are not treated
-as trusted provenance.
+as trusted provenance. The attestation includes the validated CycloneDX SBOM.
+The same 90-day artifact contains `release-sbom.cdx.json` and
+`release-licenses.json`; both inventories must contain exactly the 97 packages
+from the production lock. A missing license declaration or installed-version
+drift fails the release.
 
 Dependabot checks both Python packages and GitHub Actions weekly. A dependency
 update is not release-ready until the regenerated lock files and CI checks pass.
@@ -99,6 +115,14 @@ update is not release-ready until the regenerated lock files and CI checks pass.
 Streamlit test auto-login is disabled unless all three conditions hold:
 `QUANT_SIM_ENV=test`, `QUANT_SIM_TEST_AUTO_LOGIN=1`, and an active pytest test
 context. A generic pytest environment marker alone cannot bypass authentication.
+
+Password creation requires the pinned bcrypt dependency and never falls back to
+a fast general-purpose hash. Unsupported legacy or malformed password hashes
+fail closed; passwords are restricted to bcrypt's 72-byte UTF-8 input limit.
+Authentication responses never include raw database/provider exception text.
+Random session tokens are stored only as SHA-256 digests. Existing plaintext
+session rows are converted in place during schema initialization, so a database
+read does not reveal bearer credentials and active clients remain valid.
 
 The API returns no-store, anti-sniffing, anti-framing and referrer-policy
 headers. Production responses also include HSTS. Production request logs carry

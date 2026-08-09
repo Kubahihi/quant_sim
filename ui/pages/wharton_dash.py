@@ -22,6 +22,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src.auth.wharton_credentials import (
+    REQUIRED_WHARTON_USERS,
+    validate_wharton_credentials,
+)
 from src.utils.environment import is_production_environment, resolve_environment
 
 
@@ -74,10 +78,6 @@ def _get_default_password() -> str:
 # Actual password will be read from st.secrets["wharton_users"][username]
 # or generated if in development mode.
 DEV_ONLY_INSECURE_DEFAULT_PASSWORD = "DEV_ONLY_INSECURE_DEFAULT"
-
-# This is used for seeding the initial users.
-# The actual password used for authentication will come from secrets.
-SEEDING_DEFAULT_PASSWORD = _get_default_password()
 
 # Login attempt limits
 MAX_LOGIN_ATTEMPTS = 5
@@ -187,6 +187,8 @@ DEFAULT_USERS = [
     {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
 ]
 
+assert tuple(user["username"] for user in DEFAULT_USERS) == REQUIRED_WHARTON_USERS
+
 LEGACY_USERS = {"Janek", "Matfyz_Genius"}
 
 DEFAULT_MINDMAP_NODES = [
@@ -225,6 +227,17 @@ def _now_iso() -> str:
 
 def _initialize_database() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    if _is_development_mode():
+        seeded_passwords = {
+            user["username"]: DEFAULT_PASSWORD for user in DEFAULT_USERS
+        }
+    else:
+        try:
+            configured_credentials = st.secrets["wharton_users"]
+        except Exception:
+            configured_credentials = None
+        seeded_passwords = validate_wharton_credentials(configured_credentials)
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
@@ -512,13 +525,7 @@ def _initialize_database() -> None:
             for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
         }
         for user in DEFAULT_USERS:
-            user_pass = DEFAULT_PASSWORD
-            if not _is_development_mode():
-                try:
-                    user_pass = str(st.secrets["wharton_users"][user["username"]])
-                except Exception as e:
-                    # Ignore missing secret quietly
-                    pass
+            user_pass = seeded_passwords[user["username"]]
 
             if existing_users.get(user["username"]):
                 if not _should_sync_seeded_passwords():

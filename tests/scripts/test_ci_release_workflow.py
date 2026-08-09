@@ -76,15 +76,40 @@ def test_ci_security_gate_has_least_privilege_and_blocks_quality() -> None:
     review = by_name["Review dependency changes"]
     assert review["uses"] == "actions/dependency-review-action@v5"
     assert review["if"] == "github.event_name == 'pull_request'"
-    assert review["with"]["fail-on-severity"] == "low"
+    assert review["with"]["config-file"] == "./.github/dependency-review-config.yml"
 
     quality_steps = {
         step["name"]: step for step in workflow["jobs"]["quality"]["steps"]
     }
     audit = quality_steps["Audit installed dependencies for known vulnerabilities"]
     assert "--local --strict" in audit["run"]
+    sbom = quality_steps["Generate and validate production SBOM"]["run"]
+    assert "--format cyclonedx-json" in sbom
+    assert "scripts/validate_sbom.py" in sbom
+    licenses = quality_steps["Generate production license inventory"]["run"]
+    assert "scripts/generate_license_inventory.py" in licenses
     lock_validation = quality_steps["Validate lock files"]["run"]
     assert lock_validation.count('--exclude-newer "$(cat .dependency-cutoff)"') == 2
+
+    sbom_attestation = quality_steps["Attest release SBOM"]
+    assert sbom_attestation["uses"] == "actions/attest@v4"
+    assert sbom_attestation["with"]["subject-path"] == "build/release-manifest.json"
+    assert sbom_attestation["with"]["sbom-path"] == "build/release-sbom.cdx.json"
+    upload_paths = quality_steps["Retain verified release manifest"]["with"]["path"]
+    assert "build/release-sbom.cdx.json" in upload_paths
+    assert "build/release-licenses.json" in upload_paths
+
+
+def test_dependency_license_policy_is_explicit_and_permissive_only() -> None:
+    policy = yaml.safe_load(
+        (PROJECT_ROOT / ".github/dependency-review-config.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert policy["fail-on-severity"] == "low"
+    allowed = set(policy["allow-licenses"])
+    assert {"MIT", "Apache-2.0", "BSD-3-Clause", "MPL-2.0"} <= allowed
+    assert not any("GPL" in license_name for license_name in allowed)
 
 
 def test_secret_allowlist_contains_only_specific_fingerprints() -> None:

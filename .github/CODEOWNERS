@@ -1,0 +1,11 @@
+# Default owner for every change.
+* @Kubahihi
+
+# Release, dependency, authentication, API, and persistence controls.
+/.github/ @Kubahihi
+/.streamlit/ @Kubahihi
+/requirements*.txt @Kubahihi
+/requirements*.lock @Kubahihi
+/src/api/ @Kubahihi
+/src/auth/ @Kubahihi
+/src/storage/ @Kubahihi
