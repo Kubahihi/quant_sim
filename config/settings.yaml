@@ -65,8 +65,10 @@ api:
   token_header: "X-API-Token"
   auth_enabled: true
   default_user_id: null
-  cors_enabled: true
-  cors_origins: ["*"]
+  # Disabled by default. If a browser client needs the API, enable CORS and
+  # set API_CORS_ORIGINS to the exact deployed HTTPS origin(s).
+  cors_enabled: false
+  cors_origins: []
   rate_limit_enabled: true
   rate_limit_requests: 60
   rate_limit_window: 60

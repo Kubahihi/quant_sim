@@ -21,6 +21,13 @@ wheels/
 .installed.cfg
 *.egg
 
+# Test and quality artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+
 # Virtual environments
 venv/
 ENV/

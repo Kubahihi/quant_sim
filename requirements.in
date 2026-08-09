@@ -1,0 +1,23 @@
+# Direct production dependency constraints. Compile this file into
+# requirements.txt; Streamlit Cloud installs that fully pinned manifest.
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
+streamlit>=1.28.0
+streamlit-agraph==0.0.45
+yfinance>=0.2.28
+pyyaml>=6.0
+cvxpy>=1.3.0
+loguru>=0.7.0
+openai>=1.30.0
+statsmodels>=0.14.0
+arch>=6.2.0
+vaderSentiment>=3.3.2
+bcrypt>=4.0.0
+libsql>=0.1.0
+flask>=2.3.0
+boto3>=1.34.0
+curl_cffi>=0.6.0

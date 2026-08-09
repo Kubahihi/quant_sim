@@ -18,7 +18,8 @@ The authentication system provides:
 pip install -r requirements.txt
 ```
 
-The main new dependency is `bcrypt>=4.0.0` for secure password hashing.
+The password-hashing dependency is included in the fully pinned production
+manifest.
 
 ### 2. First Run (Automatic Migration)
 

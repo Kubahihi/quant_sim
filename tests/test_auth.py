@@ -74,7 +74,7 @@ class TestPasswordHashing(TestCase):
     def test_hash_password_returns_string(self):
         result = hash_password("TestPass123")
         self.assertIsInstance(result, str)
-        self.assertTrue(len(result) > 0)
+        self.assertTrue(result.startswith("$2"))
     
     def test_verify_password_correct(self):
         password = "SecurePass123"
@@ -90,11 +90,20 @@ class TestPasswordHashing(TestCase):
         password = "SamePassword123"
         hash1 = hash_password(password)
         hash2 = hash_password(password)
-        # bcrypt includes salt, so hashes should be different
-        # (unless using fallback SHA-256)
-        # Both should still verify correctly
+        # bcrypt includes a unique salt; both hashes must still verify.
+        self.assertNotEqual(hash1, hash2)
         self.assertTrue(verify_password(password, hash1))
         self.assertTrue(verify_password(password, hash2))
+
+    def test_legacy_sha256_hash_is_rejected(self):
+        self.assertFalse(verify_password("SecurePass123", "sha256$salt$digest"))
+
+    def test_malformed_bcrypt_hash_is_rejected(self):
+        self.assertFalse(verify_password("SecurePass123", "$2b$invalid"))
+
+    def test_hash_password_rejects_bcrypt_overflow(self):
+        with self.assertRaisesRegex(ValueError, "72 UTF-8 bytes"):
+            hash_password("a" * 73)
 
 
 class TestInputValidation(TestCase):
@@ -156,6 +165,45 @@ class TestInputValidation(TestCase):
         valid, msg = validate_password("OnlyLetters")
         self.assertFalse(valid)
         self.assertIn("at least one number", msg)
+
+    def test_validate_password_rejects_more_than_72_utf8_bytes(self):
+        valid, msg = validate_password("Password1" + "ž" * 32)
+        self.assertFalse(valid)
+        self.assertIn("72 UTF-8 bytes", msg)
+
+
+class TestAuthenticationErrorPrivacy(TestCase):
+    """Infrastructure failures must not expose provider or credential details."""
+
+    def test_registration_hides_internal_exception_text(self):
+        leaked_value = "TURSO_AUTH_TOKEN=must-not-leak"
+        with patch("src.auth.manager.init_auth_database"), patch(
+            "src.auth.manager.register_user_once",
+            side_effect=RuntimeError(leaked_value),
+        ):
+            user, errors = register_user(
+                "privateuser",
+                "private@example.com",
+                "SecurePass123",
+                "SecurePass123",
+            )
+
+        self.assertIsNone(user)
+        self.assertEqual(errors, ["Registration failed"])
+        self.assertNotIn(leaked_value, " ".join(errors))
+
+    def test_login_hides_internal_exception_text(self):
+        leaked_value = "libsql://user:secret-token@database"
+        with patch("src.auth.manager.init_auth_database"), patch(
+            "src.auth.manager.authenticate_user_once",
+            side_effect=RuntimeError(leaked_value),
+        ):
+            token, user, errors = login_user("privateuser", "SecurePass123")
+
+        self.assertIsNone(token)
+        self.assertIsNone(user)
+        self.assertEqual(errors, ["Login failed"])
+        self.assertNotIn(leaked_value, " ".join(errors))
 
 
 class TestUserRegistration(TestCase):
@@ -286,6 +334,28 @@ class TestLoginLogout(TestCase):
         
         # Verify session is no longer valid
         self.assertFalse(validate_session_token(token))
+
+    def test_session_token_is_hashed_at_rest(self):
+        password = "HashedSession" + "Pass123"
+        user, errors = register_user(
+            username="hashedsessionuser",
+            email="hashed-session@example.com",
+            password=password,
+            confirm_password=password,
+        )
+        self.assertIsNotNone(user, f"Registration failed: {errors}")
+
+        token = create_session(user["id"])
+        with src.auth.database._get_connection() as connection:
+            stored_token = connection.execute(
+                "SELECT token FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+                (user["id"],),
+            ).fetchone()[0]
+
+        self.assertNotEqual(stored_token, token)
+        self.assertTrue(str(stored_token).startswith("sha256:"))
+        self.assertNotIn(token, str(stored_token))
+        self.assertTrue(validate_session_token(token))
     
     def test_get_current_user(self):
         # Register and login
@@ -364,6 +434,14 @@ class TestMigration(TestCase):
              patch("src.auth.migrations.get_user_by_username", return_value=None), \
              patch("src.auth.migrations.user_exists", return_value=False):
             self.assertIsNone(create_default_user())
+
+    def test_create_default_user_rejects_weak_password(self):
+        with patch.dict(os.environ, {"ADMIN_BOOTSTRAP_PASSWORD": "password"}), \
+             patch("src.auth.migrations.get_user_by_username", return_value=None), \
+             patch("src.auth.migrations.user_exists", return_value=False), \
+             patch("src.auth.migrations.create_user") as create_user_mock:
+            self.assertIsNone(create_default_user())
+            create_user_mock.assert_not_called()
     
     def test_migrate_existing_data(self):
         result = migrate_existing_data(dry_run=True)

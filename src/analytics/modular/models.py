@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -153,12 +154,27 @@ def _arima_model(series: pd.Series, _: Dict[str, Any]) -> ModelResult:
     arima_class = _load_arima_class()
     if arima_class is None:
         raise ImportError("statsmodels not available")
-    fitted = arima_class(clean, order=(1, 0, 1)).fit()
+    # Statsmodels can emit convergence warnings for short or nearly constant
+    # samples. Capture them so the warning becomes structured model evidence
+    # instead of leaking into application logs or CI output.
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        fitted = arima_class(clean, order=(1, 0, 1)).fit()
     forecast = fitted.get_forecast(steps=1)
     next_ret = float(np.asarray(forecast.predicted_mean)[0])
     conf = np.asarray(forecast.conf_int(alpha=0.05), dtype=float)
     spread = float(conf[0, 1] - conf[0, 0]) if conf.shape[1] >= 2 else 0.0
     confidence = float(max(0.0, min(1.0, 1.0 / (1.0 + spread * 100.0))))
+    fit_warning_messages = [
+        str(item.message)
+        for item in caught_warnings
+        if "converg" in str(item.message).lower()
+    ]
+    fit_converged = not fit_warning_messages and bool(
+        getattr(fitted, "mle_retvals", {}).get("converged", True)
+    )
+    if not fit_converged:
+        confidence = min(confidence, 0.25)
     return ModelResult(
         name="arima",
         family="classical",
@@ -167,6 +183,10 @@ def _arima_model(series: pd.Series, _: Dict[str, Any]) -> ModelResult:
             "next_period_return_forecast": next_ret,
             "forecast_spread": spread,
             "confidence": confidence,
+        },
+        payload={
+            "fit_converged": fit_converged,
+            "fit_warning": fit_warning_messages[0] if fit_warning_messages else None,
         },
         confidence=confidence,
     )

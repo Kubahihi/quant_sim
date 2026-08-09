@@ -33,6 +33,7 @@ for module_name, module_obj in list(sys.modules.items()):
         sys.modules.pop(module_name, None)
 
 from ui.dashboard_shell import inject_dashboard_styles
+from src.utils.environment import resolve_environment
 from ui.runtime_diagnostics import (
     PerformanceTrace,
     append_trace_history,
@@ -243,7 +244,11 @@ def _resolve_authenticated_user_id() -> int | None:
 
 def _auto_login_for_smoke_tests() -> int | None:
     """Auto-login only for pytest-driven Streamlit smoke tests."""
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
+    if (
+        resolve_environment() != "test"
+        or os.environ.get("QUANT_SIM_TEST_AUTO_LOGIN") != "1"
+        or not os.environ.get("PYTEST_CURRENT_TEST")
+    ):
         return None
 
     try:
@@ -538,15 +543,41 @@ def _build_ai_payload(
     }
 
 
-def _create_simulation_percentiles(price_paths: np.ndarray) -> pd.DataFrame:
+_SIMULATION_SURFACE_PERCENTILES = tuple(range(5, 100, 5))
+
+
+def _create_simulation_percentiles(
+    price_paths: np.ndarray,
+    percentiles: Tuple[int, ...] = (5, 25, 50, 75, 95),
+) -> pd.DataFrame:
     days = np.arange(price_paths.shape[0])
-    percentile_values = np.percentile(price_paths, (5, 25, 50, 75, 95), axis=1)
+    percentile_values = np.percentile(price_paths, percentiles, axis=1)
     result = pd.DataFrame(
         percentile_values.T,
-        columns=["p5", "p25", "p50", "p75", "p95"],
+        columns=[f"p{percentile}" for percentile in percentiles],
     )
     result.insert(0, "day", days)
     return result
+
+
+def _simulation_percentile_grid(
+    result: Dict[str, Any],
+    *,
+    advanced: bool = False,
+) -> pd.DataFrame:
+    """Resolve compact simulation output, including old in-session results."""
+    grid_key = "adv_simulation_percentile_grid" if advanced else "simulation_percentile_grid"
+    grid = result.get(grid_key)
+    if isinstance(grid, pd.DataFrame) and not grid.empty:
+        return grid
+
+    # Backward compatibility for a session created before compact grids were
+    # introduced. It is discarded on the next explicit analysis run.
+    paths_key = "adv_price_paths" if advanced else "price_paths"
+    paths = result.get(paths_key)
+    if isinstance(paths, np.ndarray) and paths.ndim == 2 and paths.size:
+        return _create_simulation_percentiles(paths, _SIMULATION_SURFACE_PERCENTILES)
+    return pd.DataFrame()
 
 
 def _model_signals_from_outputs(model_outputs: Dict[str, Any]) -> Dict[str, float]:
@@ -636,7 +667,7 @@ def _build_pdf_figures(result: Dict[str, Any]) -> Dict[str, Any]:
     portfolio_returns = result["portfolio_returns"]
     returns = result["returns"]
     corr_matrix = result["correlation_matrix"]
-    price_paths = result["price_paths"]
+    simulation_grid = _simulation_percentile_grid(result)
     frontier = result["frontier"]
 
     figures: Dict[str, Any] = {}
@@ -646,7 +677,16 @@ def _build_pdf_figures(result: Dict[str, Any]) -> Dict[str, Any]:
     )
     figures["drawdown"] = plot_drawdown(portfolio_returns, title="Portfolio Drawdown")
     figures["correlation"] = plot_correlation_heatmap(corr_matrix, title="Correlation Matrix")
-    figures["monte_carlo"] = plot_monte_carlo_fan(price_paths, title="Monte Carlo Fan Chart")
+    if not simulation_grid.empty:
+        figures["monte_carlo"] = plot_monte_carlo_fan(
+            title="Monte Carlo Fan Chart",
+            percentile_frame=simulation_grid,
+        )
+    else:
+        figures["monte_carlo"] = plot_monte_carlo_fan(
+            result.get("price_paths"),
+            title="Monte Carlo Fan Chart",
+        )
 
     if frontier:
         figures["frontier"] = plot_efficient_frontier(frontier, title="Efficient Frontier")
@@ -957,7 +997,17 @@ def _compute_analysis(
         time_horizon=horizon_days,
         n_simulations=n_simulations,
     )
-    simulation_percentiles = _create_simulation_percentiles(price_paths)
+    simulation_percentile_grid = _create_simulation_percentiles(
+        price_paths,
+        _SIMULATION_SURFACE_PERCENTILES,
+    )
+    simulation_percentiles = simulation_percentile_grid[
+        ["day", "p5", "p25", "p50", "p75", "p95"]
+    ].copy()
+    # Full path matrices can be hundreds of MiB at the UI maximum. Charts and
+    # exports only need percentile paths, so release the matrix before the
+    # advanced simulation starts and keep the compact grid in session state.
+    del price_paths
 
     adv_price_paths, adv_simulation_stats = run_advanced_monte_carlo_simulation(
         current_value=100000.0,
@@ -969,7 +1019,14 @@ def _compute_analysis(
         jump_mean=jump_mean,
         jump_volatility=jump_volatility,
     )
-    adv_simulation_percentiles = _create_simulation_percentiles(adv_price_paths)
+    adv_simulation_percentile_grid = _create_simulation_percentiles(
+        adv_price_paths,
+        _SIMULATION_SURFACE_PERCENTILES,
+    )
+    adv_simulation_percentiles = adv_simulation_percentile_grid[
+        ["day", "p5", "p25", "p50", "p75", "p95"]
+    ].copy()
+    del adv_price_paths
 
     effective_max_weight = max(
         float(rebalance_max_weight),
@@ -1160,12 +1217,12 @@ def _compute_analysis(
         "frontier": frontier,
         "portfolio_cloud": portfolio_cloud,
         "highlighted_portfolios": highlighted_portfolios,
-        "price_paths": price_paths,
         "simulation_stats": simulation_stats,
         "simulation_percentiles": simulation_percentiles,
-        "adv_price_paths": adv_price_paths,
+        "simulation_percentile_grid": simulation_percentile_grid,
         "adv_simulation_stats": adv_simulation_stats,
         "adv_simulation_percentiles": adv_simulation_percentiles,
+        "adv_simulation_percentile_grid": adv_simulation_percentile_grid,
         "asset_metrics_df": asset_metrics_df,
         "benchmark_metrics": benchmark_metrics,
         "return_contribution_df": return_contribution_df,
@@ -2504,9 +2561,19 @@ def _render_portfolio_tracker_tab() -> None:
     if isinstance(summary, dict):
         v1, v2, v3, v4 = st.columns(4)
         v1.metric("Market Value", f"${float(summary.get('TotalMarketValue', 0.0)):,.0f}")
-        v2.metric("Cost Value", f"${float(summary.get('TotalCostValue', 0.0)):,.0f}")
-        v3.metric("P&L", f"${float(summary.get('TotalPnL', 0.0)):,.0f}")
-        v4.metric("Priced Positions", int(summary.get("PricedPositions", 0.0)))
+        v2.metric("Book Cost", f"${float(summary.get('TotalCostValue', 0.0)):,.0f}")
+        v3.metric("P&L (priced)", f"${float(summary.get('TotalPnL', 0.0)):,.0f}")
+        v4.metric(
+            "P&L Coverage",
+            f"{int(summary.get('PnlCoveredPositions', summary.get('PricedPositions', 0.0)))}/"
+            f"{int(summary.get('TotalPositions', 0.0))}",
+        )
+        if summary.get("PartialCoverage"):
+            st.warning(
+                "Live P&L excludes positions without a current quote or cost basis. "
+                f"Unpriced book cost: ${float(summary.get('UnpricedCostValue', 0.0)):,.0f}; "
+                f"quoted value without cost: ${float(summary.get('MissingCostMarketValue', 0.0)):,.0f}."
+            )
 
     if isinstance(holdings, pd.DataFrame) and not holdings.empty:
         st.dataframe(holdings, use_container_width=True, hide_index=True)
@@ -4105,7 +4172,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
     frontier = analysis_result["frontier"]
     min_var_result = analysis_result["min_var_result"]
     max_sharpe_result = analysis_result["max_sharpe_result"]
-    price_paths = analysis_result["price_paths"]
+    simulation_grid = _simulation_percentile_grid(analysis_result)
     simulation_stats = analysis_result["simulation_stats"]
     asset_metrics_df = analysis_result["asset_metrics_df"]
     benchmark_metrics = analysis_result.get("benchmark_metrics", {})
@@ -4312,14 +4379,21 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
         mc3.metric("5th percentile", f"${simulation_stats['percentile_5']:,.0f}")
         mc4.metric("95th percentile", f"${simulation_stats['percentile_95']:,.0f}")
 
-        monte_carlo_fig = plot_monte_carlo_fan(price_paths)
-        st.pyplot(monte_carlo_fig)
+        if not simulation_grid.empty:
+            monte_carlo_fig = plot_monte_carlo_fan(
+                percentile_frame=simulation_grid,
+            )
+            st.pyplot(monte_carlo_fig)
+        else:
+            st.warning("Simulation percentile paths are unavailable.")
 
         with st.expander("Simulation percentile table", expanded=False):
             st.dataframe(analysis_result["simulation_percentiles"].round(2), use_container_width=True)
 
         try:
-            surface_fig = plot_monte_carlo_percentile_surface(price_paths)
+            surface_fig = plot_monte_carlo_percentile_surface(
+                percentile_frame=simulation_grid,
+            )
             st.plotly_chart(surface_fig, use_container_width=True)
         except Exception as exc:
             st.warning(f"3D scenario surface unavailable: {exc}")
@@ -4327,19 +4401,31 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
     with lab_tabs[4]:
         adv_sim = analysis_result.get("adv_simulation_stats")
         if adv_sim:
+            adv_simulation_grid = _simulation_percentile_grid(
+                analysis_result,
+                advanced=True,
+            )
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("Mean final value", f"${adv_sim['mean']:,.0f}")
             mc2.metric("Median final value", f"${adv_sim['median']:,.0f}")
             mc3.metric("5th percentile", f"${adv_sim['percentile_5']:,.0f}")
             mc4.metric("95th percentile", f"${adv_sim['percentile_95']:,.0f}")
             
-            adv_monte_carlo_fig = plot_monte_carlo_fan(analysis_result["adv_price_paths"], title="Merton Jump Diffusion Fan")
-            st.pyplot(adv_monte_carlo_fig)
+            if not adv_simulation_grid.empty:
+                adv_monte_carlo_fig = plot_monte_carlo_fan(
+                    title="Merton Jump Diffusion Fan",
+                    percentile_frame=adv_simulation_grid,
+                )
+                st.pyplot(adv_monte_carlo_fig)
+            else:
+                st.warning("Advanced simulation percentile paths are unavailable.")
             
             with st.expander("Simulation percentile table", expanded=False):
                 st.dataframe(analysis_result["adv_simulation_percentiles"].round(2), use_container_width=True)
             try:
-                adv_surface_fig = plot_monte_carlo_percentile_surface(analysis_result["adv_price_paths"])
+                adv_surface_fig = plot_monte_carlo_percentile_surface(
+                    percentile_frame=adv_simulation_grid,
+                )
                 st.plotly_chart(adv_surface_fig, use_container_width=True)
             except Exception as exc:
                 st.warning(f"3D scenario surface unavailable: {exc}")

@@ -7,17 +7,11 @@ with bcrypt password hashing and input validation.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-# Only import bcrypt if available, provide fallback for testing
-try:
-    import bcrypt
-    BCRYPT_AVAILABLE = True
-except ImportError:
-    BCRYPT_AVAILABLE = False
+import bcrypt
 
 from .database import (
     authenticate_user_once,
@@ -32,44 +26,23 @@ from .database import (
 # ---- Password hashing ----
 
 def hash_password(password: str) -> str:
-    """
-    Hash a password securely using bcrypt.
-    
-    Falls back to SHA-256 if bcrypt is not available (not recommended for production).
-    """
-    if BCRYPT_AVAILABLE:
-        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    else:
-        # Fallback: SHA-256 with salt (less secure, for development only)
-        import secrets as _secrets
-        salt = _secrets.token_hex(16)
-        hashed = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
-        return f"sha256${salt}${hashed}"
+    """Hash a password using the required bcrypt dependency."""
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > 72:
+        raise ValueError("Password must be at most 72 UTF-8 bytes")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """
-    Verify a password against its hash.
-    
-    Handles both bcrypt and fallback SHA-256 hashes.
-    """
-    if BCRYPT_AVAILABLE and password_hash.startswith('$2'):
-        # bcrypt hash
+    """Verify a password against a bcrypt hash, failing closed on bad input."""
+    if not password_hash.startswith("$2"):
+        return False
+    try:
         return bcrypt.checkpw(
-            password.encode('utf-8'),
-            password_hash.encode('utf-8')
+            password.encode("utf-8"),
+            password_hash.encode("utf-8"),
         )
-    elif password_hash.startswith('sha256$'):
-        # Fallback SHA-256 hash
-        parts = password_hash.split('$')
-        if len(parts) != 3:
-            return False
-        salt = parts[1]
-        expected_hash = parts[2]
-        actual_hash = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
-        return actual_hash == expected_hash
-    else:
-        # Unknown hash format
+    except (TypeError, ValueError):
         return False
 
 
@@ -119,6 +92,8 @@ def validate_password(password: str) -> Tuple[bool, str]:
     """
     if not password or len(password) < 8:
         return False, "Password must be at least 8 characters long"
+    if len(password.encode("utf-8")) > 72:
+        return False, "Password must be at most 72 UTF-8 bytes"
     if not re.search(r'[a-zA-Z]', password):
         return False, "Password must contain at least one letter"
     if not re.search(r'[0-9]', password):
@@ -147,9 +122,6 @@ def register_user(
     username = (username or "").strip()
     email = (email or "").strip().lower()
     
-    # Initialize database first (before any DB operations)
-    init_auth_database()
-    
     # Validate username
     valid, msg = validate_username(username)
     if not valid:
@@ -173,6 +145,9 @@ def register_user(
         return None, errors
 
     try:
+        # Initialize only after cheap input validation, and keep infrastructure
+        # errors behind the same privacy-safe response as registration errors.
+        init_auth_database()
         user, status = register_user_once(
             username,
             email,
@@ -185,13 +160,14 @@ def register_user(
         if user is None:
             return None, ["Registration failed"]
         return user, []
-    except Exception as e:
-        return None, [f"Registration failed: {str(e)}"]
+    except Exception:
+        return None, ["Registration failed"]
 
 
 def login_user(
     username: str,
     password: str,
+    ip_address: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[dict[str, Any]], list[str]]:
     """
     Log in a user.
@@ -209,21 +185,22 @@ def login_user(
     if not password:
         return None, None, ["Password is required"]
     
-    # Initialize database if needed
-    init_auth_database()
-    
     try:
+        # Never return database or provider exception text to an authentication
+        # client: connection errors can contain credential-bearing URLs.
+        init_auth_database()
         token, user, status = authenticate_user_once(
             username,
             lambda password_hash: verify_password(password, password_hash),
+            ip_address=ip_address,
         )
         if status == "rate_limited":
             return None, None, ["Too many failed attempts. Please try again in 10 minutes."]
         if status != "ok" or token is None or user is None:
             return None, None, ["Invalid username or password"]
         return token, user, []
-    except Exception as e:
-        return None, None, [f"Login failed: {str(e)}"]
+    except Exception:
+        return None, None, ["Login failed"]
 
 
 def logout_user(session_token: str) -> None:

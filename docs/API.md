@@ -12,7 +12,8 @@ All API responses include:
 ### 1. Install Dependencies
 
 ```bash
-pip install flask  # Already in requirements.txt
+uv venv --python 3.12.13
+uv pip sync requirements.txt
 ```
 
 ### 2. Configure the API
@@ -75,6 +76,9 @@ To get a token, use the `/api/v1/auth/token` endpoint with your username and pas
 
 Check API health and version. No authentication required.
 
+Use this endpoint as a lightweight liveness probe. It does not verify external
+dependencies.
+
 **Response:**
 ```json
 {
@@ -87,6 +91,35 @@ Check API health and version. No authentication required.
   }
 }
 ```
+
+---
+
+### Readiness Check
+
+#### `GET /api/v1/ready`
+
+Checks the authentication database and configured storage backend. No
+authentication is required. Results are cached for 30 seconds.
+
+When both dependencies are healthy, the endpoint returns HTTP 200:
+
+```json
+{
+  "success": true,
+  "data": {
+    "ready": true,
+    "checked_at": "2026-08-09T12:00:00+00:00",
+    "cached": false,
+    "checks": {
+      "database": {"status": "healthy"},
+      "storage": {"status": "healthy"}
+    }
+  }
+}
+```
+
+When either dependency is unavailable, the endpoint returns HTTP 503 with the
+same component statuses and no internal exception detail.
 
 ---
 

@@ -7,9 +7,9 @@ Includes:
 - Production-ready error handling
 """
 
-import os
 import streamlit as st
 from typing import Dict, Any, Optional, List
+from src.utils.environment import is_production_environment
 from .backend import (
     initialize_storage, 
     check_storage_health, 
@@ -36,7 +36,7 @@ def run_storage_startup_check() -> Dict[str, Any]:
         ConfigurationError: If required configuration is missing
     """
     # Check if running in production
-    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
+    is_production = is_production_environment(fail_closed_streamlit=True)
     
     # Initialize storage
     init_result = initialize_storage()
@@ -98,7 +98,7 @@ def run_enhanced_startup_check() -> Dict[str, Any]:
         "warnings": [],
     }
     
-    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
+    is_production = is_production_environment(fail_closed_streamlit=True)
     results["production_mode"] = is_production
     
     try:
@@ -267,21 +267,21 @@ def validate_storage_for_production() -> bool:
     Returns:
         True if storage is ready for production, False otherwise
     """
-    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
+    is_production = is_production_environment(fail_closed_streamlit=True)
     
     if not is_production:
         return True  # Development mode is always valid
     
     # Check if R2 backend is configured
     if not storage_config.load_from_secrets():
-        show_production_error_message(["[entire [storage] section missing"])
+        show_production_error_message(["entire [storage] section missing"])
         return False
     
     config = storage_config.config
     
     if config.get('backend') != 'r2':
-        st.warning(" Local storage backend selected in production. Files will not persist across redeployments.")
-        return True  # Not ideal but allowed with warning
+        show_production_error_message(["STORAGE_BACKEND must be set to r2"])
+        return False
     
     # Check for missing R2 secrets
     missing = storage_config.validate_r2_config()
@@ -368,7 +368,7 @@ def check_migration_needed() -> bool:
     Returns:
         True if migration is needed
     """
-    is_production = os.environ.get("QUANT_SIM_ENV", "development") == "production"
+    is_production = is_production_environment(fail_closed_streamlit=True)
     
     if not is_production:
         return False  # No migration needed in development

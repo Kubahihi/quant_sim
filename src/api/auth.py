@@ -27,7 +27,17 @@ def set_api_config(config: APIConfig) -> None:
 
 
 def get_api_config() -> Optional[APIConfig]:
-    """Get the current API configuration."""
+    """Get the active app's configuration with a non-request fallback."""
+    try:
+        from flask import current_app
+
+        app_config = current_app.extensions.get("quant_sim_api_config")
+        if isinstance(app_config, APIConfig):
+            return app_config
+    except RuntimeError:
+        # Access outside an application context; retain compatibility for
+        # direct utility calls and older integrations.
+        pass
     return _api_config
 
 

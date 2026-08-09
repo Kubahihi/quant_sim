@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
+from src.utils.environment import is_production_environment
+
 from .exceptions import (
     StorageError,
     FileNotFound,
@@ -252,26 +254,43 @@ class StorageBackend(ABC):
         
         # Check 2: Compute SHA256 and check for duplicates
         sha256 = hashlib.sha256(file_data).hexdigest()
-        if check_duplicate:
-            existing = self.find_by_sha256(sha256)
-            if existing:
-                raise DuplicateFileError(sha256, existing.storage_key)
+        files = self.list_files()
+        existing: Optional[StorageMetadata] = None
+        current_storage_bytes = 0
+        current_file_count = 0
+        user_file_count = 0
+
+        # Derive every collection-wide limit from the same snapshot. For remote
+        # backends, listing files may require one or more network requests, so
+        # repeating it for each validation check is both slow and inconsistent
+        # if storage changes between calls.
+        for stored_file in files:
+            current_storage_bytes += stored_file.file_size_bytes
+            current_file_count += 1
+            if (
+                check_duplicate
+                and existing is None
+                and stored_file.sha256 == sha256
+            ):
+                existing = stored_file
+            if uploaded_by and stored_file.uploaded_by == uploaded_by:
+                user_file_count += 1
+
+        if existing:
+            raise DuplicateFileError(sha256, existing.storage_key)
         
         # Check 3: Total storage limit
-        current_storage_bytes = self.get_total_storage_used()
         current_storage_mb = current_storage_bytes / (1024 * 1024)
         new_total_mb = current_storage_mb + file_size_mb
         if new_total_mb > StorageLimits.MAX_TOTAL_STORAGE_MB:
             raise TotalStorageLimitExceeded(current_storage_mb, file_size_mb, StorageLimits.MAX_TOTAL_STORAGE_MB)
         
         # Check 4: File count limit
-        current_file_count = self.get_file_count()
         if current_file_count + 1 > StorageLimits.MAX_FILES:
             raise FileCountLimitExceeded(current_file_count, StorageLimits.MAX_FILES)
         
         # Check 5: Per-user file count limit
         if uploaded_by:
-            user_file_count = self.get_user_file_count(uploaded_by)
             if user_file_count + 1 > StorageLimits.MAX_FILES_PER_USER:
                 raise UserFileCountLimitExceeded(uploaded_by, user_file_count, StorageLimits.MAX_FILES_PER_USER)
         
@@ -677,6 +696,10 @@ class StorageConfig:
             storage_secrets = st.secrets
 
         if not storage_secrets.get('R2_BUCKET'):
+            local_config = {'backend': 'local'}
+            if self._config != local_config:
+                self._backend = None
+            self._config = local_config
             return False
 
         # Endpoint URLs should not include the bucket name at the end
@@ -685,7 +708,7 @@ class StorageConfig:
         if endpoint_url and bucket and endpoint_url.endswith(f"/{bucket}"):
             endpoint_url = endpoint_url[:-len(f"/{bucket}")]
 
-        self._config = {
+        loaded_config = {
             'backend': storage_secrets.get('STORAGE_BACKEND', 'r2'),  # default to r2 if bucket is found
             'r2_bucket': bucket,
             'r2_endpoint_url': endpoint_url,
@@ -693,6 +716,9 @@ class StorageConfig:
             'r2_secret_access_key': storage_secrets.get('R2_SECRET_ACCESS_KEY'),
             'r2_region': storage_secrets.get('R2_REGION', 'auto')
         }
+        if self._config != loaded_config:
+            self._backend = None
+        self._config = loaded_config
         
         return True
     
@@ -716,10 +742,8 @@ class StorageConfig:
         return missing
     
     def is_production_mode(self) -> bool:
-        """Check if running in production mode (Streamlit Cloud)."""
-        # Explicit environment variable has priority, fallback to Streamlit Cloud indicator
-        is_prod_env = os.environ.get("QUANT_SIM_ENV") == "production"
-        return is_prod_env or 'STREAMLIT_SERVER_PORT' in os.environ
+        """Check explicit config, failing closed for an ambiguous Streamlit server."""
+        return is_production_environment(fail_closed_streamlit=True)
     
     def create_backend(self) -> StorageBackend:
         """Create the appropriate storage backend based on configuration."""
@@ -754,12 +778,9 @@ class StorageConfig:
         
         elif backend_type == 'local':
             if self.is_production_mode():
-                # In production with local backend - show error
-                st.error(
-                    "Local storage backend selected in production mode. "
-                    "This is not recommended as files will not persist across redeployments. "
-                    "Please configure R2 storage backend in secrets."
-                )
+                raise ProductionConfigError([
+                    "STORAGE_BACKEND must be 'r2' in production"
+                ])
             return LocalStorageBackend()
         
         else:
@@ -784,6 +805,8 @@ storage_config = StorageConfig()
 
 def get_storage_backend() -> StorageBackend:
     """Get the configured storage backend."""
+    if storage_config._backend is None:
+        storage_config.load_from_secrets()
     return storage_config.backend
 
 
@@ -821,7 +844,7 @@ def initialize_storage() -> Dict[str, Any]:
             "success": False,
             "error": str(e),
             "backend": "none",
-            "production_mode": 'STREAMLIT_SERVER_PORT' in os.environ
+            "production_mode": storage_config.is_production_mode()
         }
 
 

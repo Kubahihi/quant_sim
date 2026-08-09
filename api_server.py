@@ -28,6 +28,7 @@ def main():
     print(f"")
     print(f"Available endpoints:")
     print(f"  GET  /api/{config.version}/health       - Health check")
+    print(f"  GET  /api/{config.version}/ready        - Dependency readiness")
     print(f"  GET  /api/{config.version}/summary      - Portfolio summary")
     print(f"  GET  /api/{config.version}/portfolio    - Full portfolio")
     print(f"  GET  /api/{config.version}/positions    - Position list")

@@ -35,6 +35,7 @@ def test_auth_schema_initialization_is_memoized(monkeypatch, tmp_path):
     database._INITIALIZED_AUTH_DATABASES.clear()
     monkeypatch.setattr(database, "AUTH_DB_PATH", tmp_path / "auth.db")
     connection = Mock()
+    connection.execute.return_value.fetchall.return_value = []
     get_connection = Mock(return_value=connection)
     monkeypatch.setattr(database, "_get_connection", get_connection)
 

@@ -17,7 +17,11 @@ import uuid
 from .backend import StorageBackend, LocalStorageBackend, StorageLimits
 from .file_manager import FileManager
 from .exceptions import FileNotFound as BackendFileNotFound
-from .exceptions import FileValidationError, StorageFileNotFoundError
+from .exceptions import (
+    FileValidationError,
+    ProductionConfigError,
+    StorageFileNotFoundError,
+)
 from src.auth.database import get_db_connection
 
 
@@ -42,9 +46,12 @@ def get_storage_backend(storage_path: Optional[str] = None) -> StorageBackend:
     try:
         loaded = storage_config.load_from_secrets()
         if loaded:
-            backend = storage_config.create_backend()
-            return backend
+            return storage_config.create_backend()
+        if storage_config.is_production_mode():
+            raise ProductionConfigError(["R2 storage secrets are missing"])
     except Exception as e:
+        if storage_config.is_production_mode():
+            raise
         try:
             import streamlit as st
             st.warning(f" R2 storage init failed ({e}), using local storage. Files will not persist.")

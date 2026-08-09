@@ -1,0 +1,15 @@
+fail-on-severity: low
+show-patched-versions: true
+allow-licenses:
+  - 0BSD
+  - Apache-2.0
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - CC0-1.0
+  - MIT
+  - MIT-0
+  - MIT-CMU
+  - MPL-2.0
+  - NCSA
+  - PSF-2.0
+  - Zlib

@@ -22,6 +22,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src.auth.wharton_credentials import (
+    REQUIRED_WHARTON_USERS,
+    validate_wharton_credentials,
+)
+from src.utils.environment import is_production_environment, resolve_environment
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +39,7 @@ if PROJECT_ROOT not in sys.path:
 DB_PATH = Path("data/wharton_production.db")
 UPLOAD_DIR = Path("data/wharton_uploads")
 USER_PROFILE_KEY = "wharton_user_profile_v2"
+LOGIN_CLIENT_KEY = "wharton_login_client_v1"
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".xlsx", ".xls", ".csv", ".docx", ".doc",
@@ -45,7 +52,10 @@ MAX_FILE_SIZE_MB = 20
 
 def _is_development_mode() -> bool:
     """Check if the app is running in development mode."""
-    return os.environ.get("QUANT_SIM_ENV") == "development"
+    return (
+        not is_production_environment(fail_closed_streamlit=True)
+        and resolve_environment() == "development"
+    )
 
 
 def _should_sync_seeded_passwords() -> bool:
@@ -68,10 +78,6 @@ def _get_default_password() -> str:
 # Actual password will be read from st.secrets["wharton_users"][username]
 # or generated if in development mode.
 DEV_ONLY_INSECURE_DEFAULT_PASSWORD = "DEV_ONLY_INSECURE_DEFAULT"
-
-# This is used for seeding the initial users.
-# The actual password used for authentication will come from secrets.
-SEEDING_DEFAULT_PASSWORD = _get_default_password()
 
 # Login attempt limits
 MAX_LOGIN_ATTEMPTS = 5
@@ -181,6 +187,8 @@ DEFAULT_USERS = [
     {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
 ]
 
+assert tuple(user["username"] for user in DEFAULT_USERS) == REQUIRED_WHARTON_USERS
+
 LEGACY_USERS = {"Janek", "Matfyz_Genius"}
 
 DEFAULT_MINDMAP_NODES = [
@@ -219,6 +227,17 @@ def _now_iso() -> str:
 
 def _initialize_database() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    if _is_development_mode():
+        seeded_passwords = {
+            user["username"]: DEFAULT_PASSWORD for user in DEFAULT_USERS
+        }
+    else:
+        try:
+            configured_credentials = st.secrets["wharton_users"]
+        except Exception:
+            configured_credentials = None
+        seeded_passwords = validate_wharton_credentials(configured_credentials)
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
@@ -506,13 +525,7 @@ def _initialize_database() -> None:
             for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
         }
         for user in DEFAULT_USERS:
-            user_pass = DEFAULT_PASSWORD
-            if not _is_development_mode():
-                try:
-                    user_pass = str(st.secrets["wharton_users"][user["username"]])
-                except Exception as e:
-                    # Ignore missing secret quietly
-                    pass
+            user_pass = seeded_passwords[user["username"]]
 
             if existing_users.get(user["username"]):
                 if not _should_sync_seeded_passwords():
@@ -634,6 +647,23 @@ def _logout() -> None:
     st.rerun()
 
 
+def _login_client_address() -> str:
+    """Return a stable client scope for brute-force protection."""
+    try:
+        ip_address = str(st.context.ip_address or "").strip()
+    except Exception:
+        ip_address = ""
+    if ip_address:
+        return ip_address
+
+    # Some local/test Streamlit runtimes do not expose a network address. A
+    # random session scope still prevents one browser from locking out every
+    # other user of a known account.
+    if LOGIN_CLIENT_KEY not in st.session_state:
+        st.session_state[LOGIN_CLIENT_KEY] = f"session:{secrets.token_hex(16)}"
+    return str(st.session_state[LOGIN_CLIENT_KEY])
+
+
 def _render_login() -> None:
     # The team roster is static configuration, so the anonymous landing page
     # does not need a remote database connection.  Database/schema setup is
@@ -688,19 +718,24 @@ def _render_login() -> None:
         )
 
         init_auth_database()
-        
-        failed_attempts = get_recent_failed_attempts(username, minutes=LOGIN_ATTEMPT_WINDOW_MINUTES)
+
+        client_address = _login_client_address()
+        failed_attempts = get_recent_failed_attempts(
+            username,
+            minutes=LOGIN_ATTEMPT_WINDOW_MINUTES,
+            ip_address=client_address,
+        )
         if failed_attempts >= MAX_LOGIN_ATTEMPTS:
             st.error(f"Too many failed attempts. Try again in {LOGIN_ATTEMPT_WINDOW_MINUTES} minutes.")
             return
 
         profile = authenticate_user(username, password)
         if profile is None:
-            log_login_attempt(username, success=False)
+            log_login_attempt(username, success=False, ip_address=client_address)
             st.error("Wrong credentials.")
             return
             
-        log_login_attempt(username, success=True)
+        log_login_attempt(username, success=True, ip_address=client_address)
         st.session_state[USER_PROFILE_KEY] = profile
         st.rerun()
 

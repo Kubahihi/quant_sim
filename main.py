@@ -6,14 +6,12 @@ from datetime import datetime
 import numpy as np
 
 from src.data.fetchers.yahoo_fetcher import YahooFetcher
-from src.data.cache_manager import CacheManager
-from src.portfolio.portfolio import Portfolio, Asset
 from src.optimization import optimize_minimum_variance, optimize_maximum_sharpe
 from src.simulation import run_monte_carlo_simulation
 from src.analytics.correlation import calculate_correlation_matrix
 
 
-def main():
+def main() -> int:
     print("=== Quant Platform - Example Usage ===\n")
     
     symbols = ["AAPL", "ELIL", "GLD", "AMZN", "VTI", "QQQ", "ASML", "NEE", "JNJ", "KO", "BRK-B", "IEI", "BND", "VEA", "SHY", "BIL", "TIP", "PG", "TSM", "V", "NVDA", "MSFT", "BTC"]
@@ -24,15 +22,13 @@ def main():
     print(f"Period: {start_date.date()} to {end_date.date()}\n")
     
     fetcher = YahooFetcher()
-    cache = CacheManager()
-    
     prices = fetcher.fetch_close_prices(symbols, start_date, end_date)
     
     if prices.empty:
         print("Error: No data fetched")
-        return
+        return 1
     
-    print(f"✓ Fetched data for {len(prices.columns)} assets\n")
+    print(f"[OK] Fetched data for {len(prices.columns)} assets\n")
     
     returns = prices.pct_change().dropna()
     
@@ -89,7 +85,8 @@ def main():
     
     print("=== Analysis Complete ===")
     print("Run Streamlit app: streamlit run ui/streamlit_app.py")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

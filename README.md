@@ -53,6 +53,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Pro reprodukovatelnou produkcni nebo CI instalaci pouzijte uzamcene verze:
+
+```bash
+uv venv --python 3.12.13
+uv pip sync requirements.txt
+```
+
+`requirements.txt` je primo produkcni lock instalovany Streamlit Cloudem.
+Prime zavislosti se meni v `requirements.in`; vyvojove a testovaci prostredi
+se sestavi pres `requirements-dev.lock`. Soubor `.dependency-cutoff` zmrazi
+casovy pohled na balickovy index, aby regenerace locku zustala opakovatelna.
+
 ### Volitelne nastaveni GROQ_API_KEY
 
 Aplikace nacita API klic v tomto poradi:
@@ -93,6 +105,16 @@ export GROQ_API_KEY="gsk_..."
 
 ### Spusteni aplikace
 
+Explicitne oznacte lokalni prostredi:
+
+```powershell
+$env:QUANT_SIM_ENV="development"
+```
+
+```bash
+export QUANT_SIM_ENV=development
+```
+
 ```bash
 streamlit run ui/streamlit_app.py
 ```
@@ -100,10 +122,13 @@ streamlit run ui/streamlit_app.py
 ## 2) Deploy na Streamlit Cloud
 
 1. Nahrajte repozitar do GitHubu.
-2. Ve Streamlit Cloud zvolte repo a soubor `ui/streamlit_app.py`.
+2. Ve Streamlit Cloud zvolte repo a soubor `ui/streamlit_app.py`. V Advanced
+   settings explicitne zvolte Python 3.12, tedy stejnou minor verzi jako v CI.
 3. Do sekce **Secrets** vlozte hodnoty podle `.streamlit/secrets.toml.example`. Pro produkci jsou povinne:
 
 ```toml
+QUANT_SIM_ENV = "production"
+
 TURSO_DATABASE_URL = "libsql://your-database.turso.io"
 TURSO_AUTH_TOKEN = "your-turso-auth-token"
 TURSO_SYNC_INTERVAL_SECONDS = 30
@@ -126,6 +151,10 @@ R2_SECRET_ACCESS_KEY = "your-r2-secret-access-key"
 4. Nastavte hlavni soubor na `ui/streamlit_app.py` a nasadte aplikaci. Po prvnim spusteni se vytvori sdilena databazova struktura a aktualizuji se role zakladnich uzivatelu.
 
 Vsechny realne hodnoty patri pouze do Streamlit Cloud Secrets. Bez Turso by se prihlaseni a sdilena data po redeployi neuchovala; bez R2 by se neuchovaly nahrane soubory.
+
+`QUANT_SIM_ENV` muze byt systemova promenna nebo top-level Streamlit secret.
+Systemova promenna ma prednost. Streamlit server bez explicitni hodnoty se v
+perzistentnich vrstvach posuzuje fail-closed jako produkce.
 
 Poznamka: Pokud klic chybi nebo Groq neodpovi, aplikace bezi dal a pouzije zakladni komentar podle pravidel.
 
@@ -252,11 +281,20 @@ ui/
 requirements.txt
 ```
 
-## 8) Poznamky k dalsimu doladeni
+## 8) Release a provozni pripravenost
 
-- Pridat automatizovane testy (unit/integration) pro scoring, validace vstupu a exporty.
-- Volitelne pridat fallback model switch pro externi komentar.
-- Volitelne rozsirit data export o ZIP bundle (vice CSV souboru).
+- CI pri kazde zmene kontroluje lockfile, kompilaci, correctness lint, cely test suite,
+  warning-free beh a minimalne 57% celkove coverage.
+- Pred release se kontroluje cela Git historie na unikla tajemstvi a presne
+  instalovane zavislosti na zname bezpecnostni zranitelnosti.
+- Release artefakt obsahuje overeny CycloneDX SBOM a uplny licencni inventar
+  vsech produkcnich balicku.
+- Uspesny release vytvari 90denni artefakt svazany s plnym commit SHA a SHA-256
+  hashi vsech nasazovanych souboru. GitHub attestation potvrzuje jeho puvod a
+  stejny manifest overuje rollback kandidata.
+- Produkcni rezim odmita lokalni SQLite misto Turso, lokalni file storage misto R2
+  a nebezpecne API nastaveni jako wildcard CORS nebo vypnutou autentizaci.
+- Detailni release postup je v [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
 
 ## 9) Modular dashboard vrstva (nove)
 

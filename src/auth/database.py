@@ -7,6 +7,7 @@ connection handling, and data access functions.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import sqlite3
@@ -15,6 +16,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from src.utils.environment import is_production_environment
 
 # Database path - stored in project data directory
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +30,8 @@ if os.environ.get("AUTH_TEST_DB_PATH"):
 # Session expiry time (24 hours)
 SESSION_EXPIRY_HOURS = 24
 SESSION_TOUCH_INTERVAL = timedelta(minutes=5)
+DEFAULT_MAXIMUM_IP_FAILED_ATTEMPTS = 20
+MAX_CLIENT_ADDRESS_LENGTH = 128
 
 # Embedded replicas are local databases. Pulling the remote replica before every
 # short-lived connection turns each Streamlit rerun into a chain of network
@@ -36,6 +41,47 @@ _REMOTE_SYNC_LOCK = threading.Lock()
 _LAST_REMOTE_SYNC_BY_DATABASE: dict[str, float] = {}
 _AUTH_INITIALIZATION_LOCK = threading.Lock()
 _INITIALIZED_AUTH_DATABASES: set[str] = set()
+
+
+def _session_token_digest(token: str) -> str:
+    """Return the non-reversible database representation of a session token."""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _migrate_plaintext_session_tokens(connection: Any) -> None:
+    """Hash legacy session rows in place while preserving active client tokens."""
+    rows = connection.execute(
+        "SELECT token FROM sessions WHERE token NOT LIKE 'sha256:%'"
+    ).fetchall()
+    for row in rows:
+        plaintext_token = str(row[0])
+        connection.execute(
+            "UPDATE sessions SET token = ? WHERE token = ?",
+            (_session_token_digest(plaintext_token), plaintext_token),
+        )
+
+
+class ProductionDatabaseConfigError(RuntimeError):
+    """Raised when production would otherwise fall back to local SQLite."""
+
+
+def _resolve_turso_credentials() -> tuple[str | None, str | None]:
+    """Read Turso credentials without logging or exposing their values."""
+    turso_url = None
+    turso_token = None
+    try:
+        import streamlit as st
+
+        turso_url = st.secrets.get("TURSO_DATABASE_URL")
+        turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        pass
+
+    if not turso_url:
+        turso_url = os.environ.get("TURSO_DATABASE_URL")
+    if not turso_token:
+        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+    return turso_url, turso_token
 
 
 def _remote_sync_interval_seconds() -> float:
@@ -80,6 +126,16 @@ def _session_touch_is_due(last_accessed: Any, now: datetime) -> bool:
     if previous.tzinfo is None:
         previous = previous.replace(tzinfo=timezone.utc)
     return now - previous.astimezone(timezone.utc) >= SESSION_TOUCH_INTERVAL
+
+
+def _normalize_client_address(ip_address: Optional[str]) -> Optional[str]:
+    """Normalize a server-supplied client address before storing or querying it."""
+    if ip_address is None:
+        return None
+    normalized = str(ip_address).strip()
+    if not normalized:
+        return None
+    return normalized[:MAX_CLIENT_ADDRESS_LENGTH]
 
 
 def _row_to_dict(cursor, row) -> dict[str, Any] | None:
@@ -169,19 +225,17 @@ def _get_db_path() -> Path:
 
 def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
     """Get a database connection with proper settings. Uses Turso if configured."""
-    turso_url = None
-    turso_token = None
-    try:
-        import streamlit as st
-        turso_url = st.secrets.get("TURSO_DATABASE_URL")
-        turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
-    except Exception:
-        pass
+    turso_url, turso_token = _resolve_turso_credentials()
+    is_production = is_production_environment(fail_closed_streamlit=True)
 
-    if not turso_url:
-        turso_url = os.environ.get("TURSO_DATABASE_URL")
-    if not turso_token:
-        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+    if bool(turso_url) != bool(turso_token):
+        raise ProductionDatabaseConfigError(
+            "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be configured together."
+        )
+    if is_production and not turso_url:
+        raise ProductionDatabaseConfigError(
+            "Turso is required in production; refusing to fall back to local SQLite."
+        )
 
     if turso_url and turso_token:
         try:
@@ -190,6 +244,10 @@ def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
             try:
                 import libsql
             except ImportError:
+                if is_production:
+                    raise ProductionDatabaseConfigError(
+                        "The libsql client is required when Turso is configured in production."
+                    )
                 libsql = sqlite3
                 turso_url = None
 
@@ -270,6 +328,16 @@ def init_auth_database() -> None:
             CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time
             ON login_attempts(username, timestamp);
 
+            -- Indexes for client-scoped brute-force protection
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_username_ip_time
+            ON login_attempts(username, ip_address, timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time
+            ON login_attempts(ip_address, timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_success_reset
+            ON login_attempts(username, ip_address, success, id);
+
             -- Generic User Data table (for portfolios, swing_tracker, run_history)
             CREATE TABLE IF NOT EXISTS user_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,6 +350,7 @@ def init_auth_database() -> None:
                 UNIQUE (user_id, data_type, file_name)
             );
             """)
+            _migrate_plaintext_session_tokens(conn)
             conn.commit()
             if hasattr(conn, 'sync'):
                 conn.sync()
@@ -384,7 +453,9 @@ def authenticate_user_once(
     username: str,
     password_verifier: Callable[[str], bool],
     *,
+    ip_address: Optional[str] = None,
     maximum_failed_attempts: int = 5,
+    maximum_ip_failed_attempts: Optional[int] = None,
     failure_window_minutes: int = 10,
 ) -> tuple[Optional[str], Optional[dict[str, Any]], str]:
     """Validate credentials, audit the attempt, and create a session once.
@@ -394,23 +465,72 @@ def authenticate_user_once(
     """
     if maximum_failed_attempts < 1:
         raise ValueError("maximum_failed_attempts must be positive.")
+    if maximum_ip_failed_attempts is None:
+        maximum_ip_failed_attempts = max(
+            DEFAULT_MAXIMUM_IP_FAILED_ATTEMPTS,
+            maximum_failed_attempts,
+        )
+    if maximum_ip_failed_attempts < 1:
+        raise ValueError("maximum_ip_failed_attempts must be positive.")
     if failure_window_minutes < 1:
         raise ValueError("failure_window_minutes must be positive.")
 
+    client_address = _normalize_client_address(ip_address)
     conn = _get_connection()
     try:
         now = datetime.now(timezone.utc)
         since = (now - timedelta(minutes=failure_window_minutes)).isoformat()
-        failed_cursor = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM login_attempts
-            WHERE username = ? AND success = 0 AND timestamp > ?
-            """,
-            (username, since),
-        )
-        if int(failed_cursor.fetchone()[0]) >= maximum_failed_attempts:
-            return None, None, "rate_limited"
+        if client_address is None:
+            failed_cursor = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.username = ? AND failed.success = 0
+                      AND failed.timestamp > ? AND failed.ip_address IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.ip_address IS NULL
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                      )
+                """,
+                (username, since),
+            )
+            account_client_failures = int(failed_cursor.fetchone()[0])
+            client_failures = account_client_failures
+        else:
+            failed_cursor = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN username = ? THEN 1 ELSE 0 END),
+                    COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.success = 0 AND failed.timestamp > ?
+                      AND failed.ip_address = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.ip_address = failed.ip_address
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                      )
+                """,
+                (username, since, client_address),
+            )
+            failed_row = failed_cursor.fetchone()
+            account_client_failures = int(failed_row[0] or 0)
+            client_failures = int(failed_row[1] or 0)
+
+            # A block is scoped to the attacking client. Another address can
+            # still authenticate this account with valid credentials.
+            if (
+                account_client_failures >= maximum_failed_attempts
+                or client_failures >= maximum_ip_failed_attempts
+            ):
+                return None, None, "rate_limited"
 
         user_cursor = conn.execute(
             """
@@ -425,12 +545,28 @@ def authenticate_user_once(
             user is not None
             and password_verifier(str(user.get("password_hash") or ""))
         )
+
+        # Without a client address, never let anonymous failures lock a valid
+        # password out globally. Invalid attempts remain throttled, but callers
+        # should supply a server-derived address for pre-verification limiting.
+        if (
+            client_address is None
+            and not password_matches
+            and account_client_failures >= maximum_failed_attempts
+        ):
+            return None, None, "rate_limited"
+
         conn.execute(
             """
             INSERT INTO login_attempts (username, timestamp, success, ip_address)
             VALUES (?, ?, ?, ?)
             """,
-            (username, now.isoformat(), 1 if password_matches else 0, None),
+            (
+                username,
+                now.isoformat(),
+                1 if password_matches else 0,
+                client_address,
+            ),
         )
 
         token: Optional[str] = None
@@ -438,13 +574,20 @@ def authenticate_user_once(
         status = "invalid_credentials"
         if password_matches and user is not None:
             token = secrets.token_urlsafe(32)
+            token_digest = _session_token_digest(token)
             expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
             conn.execute(
                 """
                 INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (token, int(user["id"]), now.isoformat(), expires_at, now.isoformat()),
+                (
+                    token_digest,
+                    int(user["id"]),
+                    now.isoformat(),
+                    expires_at,
+                    now.isoformat(),
+                ),
             )
             safe_user = {
                 key: value
@@ -523,6 +666,7 @@ def create_session(user_id: int) -> str:
     try:
         # Generate secure random token
         token = secrets.token_urlsafe(32)
+        token_digest = _session_token_digest(token)
         now = datetime.now(timezone.utc)
         created_at = now.isoformat()
         expires_at = (now + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
@@ -532,7 +676,7 @@ def create_session(user_id: int) -> str:
             INSERT INTO sessions (token, user_id, created_at, expires_at, last_accessed)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (token, user_id, created_at, expires_at, created_at),
+            (token_digest, user_id, created_at, expires_at, created_at),
         )
         conn.commit()
         if hasattr(conn, 'sync'):
@@ -553,6 +697,7 @@ def validate_session_token(token: str) -> bool:
     """
     conn = _get_connection()
     try:
+        token_digest = _session_token_digest(token)
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
@@ -564,7 +709,7 @@ def validate_session_token(token: str) -> bool:
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > ? AND u.is_active = 1
             """,
-            (token, now_iso),
+            (token_digest, now_iso),
         )
         row = cursor.fetchone()
 
@@ -572,7 +717,7 @@ def validate_session_token(token: str) -> bool:
             if _session_touch_is_due(row["last_accessed"], now):
                 conn.execute(
                     "UPDATE sessions SET last_accessed = ? WHERE token = ?",
-                    (now_iso, token),
+                    (now_iso, token_digest),
                 )
                 conn.commit()
                 if hasattr(conn, 'sync'):
@@ -591,6 +736,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
     """
     conn = _get_connection()
     try:
+        token_digest = _session_token_digest(token)
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
@@ -602,7 +748,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > ? AND u.is_active = 1
             """,
-            (token, now_iso),
+            (token_digest, now_iso),
         )
         row = cursor.fetchone()
 
@@ -610,7 +756,7 @@ def get_user_by_session_token(token: str) -> Optional[dict[str, Any]]:
             if _session_touch_is_due(row["_last_accessed"], now):
                 conn.execute(
                     "UPDATE sessions SET last_accessed = ? WHERE token = ?",
-                    (now_iso, token),
+                    (now_iso, token_digest),
                 )
                 conn.commit()
                 if hasattr(conn, 'sync'):
@@ -628,7 +774,10 @@ def revoke_session(token: str) -> None:
     """Revoke (delete) a session token."""
     conn = _get_connection()
     try:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.execute(
+            "DELETE FROM sessions WHERE token = ?",
+            (_session_token_digest(token),),
+        )
         conn.commit()
         if hasattr(conn, 'sync'):
             conn.sync()
@@ -711,7 +860,12 @@ def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = 
         timestamp = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT INTO login_attempts (username, timestamp, success, ip_address) VALUES (?, ?, ?, ?)",
-            (username, timestamp, 1 if success else 0, ip_address),
+            (
+                username,
+                timestamp,
+                1 if success else 0,
+                _normalize_client_address(ip_address),
+            ),
         )
         conn.commit()
         if hasattr(conn, 'sync'):
@@ -720,15 +874,58 @@ def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = 
         conn.close()
 
 
-def get_recent_failed_attempts(username: str, minutes: int = 10) -> int:
-    """Count failed login attempts for a user in the last X minutes."""
+def get_recent_failed_attempts(
+    username: str,
+    minutes: int = 10,
+    ip_address: Optional[str] = None,
+) -> int:
+    """Count active failures, ignoring those reset by a later matching success."""
     conn = _get_connection()
     try:
         since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > ?",
-            (username, since),
-        )
+        client_address = _normalize_client_address(ip_address)
+        if client_address is None:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.username = ? AND failed.success = 0
+                      AND failed.timestamp > ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                                AND (
+                                    succeeded.ip_address = failed.ip_address
+                                    OR (
+                                        succeeded.ip_address IS NULL
+                                        AND failed.ip_address IS NULL
+                                    )
+                                )
+                      )
+                """,
+                (username, since),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.username = ? AND failed.success = 0
+                      AND failed.timestamp > ? AND failed.ip_address = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.ip_address = failed.ip_address
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                      )
+                """,
+                (username, since, client_address),
+            )
         return cursor.fetchone()[0]
     finally:
         conn.close()

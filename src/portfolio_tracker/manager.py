@@ -316,7 +316,7 @@ def _fetch_latest_prices(tickers: list[str]) -> dict[str, float]:
     return prices
 
 
-def compute_live_values(portfolio: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
+def compute_live_values(portfolio: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float | bool]]:
     """
     Compute live value snapshot for portfolio positions.
 
@@ -340,7 +340,22 @@ def compute_live_values(portfolio: dict[str, Any]) -> tuple[pd.DataFrame, dict[s
                 "CurrentWeight",
             ]
         )
-        return empty, {"TotalMarketValue": 0.0, "TotalCostValue": 0.0, "TotalPnL": 0.0, "PricedPositions": 0.0}
+        return empty, {
+            "TotalMarketValue": 0.0,
+            "TotalCostValue": 0.0,
+            "PricedCostValue": 0.0,
+            "TotalPnL": 0.0,
+            "PricedPositions": 0.0,
+            "TotalPositions": 0.0,
+            "UnpricedPositions": 0.0,
+            "PriceCoveragePct": 1.0,
+            "PnlCoveredPositions": 0.0,
+            "PnlCoveragePct": 1.0,
+            "MissingCostPositions": 0.0,
+            "MissingCostMarketValue": 0.0,
+            "UnpricedCostValue": 0.0,
+            "PartialCoverage": False,
+        }
 
     tickers = sorted({str(item.get("ticker", "")).upper() for item in positions if str(item.get("ticker", "")).strip()})
     latest_prices = _fetch_latest_prices(tickers)
@@ -376,20 +391,48 @@ def compute_live_values(portfolio: dict[str, Any]) -> tuple[pd.DataFrame, dict[s
         )
 
     holdings = pd.DataFrame(rows)
-    total_market_value = float(pd.to_numeric(holdings["MarketValue"], errors="coerce").sum(min_count=1) or 0.0)
-    total_cost_value = float(pd.to_numeric(holdings["CostValue"], errors="coerce").sum(min_count=1) or 0.0)
-    total_pnl = total_market_value - total_cost_value
+    market_values = pd.to_numeric(holdings["MarketValue"], errors="coerce")
+    cost_values = pd.to_numeric(holdings["CostValue"], errors="coerce")
+    priced_mask = market_values.notna()
+    pnl_covered_mask = priced_mask & cost_values.notna()
+
+    # Only compare market value with cost for positions that have both inputs.
+    # Missing quote/cost scopes remain visible separately for auditability.
+    total_market_value = float(market_values.loc[priced_mask].sum())
+    total_cost_value = float(cost_values.sum())
+    priced_cost_value = float(cost_values.loc[pnl_covered_mask].sum())
+    unpriced_cost_value = float(cost_values.loc[~priced_mask].sum())
+    missing_cost_market_value = float(market_values.loc[priced_mask & cost_values.isna()].sum())
+    total_pnl = float(
+        (market_values.loc[pnl_covered_mask] - cost_values.loc[pnl_covered_mask]).sum()
+    )
+
+    priced_positions = int(priced_mask.sum())
+    pnl_covered_positions = int(pnl_covered_mask.sum())
+    total_positions = int(len(holdings))
+    unpriced_positions = total_positions - priced_positions
+    missing_cost_positions = int((priced_mask & cost_values.isna()).sum())
 
     if total_market_value > 0:
-        holdings["CurrentWeight"] = pd.to_numeric(holdings["MarketValue"], errors="coerce") / total_market_value
+        holdings["CurrentWeight"] = market_values / total_market_value
     else:
         holdings["CurrentWeight"] = np.nan
 
     summary = {
         "TotalMarketValue": total_market_value,
         "TotalCostValue": total_cost_value,
+        "PricedCostValue": priced_cost_value,
         "TotalPnL": total_pnl,
-        "PricedPositions": float(holdings["Price"].notna().sum()),
+        "PricedPositions": float(priced_positions),
+        "TotalPositions": float(total_positions),
+        "UnpricedPositions": float(unpriced_positions),
+        "PriceCoveragePct": priced_positions / total_positions if total_positions else 1.0,
+        "PnlCoveredPositions": float(pnl_covered_positions),
+        "PnlCoveragePct": pnl_covered_positions / total_positions if total_positions else 1.0,
+        "MissingCostPositions": float(missing_cost_positions),
+        "MissingCostMarketValue": missing_cost_market_value,
+        "UnpricedCostValue": unpriced_cost_value,
+        "PartialCoverage": bool(unpriced_positions or missing_cost_positions),
     }
     return holdings, summary
 
