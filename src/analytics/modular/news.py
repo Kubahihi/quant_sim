@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import html
@@ -7,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Sequence, Tuple
 import urllib.error
 import urllib.parse
@@ -21,7 +23,11 @@ logger = logging.getLogger(__name__)
 
 _NEWS_CACHE: Dict[str, Tuple[datetime, List["RawNewsItem"], List[str], str]] = {}
 _CACHE_TTL_SECONDS = 15 * 60
-_CACHE_SCHEMA_VERSION = "news_v3"
+_CACHE_SCHEMA_VERSION = "news_v4"
+_DEFAULT_FETCH_TIME_BUDGET_SECONDS = 8.0
+_DEFAULT_MIN_ITEMS_BEFORE_EARLY_STOP = 20
+_PRIMARY_PROVIDER_GRACE_SECONDS = 1.0
+_MAX_PROVIDER_WORKERS = 3
 
 _MACRO_KEYWORDS = [
     "earnings",
@@ -45,6 +51,12 @@ class RawNewsItem:
     summary: str
     raw_text: str = ""
     query_context: str = ""
+
+
+@dataclass
+class _ProviderFetchResult:
+    items: List[RawNewsItem]
+    error: str = ""
 
 
 class NewsProvider:
@@ -122,11 +134,58 @@ def _build_sentiment_analyzer() -> SentimentAnalyzer:
         return LexiconSentimentAnalyzer()
 
 
+def _coerce_fetch_time_budget(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = _DEFAULT_FETCH_TIME_BUDGET_SECONDS
+    if not np.isfinite(parsed):
+        parsed = _DEFAULT_FETCH_TIME_BUDGET_SECONDS
+    return max(0.01, min(60.0, parsed))
+
+
+def _remaining_fetch_time(context: Dict[str, Any] | None) -> float | None:
+    if not context:
+        return None
+    deadline = context.get("_news_fetch_deadline_monotonic")
+    if deadline is None:
+        return None
+    try:
+        return max(0.0, float(deadline) - time.monotonic())
+    except (TypeError, ValueError):
+        return None
+
+
+def _request_timeout(context: Dict[str, Any] | None, maximum: float = 10.0) -> float:
+    remaining = _remaining_fetch_time(context)
+    if remaining is not None:
+        if remaining <= 0:
+            raise TimeoutError("news fetch time budget exhausted")
+        return max(0.001, min(float(maximum), remaining))
+    return float(maximum)
+
+
+def _fetch_budget_exhausted(context: Dict[str, Any] | None) -> bool:
+    remaining = _remaining_fetch_time(context)
+    return remaining is not None and remaining <= 0
+
+
+def _sufficient_item_count(context: Dict[str, Any] | None) -> int:
+    raw_value = (context or {}).get(
+        "_news_sufficient_items",
+        _DEFAULT_MIN_ITEMS_BEFORE_EARLY_STOP,
+    )
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        return _DEFAULT_MIN_ITEMS_BEFORE_EARLY_STOP
+
+
 class NewsApiProvider(NewsProvider):
     provider_name = "newsapi"
 
     @staticmethod
-    def _request_json(url: str, api_key: str) -> Dict[str, Any]:
+    def _request_json(url: str, api_key: str, timeout: float = 10.0) -> Dict[str, Any]:
         request = urllib.request.Request(
             url,
             headers={
@@ -135,7 +194,7 @@ class NewsApiProvider(NewsProvider):
                 "X-Api-Key": api_key,
             },
         )
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
@@ -185,7 +244,11 @@ class NewsApiProvider(NewsProvider):
         }
         url = "https://newsapi.org/v2/everything?" + urllib.parse.urlencode(params)
         try:
-            payload = self._request_json(url, api_key=api_key)
+            payload = self._request_json(
+                url,
+                api_key=api_key,
+                timeout=_request_timeout(context),
+            )
             if payload.get("status") == "ok":
                 parsed = self._parse_articles(payload, query_context=query_context)
                 if parsed:
@@ -198,7 +261,11 @@ class NewsApiProvider(NewsProvider):
                     "sortBy": "publishedAt",
                 }
                 fallback_url = "https://newsapi.org/v2/everything?" + urllib.parse.urlencode(fallback_params)
-                fallback_payload = self._request_json(fallback_url, api_key=api_key)
+                fallback_payload = self._request_json(
+                    fallback_url,
+                    api_key=api_key,
+                    timeout=_request_timeout(context),
+                )
                 if fallback_payload.get("status") == "ok":
                     return self._parse_articles(fallback_payload, query_context=query_context)
                 return []
@@ -223,7 +290,11 @@ class NewsApiProvider(NewsProvider):
             }
             fallback_url = "https://newsapi.org/v2/top-headlines?" + urllib.parse.urlencode(headline_params)
             try:
-                payload = self._request_json(fallback_url, api_key=api_key)
+                payload = self._request_json(
+                    fallback_url,
+                    api_key=api_key,
+                    timeout=_request_timeout(context),
+                )
                 if payload.get("status") == "ok":
                     return self._parse_articles(payload, query_context=query_context)
                 message = str(payload.get("message", "NewsAPI fallback response status is not ok"))
@@ -242,6 +313,7 @@ class YahooNewsProvider(NewsProvider):
     provider_name = "yfinance"
 
     def fetch(self, tickers: List[str], start_date: datetime, end_date: datetime, context: Dict[str, Any] | None = None) -> List[RawNewsItem]:
+        context = context or {}
         try:
             import yfinance as yf
         except Exception as exc:
@@ -249,7 +321,11 @@ class YahooNewsProvider(NewsProvider):
             raise
 
         raw_items: List[RawNewsItem] = []
+        sufficient_items = _sufficient_item_count(context)
         for ticker in tickers[:5]:
+            if _fetch_budget_exhausted(context):
+                logger.info("Yahoo news stopped after reaching the total fetch time budget.")
+                break
             try:
                 yf_ticker = yf.Ticker(ticker)
                 items = getattr(yf_ticker, "news", []) or []
@@ -278,6 +354,8 @@ class YahooNewsProvider(NewsProvider):
                 except Exception as exc:
                     logger.warning("yfinance news item parsing failed: %s", exc)
                     continue
+            if len(_dedupe_raw_items(raw_items)) >= sufficient_items:
+                break
         return _dedupe_raw_items(raw_items)
 
 
@@ -307,10 +385,17 @@ class GoogleRssNewsProvider(NewsProvider):
 
         all_items: List[RawNewsItem] = []
         fetch_errors: List[str] = []
+        sufficient_items = _sufficient_item_count(context)
         for query in unique_queries[:20]:
+            if _fetch_budget_exhausted(context):
+                fetch_errors.append("news fetch time budget exhausted")
+                break
             rss_url = "https://news.google.com/rss/search?q=" + urllib.parse.quote(query)
             try:
-                with urllib.request.urlopen(rss_url, timeout=10) as response:
+                with urllib.request.urlopen(
+                    rss_url,
+                    timeout=_request_timeout(context),
+                ) as response:
                     payload = response.read()
                 root = ET.fromstring(payload)
             except Exception as exc:
@@ -341,6 +426,8 @@ class GoogleRssNewsProvider(NewsProvider):
                 except Exception as exc:
                     logger.warning("Google RSS item parsing failed: %s", exc)
                     continue
+            if len(_dedupe_raw_items(all_items)) >= sufficient_items:
+                break
 
         deduped = _dedupe_raw_items(all_items)
         if deduped:
@@ -560,6 +647,8 @@ def _cache_key(
     end_date: datetime,
     context: Dict[str, Any],
     provider_names: Sequence[str],
+    fetch_time_budget_seconds: float = _DEFAULT_FETCH_TIME_BUDGET_SECONDS,
+    min_items_before_early_stop: int = _DEFAULT_MIN_ITEMS_BEFORE_EARLY_STOP,
 ) -> str:
     payload = {
         "schema": _CACHE_SCHEMA_VERSION,
@@ -568,6 +657,8 @@ def _cache_key(
         "end": end_date.date().isoformat(),
         "keywords": _normalized_keywords(context),
         "providers": list(provider_names),
+        "fetch_time_budget_seconds": round(float(fetch_time_budget_seconds), 3),
+        "min_items_before_early_stop": int(min_items_before_early_stop),
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -588,15 +679,54 @@ def clear_news_cache() -> None:
     _NEWS_CACHE.clear()
 
 
+def _fetch_provider_safely(
+    provider: NewsProvider,
+    tickers: List[str],
+    start_date: datetime,
+    end_date: datetime,
+    context: Dict[str, Any],
+) -> _ProviderFetchResult:
+    try:
+        items = provider.fetch(tickers, start_date, end_date, context=context) or []
+        normalized = _dedupe_raw_items(items)
+        sanitized = [
+            prepared
+            for prepared in (_sanitize_raw_item(item) for item in normalized)
+            if prepared is not None
+        ]
+        return _ProviderFetchResult(items=sanitized)
+    except MissingAPIKeyError as exc:
+        message = f"{provider.provider_name}: {exc}"
+        logger.info(message)
+        return _ProviderFetchResult(items=[], error=message)
+    except Exception as exc:
+        message = f"{provider.provider_name} fetch failed: {exc}"
+        logger.warning(message)
+        return _ProviderFetchResult(items=[], error=message)
+
+
 def _fetch_raw_news(
     tickers: List[str],
     start_date: datetime,
     end_date: datetime,
     context: Dict[str, Any],
     providers: Sequence[NewsProvider],
+    fetch_time_budget_seconds: float = _DEFAULT_FETCH_TIME_BUDGET_SECONDS,
+    min_items_before_early_stop: int = _DEFAULT_MIN_ITEMS_BEFORE_EARLY_STOP,
 ) -> Tuple[List[RawNewsItem], List[str], str]:
-    provider_names = [provider.provider_name for provider in providers]
-    key = _cache_key(tickers, start_date, end_date, context, provider_names)
+    provider_list = list(providers)
+    provider_names = [provider.provider_name for provider in provider_list]
+    time_budget = _coerce_fetch_time_budget(fetch_time_budget_seconds)
+    sufficient_items = max(1, int(min_items_before_early_stop))
+    key = _cache_key(
+        tickers,
+        start_date,
+        end_date,
+        context,
+        provider_names,
+        fetch_time_budget_seconds=time_budget,
+        min_items_before_early_stop=sufficient_items,
+    )
     now = datetime.now(timezone.utc)
     cached = _NEWS_CACHE.get(key)
     if cached:
@@ -604,38 +734,137 @@ def _fetch_raw_news(
         if (now - cached_at).total_seconds() <= _CACHE_TTL_SECONDS:
             return list(cached_items), _clean_fetch_errors(cached_errors), used_provider
 
+    if not provider_list:
+        _NEWS_CACHE[key] = (now, [], [], "none")
+        return [], [], "none"
+
+    deadline = time.monotonic() + time_budget
+    provider_context = {
+        **context,
+        "_news_fetch_deadline_monotonic": deadline,
+        "_news_sufficient_items": sufficient_items,
+    }
+    executor = ThreadPoolExecutor(
+        max_workers=min(_MAX_PROVIDER_WORKERS, len(provider_list)),
+        thread_name_prefix="news-provider",
+    )
+    futures: Dict[int, Future[_ProviderFetchResult]] = {}
+    results: Dict[int, _ProviderFetchResult] = {}
+    early_stop_index: int | None = None
+
+    def submit_provider(index: int) -> None:
+        futures[index] = executor.submit(
+            _fetch_provider_safely,
+            provider_list[index],
+            tickers,
+            start_date,
+            end_date,
+            dict(provider_context),
+        )
+
+    def collect_completed(completed: Sequence[Future[_ProviderFetchResult]]) -> None:
+        completed_set = set(completed)
+        for index, future in futures.items():
+            if future not in completed_set or index in results:
+                continue
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                message = f"{provider_names[index]} fetch failed: {exc}"
+                logger.warning(message)
+                results[index] = _ProviderFetchResult(items=[], error=message)
+
+    try:
+        # Give the preferred provider a short head start. A quick, sufficiently
+        # complete response avoids launching fallbacks; a slow primary cannot
+        # consume the entire news budget before fallbacks start concurrently.
+        submit_provider(0)
+        primary_grace = min(
+            _PRIMARY_PROVIDER_GRACE_SECONDS,
+            time_budget * 0.2,
+            max(0.0, deadline - time.monotonic()),
+        )
+        if primary_grace > 0:
+            completed, _ = wait(
+                [futures[0]],
+                timeout=primary_grace,
+            )
+            collect_completed(list(completed))
+
+        if 0 in results and len(_dedupe_raw_items(results[0].items)) >= sufficient_items:
+            early_stop_index = 0
+        else:
+            for index in range(1, len(provider_list)):
+                if time.monotonic() >= deadline:
+                    break
+                submit_provider(index)
+
+            pending = {
+                future
+                for index, future in futures.items()
+                if index not in results
+            }
+            remaining = deadline - time.monotonic()
+            if pending and remaining > 0:
+                completed, _ = wait(pending, timeout=remaining)
+                collect_completed(list(completed))
+
+        if early_stop_index is not None:
+            for index, future in futures.items():
+                if index > early_stop_index:
+                    future.cancel()
+            results = {
+                index: result
+                for index, result in results.items()
+                if index <= early_stop_index
+            }
+        else:
+            # Capture futures that completed at the deadline boundary before
+            # classifying the remaining work as timed out.
+            collect_completed([future for future in futures.values() if future.done()])
+            timeout_message = (
+                f"fetch timed out after {time_budget:.2f}s total news budget"
+            )
+            for index, provider_name in enumerate(provider_names):
+                if index in results:
+                    continue
+                future = futures.get(index)
+                if future is not None:
+                    future.cancel()
+                results[index] = _ProviderFetchResult(
+                    items=[],
+                    error=f"{provider_name} {timeout_message}",
+                )
+    finally:
+        # Never wait beyond the caller-visible budget. Built-in HTTP providers
+        # also receive the shared deadline so their in-flight work exits soon.
+        executor.shutdown(wait=False, cancel_futures=True)
+
     errors: List[str] = []
-    used_provider = "none"
     successful_providers: List[str] = []
     aggregated: List[RawNewsItem] = []
-    for provider in providers:
-        try:
-            items = provider.fetch(tickers, start_date, end_date, context=context)
-        except MissingAPIKeyError as exc:
-            message = f"{provider.provider_name}: {exc}"
-            logger.info(message)
-            errors.append(message)
+    for index, provider in enumerate(provider_list):
+        result = results.get(index)
+        if result is None:
             continue
-        except Exception as exc:
-            message = f"{provider.provider_name} fetch failed: {exc}"
-            logger.warning(message)
-            errors.append(message)
-            continue
-
-        normalized = _dedupe_raw_items(items)
-        sanitized = [prepared for prepared in (_sanitize_raw_item(item) for item in normalized) if prepared is not None]
-        if sanitized:
-            aggregated.extend(sanitized)
+        if result.error:
+            errors.append(result.error)
+        if result.items:
+            aggregated.extend(result.items)
             successful_providers.append(provider.provider_name)
-        else:
+        elif not result.error:
             logger.info("%s returned empty result for current query.", provider.provider_name)
 
     deduped = _dedupe_raw_items(aggregated)
-    if deduped:
-        used_provider = ",".join(successful_providers[:3])
+    used_provider = ",".join(successful_providers[:3]) if deduped else "none"
 
     clean_errors = _clean_fetch_errors(errors)
-    _NEWS_CACHE[key] = (now, deduped, clean_errors, used_provider)
+    _NEWS_CACHE[key] = (
+        datetime.now(timezone.utc),
+        deduped,
+        clean_errors,
+        used_provider,
+    )
     return deduped, clean_errors, used_provider
 
 
@@ -647,9 +876,16 @@ def build_news_analysis(
     provider: NewsProvider | None = None,
     analyzer: SentimentAnalyzer | None = None,
     max_items: int = 120,
+    fetch_time_budget_seconds: float = _DEFAULT_FETCH_TIME_BUDGET_SECONDS,
+    min_items_before_early_stop: int = _DEFAULT_MIN_ITEMS_BEFORE_EARLY_STOP,
 ) -> NewsResult:
     use_context = dict(context or {})
     sentiment_analyzer = analyzer or _build_sentiment_analyzer()
+    fetch_budget = _coerce_fetch_time_budget(fetch_time_budget_seconds)
+    target_item_count = min(
+        max(1, int(max_items)),
+        max(1, int(min_items_before_early_stop)),
+    )
 
     if provider is None:
         real_providers: List[NewsProvider] = [
@@ -663,6 +899,8 @@ def build_news_analysis(
             end_date=end_date,
             context=use_context,
             providers=real_providers,
+            fetch_time_budget_seconds=fetch_budget,
+            min_items_before_early_stop=target_item_count,
         )
         if not raw_items:
             sample_items, sample_errors, sample_provider = _fetch_raw_news(
@@ -671,6 +909,8 @@ def build_news_analysis(
                 end_date=end_date,
                 context=use_context,
                 providers=[SampleNewsProvider()],
+                fetch_time_budget_seconds=fetch_budget,
+                min_items_before_early_stop=target_item_count,
             )
             raw_items = sample_items
             errors = [*errors, *sample_errors]
@@ -682,6 +922,8 @@ def build_news_analysis(
             end_date=end_date,
             context=use_context,
             providers=[provider],
+            fetch_time_budget_seconds=fetch_budget,
+            min_items_before_early_stop=target_item_count,
         )
     errors = _clean_fetch_errors(errors)
 

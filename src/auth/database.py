@@ -27,6 +27,8 @@ if os.environ.get("AUTH_TEST_DB_PATH"):
 # Session expiry time (24 hours)
 SESSION_EXPIRY_HOURS = 24
 SESSION_TOUCH_INTERVAL = timedelta(minutes=5)
+DEFAULT_MAXIMUM_IP_FAILED_ATTEMPTS = 20
+MAX_CLIENT_ADDRESS_LENGTH = 128
 
 # Embedded replicas are local databases. Pulling the remote replica before every
 # short-lived connection turns each Streamlit rerun into a chain of network
@@ -80,6 +82,16 @@ def _session_touch_is_due(last_accessed: Any, now: datetime) -> bool:
     if previous.tzinfo is None:
         previous = previous.replace(tzinfo=timezone.utc)
     return now - previous.astimezone(timezone.utc) >= SESSION_TOUCH_INTERVAL
+
+
+def _normalize_client_address(ip_address: Optional[str]) -> Optional[str]:
+    """Normalize a server-supplied client address before storing or querying it."""
+    if ip_address is None:
+        return None
+    normalized = str(ip_address).strip()
+    if not normalized:
+        return None
+    return normalized[:MAX_CLIENT_ADDRESS_LENGTH]
 
 
 def _row_to_dict(cursor, row) -> dict[str, Any] | None:
@@ -270,6 +282,16 @@ def init_auth_database() -> None:
             CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time
             ON login_attempts(username, timestamp);
 
+            -- Indexes for client-scoped brute-force protection
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_username_ip_time
+            ON login_attempts(username, ip_address, timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time
+            ON login_attempts(ip_address, timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_success_reset
+            ON login_attempts(username, ip_address, success, id);
+
             -- Generic User Data table (for portfolios, swing_tracker, run_history)
             CREATE TABLE IF NOT EXISTS user_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,7 +406,9 @@ def authenticate_user_once(
     username: str,
     password_verifier: Callable[[str], bool],
     *,
+    ip_address: Optional[str] = None,
     maximum_failed_attempts: int = 5,
+    maximum_ip_failed_attempts: Optional[int] = None,
     failure_window_minutes: int = 10,
 ) -> tuple[Optional[str], Optional[dict[str, Any]], str]:
     """Validate credentials, audit the attempt, and create a session once.
@@ -394,23 +418,72 @@ def authenticate_user_once(
     """
     if maximum_failed_attempts < 1:
         raise ValueError("maximum_failed_attempts must be positive.")
+    if maximum_ip_failed_attempts is None:
+        maximum_ip_failed_attempts = max(
+            DEFAULT_MAXIMUM_IP_FAILED_ATTEMPTS,
+            maximum_failed_attempts,
+        )
+    if maximum_ip_failed_attempts < 1:
+        raise ValueError("maximum_ip_failed_attempts must be positive.")
     if failure_window_minutes < 1:
         raise ValueError("failure_window_minutes must be positive.")
 
+    client_address = _normalize_client_address(ip_address)
     conn = _get_connection()
     try:
         now = datetime.now(timezone.utc)
         since = (now - timedelta(minutes=failure_window_minutes)).isoformat()
-        failed_cursor = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM login_attempts
-            WHERE username = ? AND success = 0 AND timestamp > ?
-            """,
-            (username, since),
-        )
-        if int(failed_cursor.fetchone()[0]) >= maximum_failed_attempts:
-            return None, None, "rate_limited"
+        if client_address is None:
+            failed_cursor = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.username = ? AND failed.success = 0
+                      AND failed.timestamp > ? AND failed.ip_address IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.ip_address IS NULL
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                      )
+                """,
+                (username, since),
+            )
+            account_client_failures = int(failed_cursor.fetchone()[0])
+            client_failures = account_client_failures
+        else:
+            failed_cursor = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN username = ? THEN 1 ELSE 0 END),
+                    COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.success = 0 AND failed.timestamp > ?
+                      AND failed.ip_address = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.ip_address = failed.ip_address
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                      )
+                """,
+                (username, since, client_address),
+            )
+            failed_row = failed_cursor.fetchone()
+            account_client_failures = int(failed_row[0] or 0)
+            client_failures = int(failed_row[1] or 0)
+
+            # A block is scoped to the attacking client. Another address can
+            # still authenticate this account with valid credentials.
+            if (
+                account_client_failures >= maximum_failed_attempts
+                or client_failures >= maximum_ip_failed_attempts
+            ):
+                return None, None, "rate_limited"
 
         user_cursor = conn.execute(
             """
@@ -425,12 +498,28 @@ def authenticate_user_once(
             user is not None
             and password_verifier(str(user.get("password_hash") or ""))
         )
+
+        # Without a client address, never let anonymous failures lock a valid
+        # password out globally. Invalid attempts remain throttled, but callers
+        # should supply a server-derived address for pre-verification limiting.
+        if (
+            client_address is None
+            and not password_matches
+            and account_client_failures >= maximum_failed_attempts
+        ):
+            return None, None, "rate_limited"
+
         conn.execute(
             """
             INSERT INTO login_attempts (username, timestamp, success, ip_address)
             VALUES (?, ?, ?, ?)
             """,
-            (username, now.isoformat(), 1 if password_matches else 0, None),
+            (
+                username,
+                now.isoformat(),
+                1 if password_matches else 0,
+                client_address,
+            ),
         )
 
         token: Optional[str] = None
@@ -711,7 +800,12 @@ def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = 
         timestamp = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT INTO login_attempts (username, timestamp, success, ip_address) VALUES (?, ?, ?, ?)",
-            (username, timestamp, 1 if success else 0, ip_address),
+            (
+                username,
+                timestamp,
+                1 if success else 0,
+                _normalize_client_address(ip_address),
+            ),
         )
         conn.commit()
         if hasattr(conn, 'sync'):
@@ -720,15 +814,58 @@ def log_login_attempt(username: str, success: bool, ip_address: Optional[str] = 
         conn.close()
 
 
-def get_recent_failed_attempts(username: str, minutes: int = 10) -> int:
-    """Count failed login attempts for a user in the last X minutes."""
+def get_recent_failed_attempts(
+    username: str,
+    minutes: int = 10,
+    ip_address: Optional[str] = None,
+) -> int:
+    """Count active failures, ignoring those reset by a later matching success."""
     conn = _get_connection()
     try:
         since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > ?",
-            (username, since),
-        )
+        client_address = _normalize_client_address(ip_address)
+        if client_address is None:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.username = ? AND failed.success = 0
+                      AND failed.timestamp > ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                                AND (
+                                    succeeded.ip_address = failed.ip_address
+                                    OR (
+                                        succeeded.ip_address IS NULL
+                                        AND failed.ip_address IS NULL
+                                    )
+                                )
+                      )
+                """,
+                (username, since),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM login_attempts AS failed
+                WHERE failed.username = ? AND failed.success = 0
+                      AND failed.timestamp > ? AND failed.ip_address = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM login_attempts AS succeeded
+                          WHERE succeeded.username = failed.username
+                                AND succeeded.ip_address = failed.ip_address
+                                AND succeeded.success = 1
+                                AND succeeded.id > failed.id
+                      )
+                """,
+                (username, since, client_address),
+            )
         return cursor.fetchone()[0]
     finally:
         conn.close()

@@ -364,6 +364,14 @@ class TestMigration(TestCase):
              patch("src.auth.migrations.get_user_by_username", return_value=None), \
              patch("src.auth.migrations.user_exists", return_value=False):
             self.assertIsNone(create_default_user())
+
+    def test_create_default_user_rejects_weak_password(self):
+        with patch.dict(os.environ, {"ADMIN_BOOTSTRAP_PASSWORD": "password"}), \
+             patch("src.auth.migrations.get_user_by_username", return_value=None), \
+             patch("src.auth.migrations.user_exists", return_value=False), \
+             patch("src.auth.migrations.create_user") as create_user_mock:
+            self.assertIsNone(create_default_user())
+            create_user_mock.assert_not_called()
     
     def test_migrate_existing_data(self):
         result = migrate_existing_data(dry_run=True)

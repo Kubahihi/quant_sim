@@ -3,7 +3,7 @@ Tests for optimize_minimum_variance.
 
 Covers both the original tests (preserved) and regression tests for every
 bug fixed in the refactor:
-  1. max_weight infeasibility guard (was absent, silently failed).
+  1. max_weight infeasibility fails closed instead of changing the mandate.
   2. Singular / near-zero-variance covariance matrix (no sqrt of negative).
   3. 'message' key present in return dict (API consistency with maximum_sharpe).
   4. allow_short=True + max_weight respected together.
@@ -115,18 +115,10 @@ class TestMaxWeightFeasibility:
         assert result["success"]
         assert np.all(result["weights"] <= 0.6 + 1e-6)
 
-    def test_infeasible_max_weight_relaxed_not_failed(self, sample_returns: pd.DataFrame):
-        """max_weight=0.1 for 3 assets (0.1 * 3 = 0.3 < 1.0) is infeasible.
-        The guard must relax the bound and still return a valid solution
-        rather than silently returning success=False.
-        """
-        result = optimize_minimum_variance(sample_returns, max_weight=0.1)
-        # After relaxation the optimiser should converge.
-        assert result["success"], (
-            "Expected relaxed solution, got failure. "
-            "Infeasibility guard may be missing."
-        )
-        assert np.isclose(result["weights"].sum(), 1.0, atol=1e-6)
+    def test_infeasible_max_weight_fails_closed(self, sample_returns: pd.DataFrame):
+        """A client mandate must never be silently relaxed by the optimizer."""
+        with pytest.raises(ValueError, match="infeasible for 3 assets"):
+            optimize_minimum_variance(sample_returns, max_weight=0.1)
 
     def test_invalid_max_weight_zero_raises(self, sample_returns: pd.DataFrame):
         with pytest.raises(ValueError, match="max_weight must be positive"):

@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import pandas as pd
@@ -11,12 +12,13 @@ class CacheManager:
 
     The underlying SQLite schema uses a composite PRIMARY KEY (symbol, date)
     on the ``prices`` table and a simple PRIMARY KEY (symbol) on
-    ``cache_metadata``.  All writes use ``INSERT OR REPLACE`` (SQL UPSERT)
-    so that:
+    ``cache_metadata``. Price rows use ``INSERT OR REPLACE`` and metadata uses
+    ``ON CONFLICT ... DO UPDATE`` so that:
 
     * Existing rows for *other* symbols are never touched.
     * Rows for the current symbol are updated or inserted atomically inside a
       single transaction.
+    * Incremental saves expand, rather than overwrite, the cached date range.
     * Repeated calls with the same data are idempotent.
     """
 
@@ -28,7 +30,10 @@ class CacheManager:
 
     def _init_db(self) -> None:
         """Initialize database schema (idempotent)."""
-        with sqlite3.connect(self.db_path) as conn:
+        # ``sqlite3.Connection`` commits/rolls back in its context manager but
+        # does not close the underlying handle. Close explicitly so short-lived
+        # cache managers do not leave the database locked on Windows.
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS prices (
                     symbol TEXT NOT NULL,
@@ -64,8 +69,13 @@ class CacheManager:
         if metadata is None:
             return None
 
-        last_fetch = datetime.fromisoformat(metadata["last_fetch"])
-        if datetime.now() - last_fetch > timedelta(hours=self.expiry_hours):
+        try:
+            last_fetch = datetime.fromisoformat(str(metadata["last_fetch"]))
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid cache metadata timestamp for {symbol}")
+            return None
+        now = datetime.now(last_fetch.tzinfo) if last_fetch.tzinfo else datetime.now()
+        if now - last_fetch > timedelta(hours=self.expiry_hours):
             logger.info(f"Cache expired for {symbol}")
             return None
 
@@ -76,7 +86,7 @@ class CacheManager:
             ORDER BY date
         """
 
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             data = pd.read_sql_query(
                 query,
                 conn,
@@ -110,7 +120,7 @@ class CacheManager:
             data_to_save = data_to_save.rename(columns={"index": "date"})
 
         data_to_save["symbol"] = symbol
-        fetch_ts = datetime.now().isoformat()
+        fetch_ts = datetime.now(timezone.utc).isoformat()
         data_to_save["fetch_timestamp"] = fetch_ts
 
         # Ensure date is stored as a plain ISO string, not a Timestamp object.
@@ -120,7 +130,7 @@ class CacheManager:
             ["symbol", "date", "open", "high", "low", "close", "volume", "fetch_timestamp"]
         ].itertuples(index=False, name=None)
 
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO prices
@@ -132,9 +142,19 @@ class CacheManager:
             # Update metadata for this symbol only.
             conn.execute(
                 """
-                INSERT OR REPLACE INTO cache_metadata
+                INSERT INTO cache_metadata
                     (symbol, last_fetch, earliest_date, latest_date)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    last_fetch = excluded.last_fetch,
+                    earliest_date = MIN(
+                        COALESCE(cache_metadata.earliest_date, excluded.earliest_date),
+                        excluded.earliest_date
+                    ),
+                    latest_date = MAX(
+                        COALESCE(cache_metadata.latest_date, excluded.latest_date),
+                        excluded.latest_date
+                    )
                 """,
                 (
                     symbol,
@@ -150,7 +170,7 @@ class CacheManager:
     def _get_cache_metadata(self, symbol: str) -> Optional[dict]:
         """Get cache metadata for a single symbol."""
         query = "SELECT * FROM cache_metadata WHERE symbol = ?"
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             result = pd.read_sql_query(query, conn, params=(symbol,))
 
         if result.empty:

@@ -205,8 +205,14 @@ def handle_summary(user: Optional[dict[str, Any]] = None) -> APIResponse:
             return APIResponse.ok({
                 "total_value": 0.0,
                 "total_cost": 0.0,
+                "priced_cost": 0.0,
+                "unpriced_cost": 0.0,
                 "total_pnl": 0.0,
                 "total_pnl_percent": 0.0,
+                "price_coverage_pct": 1.0,
+                "pnl_coverage_pct": 1.0,
+                "missing_cost_market_value": 0.0,
+                "partial_coverage": False,
                 "positions_count": 0,
                 "open_trades_count": 0,
                 "last_updated": portfolio.get("updated_at", _utc_iso()),
@@ -222,17 +228,26 @@ def handle_summary(user: Optional[dict[str, Any]] = None) -> APIResponse:
         
         total_market_value = _clean_float(summary.get("TotalMarketValue", 0.0))
         total_cost_value = _clean_float(summary.get("TotalCostValue", 0.0))
+        priced_cost_value = _clean_float(summary.get("PricedCostValue", total_cost_value))
         total_pnl = _clean_float(summary.get("TotalPnL", 0.0))
         
         pnl_percent = 0.0
-        if total_cost_value and total_cost_value > 0:
-            pnl_percent = _clean_float((total_pnl / total_cost_value) * 100)
+        if priced_cost_value and priced_cost_value > 0:
+            pnl_percent = _clean_float((total_pnl / priced_cost_value) * 100)
         
         return APIResponse.ok({
             "total_value": total_market_value,
             "total_cost": total_cost_value,
+            "priced_cost": priced_cost_value,
+            "unpriced_cost": _clean_float(summary.get("UnpricedCostValue", 0.0)),
             "total_pnl": total_pnl,
             "total_pnl_percent": pnl_percent,
+            "price_coverage_pct": _clean_float(summary.get("PriceCoveragePct", 1.0)),
+            "pnl_coverage_pct": _clean_float(summary.get("PnlCoveragePct", 1.0)),
+            "missing_cost_market_value": _clean_float(
+                summary.get("MissingCostMarketValue", 0.0)
+            ),
+            "partial_coverage": bool(summary.get("PartialCoverage", False)),
             "positions_count": len(positions),
             "open_trades_count": len(open_trades),
             "last_updated": portfolio.get("updated_at", _utc_iso()),
@@ -288,7 +303,14 @@ def handle_portfolio(user: Optional[dict[str, Any]] = None) -> APIResponse:
                 "updated_at": portfolio.get("updated_at", _utc_iso()),
                 "positions": [],
                 "total_value": 0.0,
+                "total_cost": 0.0,
+                "priced_cost": 0.0,
+                "unpriced_cost": 0.0,
                 "total_pnl": 0.0,
+                "price_coverage_pct": 1.0,
+                "pnl_coverage_pct": 1.0,
+                "missing_cost_market_value": 0.0,
+                "partial_coverage": False,
             })
         
         # Compute live values
@@ -307,7 +329,16 @@ def handle_portfolio(user: Optional[dict[str, Any]] = None) -> APIResponse:
             "updated_at": portfolio.get("updated_at", _utc_iso()),
             "positions": serialized_positions,
             "total_value": _clean_float(summary.get("TotalMarketValue", 0.0)),
+            "total_cost": _clean_float(summary.get("TotalCostValue", 0.0)),
+            "priced_cost": _clean_float(summary.get("PricedCostValue", 0.0)),
+            "unpriced_cost": _clean_float(summary.get("UnpricedCostValue", 0.0)),
             "total_pnl": _clean_float(summary.get("TotalPnL", 0.0)),
+            "price_coverage_pct": _clean_float(summary.get("PriceCoveragePct", 1.0)),
+            "pnl_coverage_pct": _clean_float(summary.get("PnlCoveragePct", 1.0)),
+            "missing_cost_market_value": _clean_float(
+                summary.get("MissingCostMarketValue", 0.0)
+            ),
+            "partial_coverage": bool(summary.get("PartialCoverage", False)),
         })
         
     except Exception as e:

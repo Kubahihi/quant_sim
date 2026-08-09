@@ -192,6 +192,7 @@ def register_user(
 def login_user(
     username: str,
     password: str,
+    ip_address: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[dict[str, Any]], list[str]]:
     """
     Log in a user.
@@ -216,6 +217,7 @@ def login_user(
         token, user, status = authenticate_user_once(
             username,
             lambda password_hash: verify_password(password, password_hash),
+            ip_address=ip_address,
         )
         if status == "rate_limited":
             return None, None, ["Too many failed attempts. Please try again in 10 minutes."]

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import pandas as pd
 

@@ -7,10 +7,12 @@ Run with: python -m pytest tests/api/test_api.py -v
 from __future__ import annotations
 
 import json
+import logging
 import pytest
 
 from pathlib import Path
 
+import src.api.routes as api_routes
 from src.api.config import APIConfig
 from src.api.routes import create_app
 from src.api.responses import APIResponse, make_paginated_response
@@ -245,6 +247,147 @@ class TestErrorHandling:
         response = client.get("/api/v1/health")
         assert response.headers.get("Access-Control-Allow-Origin") == "*"
 
+    def test_handler_5xx_uses_http_status_and_hides_internal_detail(
+        self,
+        client,
+        monkeypatch,
+        caplog,
+    ):
+        internal_detail = "database failed at C:/private/auth.db"
+        monkeypatch.setattr(
+            api_routes,
+            "handle_summary",
+            lambda _user=None: APIResponse.error(
+                internal_detail,
+                "summary_error",
+                500,
+            ),
+        )
+
+        with caplog.at_level(logging.ERROR):
+            response = client.get(
+                "/api/v1/summary",
+                headers={"X-Request-ID": "test-correlation-123"},
+            )
+
+        payload = response.get_json()
+        assert response.status_code == 500
+        assert payload["success"] is False
+        assert payload["error"] == "Internal server error"
+        assert internal_detail not in response.get_data(as_text=True)
+        assert payload["error_code"] == "summary_error"
+        assert payload["meta"]["status_code"] == 500
+        assert payload["meta"]["request_id"] == "test-correlation-123"
+        assert response.headers["X-Request-ID"] == "test-correlation-123"
+        assert internal_detail in caplog.text
+
+    def test_cors_echoes_only_an_allowed_origin(self):
+        cors_app = create_app(APIConfig(
+            auth_enabled=False,
+            rate_limit_enabled=False,
+            cors_enabled=True,
+            cors_origins=["https://first.example", "https://second.example"],
+        ))
+        cors_client = cors_app.test_client()
+
+        allowed = cors_client.get(
+            "/api/v1/health",
+            headers={"Origin": "https://second.example"},
+        )
+        denied = cors_client.get(
+            "/api/v1/health",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+        assert allowed.headers["Access-Control-Allow-Origin"] == "https://second.example"
+        assert "Origin" in allowed.headers.get("Vary", "")
+        assert "Access-Control-Allow-Origin" not in denied.headers
+
+
+class TestRateLimiting:
+    """Rate limiting must be effective and isolated to each Flask app."""
+
+    @staticmethod
+    def _create_limited_app(monkeypatch, *, request_limit: int = 2):
+        import src.auth.manager as auth_manager
+
+        monkeypatch.setattr(
+            auth_manager,
+            "login_user",
+            lambda _username, _password, ip_address=None: (
+                None,
+                None,
+                ["Invalid username or password"],
+            ),
+        )
+        return create_app(APIConfig(
+            auth_enabled=True,
+            rate_limit_enabled=True,
+            rate_limit_requests=request_limit,
+            rate_limit_window=60,
+            cors_enabled=False,
+        ))
+
+    def test_auth_token_rate_limit_returns_429_and_retry_after(self, monkeypatch):
+        limited_app = self._create_limited_app(monkeypatch, request_limit=2)
+        limited_client = limited_app.test_client()
+        request_kwargs = {
+            "json": {"username": "probe", "password": "Wrong123"},
+            "environ_base": {"REMOTE_ADDR": "192.0.2.10"},
+        }
+
+        first = limited_client.post("/api/v1/auth/token", **request_kwargs)
+        second = limited_client.post("/api/v1/auth/token", **request_kwargs)
+        blocked = limited_client.post("/api/v1/auth/token", **request_kwargs)
+        other_client = limited_client.post(
+            "/api/v1/auth/token",
+            json=request_kwargs["json"],
+            environ_base={"REMOTE_ADDR": "192.0.2.11"},
+        )
+
+        assert first.status_code == 401
+        assert second.status_code == 401
+        assert blocked.status_code == 429
+        assert blocked.get_json()["error_code"] == "rate_limited"
+        assert int(blocked.headers["Retry-After"]) >= 1
+        assert other_client.status_code == 401
+
+    def test_options_does_not_consume_rate_limit(self, monkeypatch):
+        limited_app = self._create_limited_app(monkeypatch, request_limit=1)
+        limited_client = limited_app.test_client()
+        address = {"REMOTE_ADDR": "192.0.2.20"}
+
+        for _ in range(3):
+            response = limited_client.options(
+                "/api/v1/auth/token",
+                environ_base=address,
+            )
+            assert response.status_code == 200
+
+        first_post = limited_client.post(
+            "/api/v1/auth/token",
+            json={"username": "probe", "password": "Wrong123"},
+            environ_base=address,
+        )
+        assert first_post.status_code == 401
+
+    def test_rate_limit_state_is_scoped_per_app(self, monkeypatch):
+        first_app = self._create_limited_app(monkeypatch, request_limit=1)
+        second_app = self._create_limited_app(monkeypatch, request_limit=1)
+        first_client = first_app.test_client()
+        second_client = second_app.test_client()
+        request_kwargs = {
+            "json": {"username": "probe", "password": "Wrong123"},
+            "environ_base": {"REMOTE_ADDR": "192.0.2.30"},
+        }
+
+        assert first_app.extensions["quant_sim_rate_limiter"] is not second_app.extensions[
+            "quant_sim_rate_limiter"
+        ]
+        assert first_client.post("/api/v1/auth/token", **request_kwargs).status_code == 401
+        assert first_client.post("/api/v1/auth/token", **request_kwargs).status_code == 429
+        assert second_client.post("/api/v1/auth/token", **request_kwargs).status_code == 401
+
 
 class TestPagination:
     """Tests for pagination helper."""
@@ -271,6 +414,26 @@ class TestAuthEndpoint:
         
         data = response.get_json()
         assert data["success"] is False
+
+    def test_auth_rejects_malformed_json_as_json_error(self, client):
+        response = client.post(
+            "/api/v1/auth/token",
+            data=b'{"username":',
+            content_type="application/json",
+        )
+
+        assert response.status_code == 400
+        assert response.is_json
+        assert response.get_json()["error_code"] == "bad_request"
+
+    def test_auth_rejects_non_string_credentials(self, client):
+        response = client.post(
+            "/api/v1/auth/token",
+            json={"username": ["user"], "password": {"secret": True}},
+        )
+
+        assert response.status_code == 400
+        assert response.get_json()["error_code"] == "bad_request"
     
     def test_auth_rejects_invalid_credentials(self, client):
         response = client.post("/api/v1/auth/token", json={
@@ -292,6 +455,15 @@ class TestProtectedEndpoints:
         data = response.get_json()
         assert data["success"] is False
         assert data["error_code"] == "auth_required"
+
+    def test_auth_configuration_is_isolated_per_app(self):
+        protected_app = create_app(APIConfig(auth_enabled=True, rate_limit_enabled=False))
+        open_app = create_app(APIConfig(auth_enabled=False, rate_limit_enabled=False))
+        protected_app.config["TESTING"] = True
+        open_app.config["TESTING"] = True
+
+        assert open_app.test_client().get("/api/v1/summary").status_code == 200
+        assert protected_app.test_client().get("/api/v1/summary").status_code == 401
 
 
 class TestAPIConfig:

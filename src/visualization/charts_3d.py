@@ -180,15 +180,42 @@ def plot_portfolio_tradeoff_3d(
 
 
 def plot_monte_carlo_percentile_surface(
-    price_paths: np.ndarray,
+    price_paths: Optional[np.ndarray] = None,
     percentile_step: int = 5,
     title: str = "3D Monte Carlo Distribution Surface",
+    *,
+    percentile_frame: Optional[pd.DataFrame] = None,
 ) -> go.Figure:
-    """Render a 3D percentile surface to show how uncertainty widens through time."""
+    """Render a 3D percentile surface from paths or cached percentiles."""
+    if not isinstance(percentile_step, int) or not 0 < percentile_step < 100:
+        raise ValueError("percentile_step must be an integer between 1 and 99.")
     percentiles = np.arange(percentile_step, 100, percentile_step)
-    days = np.arange(price_paths.shape[0])
     requested_percentiles = np.unique(np.append(percentiles, (5, 50, 95)))
-    percentile_paths = np.percentile(price_paths, requested_percentiles, axis=1)
+    if percentile_frame is not None:
+        frame = pd.DataFrame(percentile_frame)
+        required_columns = [f"p{int(value)}" for value in requested_percentiles]
+        missing = [column for column in required_columns if column not in frame]
+        if missing:
+            raise ValueError(
+                "percentile_frame is missing columns: " + ", ".join(missing)
+            )
+        days = (
+            pd.to_numeric(frame["day"], errors="raise").to_numpy(dtype=float)
+            if "day" in frame
+            else np.arange(len(frame), dtype=float)
+        )
+        percentile_paths = frame[required_columns].to_numpy(dtype=float).T
+    else:
+        if price_paths is None:
+            raise ValueError("price_paths or percentile_frame is required.")
+        paths = np.asarray(price_paths, dtype=float)
+        if paths.ndim != 2 or not paths.shape[0] or not paths.shape[1]:
+            raise ValueError("price_paths must be a non-empty 2D array.")
+        days = np.arange(paths.shape[0])
+        percentile_paths = np.percentile(paths, requested_percentiles, axis=1)
+
+    if not np.isfinite(percentile_paths).all():
+        raise ValueError("Monte Carlo percentiles must be finite.")
     surface = percentile_paths[np.searchsorted(requested_percentiles, percentiles)]
     band_5, median_path, band_95 = percentile_paths[
         np.searchsorted(requested_percentiles, (5, 50, 95))

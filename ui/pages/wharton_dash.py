@@ -33,6 +33,7 @@ if PROJECT_ROOT not in sys.path:
 DB_PATH = Path("data/wharton_production.db")
 UPLOAD_DIR = Path("data/wharton_uploads")
 USER_PROFILE_KEY = "wharton_user_profile_v2"
+LOGIN_CLIENT_KEY = "wharton_login_client_v1"
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".xlsx", ".xls", ".csv", ".docx", ".doc",
@@ -634,6 +635,23 @@ def _logout() -> None:
     st.rerun()
 
 
+def _login_client_address() -> str:
+    """Return a stable client scope for brute-force protection."""
+    try:
+        ip_address = str(st.context.ip_address or "").strip()
+    except Exception:
+        ip_address = ""
+    if ip_address:
+        return ip_address
+
+    # Some local/test Streamlit runtimes do not expose a network address. A
+    # random session scope still prevents one browser from locking out every
+    # other user of a known account.
+    if LOGIN_CLIENT_KEY not in st.session_state:
+        st.session_state[LOGIN_CLIENT_KEY] = f"session:{secrets.token_hex(16)}"
+    return str(st.session_state[LOGIN_CLIENT_KEY])
+
+
 def _render_login() -> None:
     # The team roster is static configuration, so the anonymous landing page
     # does not need a remote database connection.  Database/schema setup is
@@ -688,19 +706,24 @@ def _render_login() -> None:
         )
 
         init_auth_database()
-        
-        failed_attempts = get_recent_failed_attempts(username, minutes=LOGIN_ATTEMPT_WINDOW_MINUTES)
+
+        client_address = _login_client_address()
+        failed_attempts = get_recent_failed_attempts(
+            username,
+            minutes=LOGIN_ATTEMPT_WINDOW_MINUTES,
+            ip_address=client_address,
+        )
         if failed_attempts >= MAX_LOGIN_ATTEMPTS:
             st.error(f"Too many failed attempts. Try again in {LOGIN_ATTEMPT_WINDOW_MINUTES} minutes.")
             return
 
         profile = authenticate_user(username, password)
         if profile is None:
-            log_login_attempt(username, success=False)
+            log_login_attempt(username, success=False, ip_address=client_address)
             st.error("Wrong credentials.")
             return
             
-        log_login_attempt(username, success=True)
+        log_login_attempt(username, success=True, ip_address=client_address)
         st.session_state[USER_PROFILE_KEY] = profile
         st.rerun()
 

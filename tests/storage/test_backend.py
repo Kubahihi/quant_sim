@@ -416,6 +416,44 @@ class TestLocalStorageBackend:
         assert error_type is None
         assert error_msg is None
 
+    def test_validate_upload_lists_files_once(self, backend):
+        """All collection-wide checks should share a single file listing."""
+        backend.upload(
+            b"existing data",
+            "existing.txt",
+            "text/plain",
+            {"uploaded_by": "another_user"},
+        )
+
+        with patch.object(backend, "list_files", wraps=backend.list_files) as list_files:
+            assert backend.validate_upload(
+                b"new data",
+                uploaded_by="test_user",
+            ) == (True, None, None)
+
+        list_files.assert_called_once_with()
+
+    def test_validate_upload_duplicate_lists_files_once(self, backend):
+        """Duplicate detection should not trigger an additional listing."""
+        file_data = b"duplicate data"
+        backend.upload(file_data, "existing.txt", "text/plain")
+
+        with patch.object(backend, "list_files", wraps=backend.list_files) as list_files:
+            with pytest.raises(DuplicateFileError):
+                backend.validate_upload(file_data)
+
+        list_files.assert_called_once_with()
+
+    def test_validate_upload_oversized_file_does_not_list_files(self, backend):
+        """A locally invalid file should fail before querying the backend."""
+        oversized_data = b"x" * (StorageLimits.max_file_size_bytes() + 1)
+
+        with patch.object(backend, "list_files", wraps=backend.list_files) as list_files:
+            with pytest.raises(FileSizeLimitExceeded):
+                backend.validate_upload(oversized_data)
+
+        list_files.assert_not_called()
+
 
 class TestStorageConfig:
     """Test StorageConfig class."""

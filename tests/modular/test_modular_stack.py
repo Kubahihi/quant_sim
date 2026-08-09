@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import time
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import src.analytics.modular.news as news_module
 from src.analytics.modular.backtest import (
     deterministic_signal_backtest,
     walk_forward_baseline_backtest,
@@ -90,6 +92,20 @@ class CountingNewsProvider(NewsProvider):
                 summary="Guidance update with earnings context.",
             )
         ]
+
+
+class StaticNewsProvider(NewsProvider):
+    def __init__(self, provider_name, items, delay_seconds=0.0):
+        self.provider_name = provider_name
+        self.items = list(items)
+        self.delay_seconds = delay_seconds
+        self.calls = 0
+
+    def fetch(self, tickers, start_date, end_date, context=None):
+        self.calls += 1
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
+        return list(self.items)
 
 
 def _sample_returns(n=180):
@@ -263,6 +279,181 @@ def test_news_cache_avoids_repeat_fetch():
         provider=provider,
     )
     assert provider.calls == 1
+
+
+def test_news_early_stop_skips_fallback_providers(monkeypatch):
+    clear_news_cache()
+    now = datetime.now(timezone.utc)
+    primary = StaticNewsProvider(
+        "primary",
+        [
+            RawNewsItem(
+                title=f"AAA primary article {index}",
+                published_at=(now - timedelta(minutes=index)).isoformat(),
+                source="primary",
+                url=f"https://example.com/primary/{index}",
+                summary="AAA earnings and guidance update.",
+            )
+            for index in range(2)
+        ],
+    )
+    yahoo_fallback = StaticNewsProvider("yahoo_fallback", [])
+    rss_fallback = StaticNewsProvider("rss_fallback", [])
+    monkeypatch.setattr(news_module, "NewsApiProvider", lambda: primary)
+    monkeypatch.setattr(news_module, "YahooNewsProvider", lambda: yahoo_fallback)
+    monkeypatch.setattr(news_module, "GoogleRssNewsProvider", lambda: rss_fallback)
+
+    result = build_news_analysis(
+        tickers=["AAA"],
+        start_date=now - timedelta(days=7),
+        end_date=now,
+        context={"tickers": ["AAA"], "sector_keywords": ["earnings"]},
+        analyzer=news_module.LexiconSentimentAnalyzer(),
+        max_items=2,
+        fetch_time_budget_seconds=0.5,
+        min_items_before_early_stop=2,
+    )
+
+    assert len(result.items) == 2
+    assert result.context["provider_used"] == "primary"
+    assert primary.calls == 1
+    assert yahoo_fallback.calls == 0
+    assert rss_fallback.calls == 0
+
+
+def test_news_total_budget_returns_sample_fallback_without_waiting_for_slow_providers(monkeypatch):
+    clear_news_cache()
+    now = datetime.now(timezone.utc)
+    slow_providers = [
+        StaticNewsProvider(name, [], delay_seconds=0.4)
+        for name in ("slow_primary", "slow_yahoo", "slow_rss")
+    ]
+    monkeypatch.setattr(news_module, "NewsApiProvider", lambda: slow_providers[0])
+    monkeypatch.setattr(news_module, "YahooNewsProvider", lambda: slow_providers[1])
+    monkeypatch.setattr(news_module, "GoogleRssNewsProvider", lambda: slow_providers[2])
+
+    started = time.perf_counter()
+    result = build_news_analysis(
+        tickers=["AAA"],
+        start_date=now - timedelta(days=7),
+        end_date=now,
+        context={"tickers": ["AAA"], "sector_keywords": ["earnings"]},
+        analyzer=news_module.LexiconSentimentAnalyzer(),
+        fetch_time_budget_seconds=0.05,
+        min_items_before_early_stop=2,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.2
+    assert result.items
+    assert result.context["provider_used"] == "sample"
+    assert all(provider.calls == 1 for provider in slow_providers)
+    assert any("timed out" in error for error in result.context["fetch_errors"])
+
+
+def test_news_parallel_fetch_preserves_provider_order_for_deduplication(monkeypatch):
+    clear_news_cache()
+    now = datetime.now(timezone.utc)
+    duplicate_url = "https://example.com/shared"
+    primary = StaticNewsProvider(
+        "primary",
+        [
+            RawNewsItem(
+                title="AAA shared story",
+                published_at=now.isoformat(),
+                source="primary",
+                url=duplicate_url,
+                summary="Primary copy of the AAA story.",
+            ),
+            RawNewsItem(
+                title="AAA primary-only story",
+                published_at=now.isoformat(),
+                source="primary",
+                url="https://example.com/primary-only",
+                summary="AAA earnings update.",
+            ),
+        ],
+        delay_seconds=0.08,
+    )
+    faster_fallback = StaticNewsProvider(
+        "faster_fallback",
+        [
+            RawNewsItem(
+                title="AAA shared story",
+                published_at=now.isoformat(),
+                source="faster_fallback",
+                url=duplicate_url,
+                summary="Fallback copy of the AAA story.",
+            ),
+            RawNewsItem(
+                title="AAA fallback-only story",
+                published_at=now.isoformat(),
+                source="faster_fallback",
+                url="https://example.com/fallback-only",
+                summary="AAA rates update.",
+            ),
+        ],
+    )
+    empty_third = StaticNewsProvider("empty_third", [])
+    monkeypatch.setattr(news_module, "NewsApiProvider", lambda: primary)
+    monkeypatch.setattr(news_module, "YahooNewsProvider", lambda: faster_fallback)
+    monkeypatch.setattr(news_module, "GoogleRssNewsProvider", lambda: empty_third)
+
+    result = build_news_analysis(
+        tickers=["AAA"],
+        start_date=now - timedelta(days=7),
+        end_date=now,
+        context={"tickers": ["AAA"], "sector_keywords": ["earnings", "rates"]},
+        analyzer=news_module.LexiconSentimentAnalyzer(),
+        fetch_time_budget_seconds=0.3,
+        min_items_before_early_stop=10,
+    )
+
+    by_title = {item.title: item for item in result.items}
+    assert set(by_title) == {
+        "AAA shared story",
+        "AAA primary-only story",
+        "AAA fallback-only story",
+    }
+    assert by_title["AAA shared story"].source == "primary"
+    assert result.context["provider_used"] == "primary,faster_fallback"
+    assert [primary.calls, faster_fallback.calls, empty_third.calls] == [1, 1, 1]
+
+
+def test_google_rss_stops_querying_after_enough_unique_articles(monkeypatch):
+    now = datetime.now(timezone.utc)
+    payload = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel>
+      <item><title>AAA story one</title><link>https://example.com/1</link><source>source</source></item>
+      <item><title>AAA story two</title><link>https://example.com/2</link><source>source</source></item>
+    </channel></rss>"""
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return payload
+
+    def fake_urlopen(url, timeout):
+        calls.append((url, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(news_module.urllib.request, "urlopen", fake_urlopen)
+    provider = news_module.GoogleRssNewsProvider()
+    items = provider.fetch(
+        ["AAA", "BBB"],
+        now - timedelta(days=7),
+        now,
+        context={"_news_sufficient_items": 2},
+    )
+
+    assert len(items) == 2
+    assert len(calls) == 1
 
 
 def test_news_ui_rows_builder_does_not_crash():

@@ -23,6 +23,7 @@ from .database import (
 )
 from .manager import (
     hash_password,
+    validate_password,
     ensure_user_dirs,
     get_user_data_dir,
     USERS_DATA_DIR,
@@ -196,7 +197,12 @@ def create_default_user(dry_run: bool = False) -> Optional[Dict[str, Any]]:
     if not password:
         return None  # No password configured – skip admin creation silently
 
-    password_hash = hash_password(str(password))
+    password = str(password)
+    password_is_valid, _ = validate_password(password)
+    if not password_is_valid:
+        return None  # Never bootstrap a privileged account with weak credentials.
+
+    password_hash = hash_password(password)
     try:
         user = create_user(DEFAULT_USERNAME, DEFAULT_EMAIL, password_hash)
         return user

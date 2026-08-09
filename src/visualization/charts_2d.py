@@ -142,21 +142,54 @@ def plot_efficient_frontier(
 
 
 def plot_monte_carlo_fan(
-    price_paths: np.ndarray,
-    percentiles: List[int] = [5, 25, 50, 75, 95],
+    price_paths: Optional[np.ndarray] = None,
+    percentiles: Optional[List[int]] = None,
     title: str = "Monte Carlo Simulation",
     figsize: tuple = (12, 6),
+    *,
+    percentile_frame: Optional[pd.DataFrame] = None,
 ) -> plt.Figure:
-    """Plot Monte Carlo fan chart with percentile bands"""
+    """Plot a Monte Carlo fan chart from paths or precomputed percentiles.
+
+    Passing ``percentile_frame`` avoids retaining and rescanning the full
+    simulation matrix on every Streamlit rerun. Expected columns are ``day``
+    and ``p5``/``p25``/``p50``/``p75``/``p95`` (or matching requested values).
+    """
+    if percentiles is None:
+        percentiles = [5, 25, 50, 75, 95]
+
+    if percentile_frame is not None:
+        frame = pd.DataFrame(percentile_frame)
+        required_columns = [f"p{int(value)}" for value in percentiles]
+        missing = [column for column in required_columns if column not in frame]
+        if missing:
+            raise ValueError(
+                "percentile_frame is missing columns: " + ", ".join(missing)
+            )
+        time_steps = (
+            pd.to_numeric(frame["day"], errors="raise").to_numpy(dtype=float)
+            if "day" in frame
+            else np.arange(len(frame), dtype=float)
+        )
+        percentile_values = frame[required_columns].to_numpy(dtype=float).T
+    else:
+        if price_paths is None:
+            raise ValueError("price_paths or percentile_frame is required.")
+        paths = np.asarray(price_paths, dtype=float)
+        if paths.ndim != 2 or not paths.shape[0] or not paths.shape[1]:
+            raise ValueError("price_paths must be a non-empty 2D array.")
+        time_steps = np.arange(paths.shape[0])
+        percentile_values = np.percentile(paths, percentiles, axis=1)
+
+    if not np.isfinite(percentile_values).all():
+        raise ValueError("Monte Carlo percentiles must be finite.")
+
     fig, ax = plt.subplots(figsize=figsize)
-    
-    time_steps = np.arange(price_paths.shape[0])
     
     colors = ["#d62728", "#ff7f0e", "#2ca02c", "#ff7f0e", "#d62728"]
     alphas = [0.2, 0.3, 0.5, 0.3, 0.2]
 
-    percentile_paths = np.percentile(price_paths, percentiles, axis=1)
-    for i, (p, percentile_path) in enumerate(zip(percentiles, percentile_paths)):
+    for i, (p, percentile_path) in enumerate(zip(percentiles, percentile_values)):
         ax.plot(
             time_steps,
             percentile_path,
@@ -167,8 +200,8 @@ def plot_monte_carlo_fan(
         )
     
     for i in range(len(percentiles) - 1):
-        lower = percentile_paths[i]
-        upper = percentile_paths[i + 1]
+        lower = percentile_values[i]
+        upper = percentile_values[i + 1]
         ax.fill_between(
             time_steps,
             lower,

@@ -252,26 +252,43 @@ class StorageBackend(ABC):
         
         # Check 2: Compute SHA256 and check for duplicates
         sha256 = hashlib.sha256(file_data).hexdigest()
-        if check_duplicate:
-            existing = self.find_by_sha256(sha256)
-            if existing:
-                raise DuplicateFileError(sha256, existing.storage_key)
+        files = self.list_files()
+        existing: Optional[StorageMetadata] = None
+        current_storage_bytes = 0
+        current_file_count = 0
+        user_file_count = 0
+
+        # Derive every collection-wide limit from the same snapshot. For remote
+        # backends, listing files may require one or more network requests, so
+        # repeating it for each validation check is both slow and inconsistent
+        # if storage changes between calls.
+        for stored_file in files:
+            current_storage_bytes += stored_file.file_size_bytes
+            current_file_count += 1
+            if (
+                check_duplicate
+                and existing is None
+                and stored_file.sha256 == sha256
+            ):
+                existing = stored_file
+            if uploaded_by and stored_file.uploaded_by == uploaded_by:
+                user_file_count += 1
+
+        if existing:
+            raise DuplicateFileError(sha256, existing.storage_key)
         
         # Check 3: Total storage limit
-        current_storage_bytes = self.get_total_storage_used()
         current_storage_mb = current_storage_bytes / (1024 * 1024)
         new_total_mb = current_storage_mb + file_size_mb
         if new_total_mb > StorageLimits.MAX_TOTAL_STORAGE_MB:
             raise TotalStorageLimitExceeded(current_storage_mb, file_size_mb, StorageLimits.MAX_TOTAL_STORAGE_MB)
         
         # Check 4: File count limit
-        current_file_count = self.get_file_count()
         if current_file_count + 1 > StorageLimits.MAX_FILES:
             raise FileCountLimitExceeded(current_file_count, StorageLimits.MAX_FILES)
         
         # Check 5: Per-user file count limit
         if uploaded_by:
-            user_file_count = self.get_user_file_count(uploaded_by)
             if user_file_count + 1 > StorageLimits.MAX_FILES_PER_USER:
                 raise UserFileCountLimitExceeded(uploaded_by, user_file_count, StorageLimits.MAX_FILES_PER_USER)
         

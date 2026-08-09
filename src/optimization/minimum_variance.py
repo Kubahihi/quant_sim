@@ -39,24 +39,10 @@ def optimize_minimum_variance(
     n_assets = len(estimates.symbols)
     covariance = estimates.covariance
 
-    effective_max_weight = max_weight
-    if max_weight is not None:
-        requested_max_weight = float(max_weight)
-        if not np.isfinite(requested_max_weight) or requested_max_weight <= 0:
-            raise ValueError("max_weight must be positive.")
-        if not allow_short and requested_max_weight * n_assets < 1.0:
-            effective_max_weight = 1.0 / n_assets
-        else:
-            effective_max_weight = requested_max_weight
-    if effective_max_weight != max_weight:
-        logger.warning(
-            f"max_weight={max_weight} is infeasible for {n_assets} assets "
-            f"and was relaxed to {float(effective_max_weight):.6f}."
-        )
     bounds = build_weight_bounds(
         n_assets,
         allow_short=allow_short,
-        max_weight=effective_max_weight,
+        max_weight=max_weight,
     )
 
     def portfolio_variance(weights: np.ndarray) -> float:

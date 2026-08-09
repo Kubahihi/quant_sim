@@ -139,6 +139,17 @@ class TestIdempotency:
         closes = [r[0] for r in rows]
         assert closes == [110.0, 111.0], f"Expected updated closes, got {closes}"
 
+    def test_incremental_saves_preserve_full_metadata_range(self, cache: CacheManager):
+        cache.save_data("AAPL", _make_df([100.0, 101.0], start="2024-01-08"))
+        cache.save_data("AAPL", _make_df([98.0, 99.0], start="2024-01-02"))
+        cache.save_data("AAPL", _make_df([102.0, 103.0], start="2024-01-15"))
+
+        metadata = cache._get_cache_metadata("AAPL")
+
+        assert metadata is not None
+        assert metadata["earliest_date"] == "2024-01-02"
+        assert metadata["latest_date"] == "2024-01-16"
+
 
 # ---------------------------------------------------------------------------
 # BUG 3: Date serialisation
@@ -214,3 +225,15 @@ class TestCacheRetrieval:
                 "SELECT COUNT(*) FROM prices WHERE symbol = 'AAPL'"
             ).fetchone()[0]
         assert count == 0
+
+    def test_operations_release_sqlite_file_handle(self, cache: CacheManager, tmp_path: Path):
+        cache.save_data("AAPL", _make_df([150.0, 151.0]))
+        assert cache.get_cached_data(
+            "AAPL",
+            datetime(2024, 1, 1),
+            datetime(2024, 1, 31),
+        ) is not None
+
+        moved_path = tmp_path / "moved_cache.db"
+        cache.db_path.rename(moved_path)
+        moved_path.rename(cache.db_path)

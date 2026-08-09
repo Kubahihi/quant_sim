@@ -7,9 +7,15 @@ with proper middleware and configuration.
 
 from __future__ import annotations
 
+from collections import OrderedDict, deque
+import math
+import re
+import threading
+import time
 from typing import Any, Callable, Optional
+from uuid import uuid4
 
-from flask import Flask, jsonify, request
+from flask import Flask, current_app, g, jsonify, request
 
 from .config import APIConfig
 from .auth import set_api_config, require_auth
@@ -24,6 +30,73 @@ from .handlers import (
     handle_risk,
     handle_overview,
 )
+
+
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+class _InMemoryRateLimiter:
+    """Small, process-local sliding-window limiter scoped to one Flask app."""
+
+    _MAX_BUCKETS = 10_000
+
+    def __init__(
+        self,
+        requests_per_window: int,
+        window_seconds: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if requests_per_window < 1:
+            raise ValueError("rate_limit_requests must be positive when rate limiting is enabled.")
+        if not math.isfinite(window_seconds) or window_seconds <= 0:
+            raise ValueError("rate_limit_window must be positive when rate limiting is enabled.")
+
+        self.requests_per_window = int(requests_per_window)
+        self.window_seconds = float(window_seconds)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._buckets: OrderedDict[str, deque[float]] = OrderedDict()
+
+    def check(self, key: str) -> tuple[bool, int]:
+        """Record an allowed request or return the seconds until retry."""
+        now = self._clock()
+        cutoff = now - self.window_seconds
+
+        with self._lock:
+            bucket = self._buckets.pop(key, deque())
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+
+            if len(bucket) >= self.requests_per_window:
+                self._buckets[key] = bucket
+                retry_after = max(1, math.ceil(bucket[0] + self.window_seconds - now))
+                return False, retry_after
+
+            bucket.append(now)
+            self._buckets[key] = bucket
+            if len(self._buckets) > self._MAX_BUCKETS:
+                self._buckets.popitem(last=False)
+            return True, 0
+
+
+def _request_id() -> str:
+    """Return the correlation id assigned by the app's request hook."""
+    request_id = getattr(g, "request_id", None)
+    return str(request_id) if request_id else uuid4().hex
+
+
+def _response_status(response_obj: Any, data: dict[str, Any], fallback: int) -> int:
+    """Resolve an APIResponse status code while retaining a safe fallback."""
+    if isinstance(response_obj, APIResponse):
+        raw_status = data.get("meta", {}).get("status_code")
+        try:
+            resolved = int(raw_status)
+        except (TypeError, ValueError):
+            resolved = fallback
+        if 100 <= resolved <= 599:
+            return resolved
+    return fallback
 
 
 def _json_response(response_obj: Any, status_code: int = 200):
@@ -44,9 +117,26 @@ def _json_response(response_obj: Any, status_code: int = 200):
     else:
         data = {"success": False, "error": "Unexpected response type"}
     
+    resolved_status = _response_status(response_obj, data, status_code)
+    if not data.get("success", False):
+        response_meta = data.setdefault("meta", {})
+        response_meta.setdefault("request_id", _request_id())
+
+    if resolved_status >= 500:
+        internal_detail = data.get("error", "Unknown internal API error")
+        current_app.logger.error(
+            "API request failed request_id=%s method=%s path=%s error_code=%s detail=%r",
+            _request_id(),
+            request.method,
+            request.path,
+            data.get("error_code", "internal_error"),
+            internal_detail,
+        )
+        data["error"] = "Internal server error"
+
     return (
         jsonify(data),
-        status_code,
+        resolved_status,
         {"Content-Type": "application/json"},
     )
 
@@ -61,7 +151,17 @@ def _not_found_error(error):
 
 def _internal_error(error):
     """Handle 500 errors with JSON response."""
-    return jsonify(APIResponse.error("Internal server error", "internal_error", 500).to_dict()), 500
+    request_id = _request_id()
+    current_app.logger.error(
+        "Unhandled API exception request_id=%s method=%s path=%s",
+        request_id,
+        request.method,
+        request.path,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    payload = APIResponse.error("Internal server error", "internal_error", 500).to_dict()
+    payload.setdefault("meta", {})["request_id"] = request_id
+    return jsonify(payload), 500
 
 
 def create_app(config: Optional[APIConfig] = None) -> Flask:
@@ -82,6 +182,43 @@ def create_app(config: Optional[APIConfig] = None) -> Flask:
     
     app = Flask(__name__)
     app.config["DEBUG"] = config.debug
+    app.extensions["quant_sim_api_config"] = config
+
+    rate_limiter: _InMemoryRateLimiter | None = None
+    if config.rate_limit_enabled:
+        rate_limiter = _InMemoryRateLimiter(
+            config.rate_limit_requests,
+            config.rate_limit_window,
+        )
+        app.extensions["quant_sim_rate_limiter"] = rate_limiter
+
+    @app.before_request
+    def prepare_request_context():
+        supplied_request_id = str(request.headers.get("X-Request-ID", "")).strip()
+        g.request_id = (
+            supplied_request_id
+            if _REQUEST_ID_PATTERN.fullmatch(supplied_request_id)
+            else uuid4().hex
+        )
+
+        if (
+            rate_limiter is None
+            or request.method == "OPTIONS"
+            or not request.path.startswith(config.api_prefix)
+        ):
+            return None
+
+        client_address = request.remote_addr or "unknown"
+        endpoint = request.endpoint or request.path
+        allowed, retry_after = rate_limiter.check(f"{client_address}:{endpoint}")
+        if allowed:
+            return None
+
+        response, response_status, headers = _json_response(
+            APIResponse.error("Rate limit exceeded", "rate_limited", 429)
+        )
+        headers["Retry-After"] = str(retry_after)
+        return response, response_status, headers
     
     # Register error handlers
     app.register_error_handler(404, _not_found_error)
@@ -90,11 +227,24 @@ def create_app(config: Optional[APIConfig] = None) -> Flask:
     # Add CORS headers
     @app.after_request
     def add_cors_headers(response):
+        response.headers["X-Request-ID"] = _request_id()
         if config.cors_enabled:
-            allowed_origins = ",".join(config.cors_origins) if config.cors_origins else "*"
-            response.headers["Access-Control-Allow-Origin"] = allowed_origins
-            response.headers["Access-Control-Allow-Headers"] = f"Content-Type, {config.token_header}, Authorization"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            configured_origins = set(config.cors_origins or ["*"])
+            request_origin = request.headers.get("Origin")
+            allowed_origin = None
+            if "*" in configured_origins:
+                allowed_origin = "*"
+            elif request_origin and request_origin in configured_origins:
+                allowed_origin = request_origin
+
+            if allowed_origin is not None:
+                response.headers["Access-Control-Allow-Origin"] = allowed_origin
+                response.headers["Access-Control-Allow-Headers"] = (
+                    f"Content-Type, {config.token_header}, Authorization"
+                )
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+                if allowed_origin != "*":
+                    response.vary.add("Origin")
         response.headers["Content-Type"] = "application/json"
         return response
     
@@ -231,15 +381,17 @@ def register_routes(app: Flask, config: APIConfig) -> None:
         """
         from src.auth.manager import login_user
         
-        data = request.get_json()
-        if not data:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not data:
             return _json_response(
                 APIResponse.error("Request body required", "bad_request", 400),
                 400,
             )
         
-        username = data.get("username", "").strip()
-        password = data.get("password", "")
+        username_value = data.get("username", "")
+        password_value = data.get("password", "")
+        username = username_value.strip() if isinstance(username_value, str) else ""
+        password = password_value if isinstance(password_value, str) else ""
         
         if not username or not password:
             return _json_response(
@@ -247,7 +399,11 @@ def register_routes(app: Flask, config: APIConfig) -> None:
                 400,
             )
         
-        token, user, errors = login_user(username, password)
+        token, user, errors = login_user(
+            username,
+            password,
+            ip_address=request.remote_addr,
+        )
         
         if not token:
             return _json_response(
