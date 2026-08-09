@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
+from src.utils.environment import is_production_environment
+
 from .exceptions import (
     StorageError,
     FileNotFound,
@@ -694,6 +696,10 @@ class StorageConfig:
             storage_secrets = st.secrets
 
         if not storage_secrets.get('R2_BUCKET'):
+            local_config = {'backend': 'local'}
+            if self._config != local_config:
+                self._backend = None
+            self._config = local_config
             return False
 
         # Endpoint URLs should not include the bucket name at the end
@@ -702,7 +708,7 @@ class StorageConfig:
         if endpoint_url and bucket and endpoint_url.endswith(f"/{bucket}"):
             endpoint_url = endpoint_url[:-len(f"/{bucket}")]
 
-        self._config = {
+        loaded_config = {
             'backend': storage_secrets.get('STORAGE_BACKEND', 'r2'),  # default to r2 if bucket is found
             'r2_bucket': bucket,
             'r2_endpoint_url': endpoint_url,
@@ -710,6 +716,9 @@ class StorageConfig:
             'r2_secret_access_key': storage_secrets.get('R2_SECRET_ACCESS_KEY'),
             'r2_region': storage_secrets.get('R2_REGION', 'auto')
         }
+        if self._config != loaded_config:
+            self._backend = None
+        self._config = loaded_config
         
         return True
     
@@ -733,10 +742,8 @@ class StorageConfig:
         return missing
     
     def is_production_mode(self) -> bool:
-        """Check if running in production mode (Streamlit Cloud)."""
-        # Explicit environment variable has priority, fallback to Streamlit Cloud indicator
-        is_prod_env = os.environ.get("QUANT_SIM_ENV") == "production"
-        return is_prod_env or 'STREAMLIT_SERVER_PORT' in os.environ
+        """Check explicit config, failing closed for an ambiguous Streamlit server."""
+        return is_production_environment(fail_closed_streamlit=True)
     
     def create_backend(self) -> StorageBackend:
         """Create the appropriate storage backend based on configuration."""
@@ -771,12 +778,9 @@ class StorageConfig:
         
         elif backend_type == 'local':
             if self.is_production_mode():
-                # In production with local backend - show error
-                st.error(
-                    "Local storage backend selected in production mode. "
-                    "This is not recommended as files will not persist across redeployments. "
-                    "Please configure R2 storage backend in secrets."
-                )
+                raise ProductionConfigError([
+                    "STORAGE_BACKEND must be 'r2' in production"
+                ])
             return LocalStorageBackend()
         
         else:
@@ -801,6 +805,8 @@ storage_config = StorageConfig()
 
 def get_storage_backend() -> StorageBackend:
     """Get the configured storage backend."""
+    if storage_config._backend is None:
+        storage_config.load_from_secrets()
     return storage_config.backend
 
 
@@ -838,7 +844,7 @@ def initialize_storage() -> Dict[str, Any]:
             "success": False,
             "error": str(e),
             "backend": "none",
-            "production_mode": 'STREAMLIT_SERVER_PORT' in os.environ
+            "production_mode": storage_config.is_production_mode()
         }
 
 

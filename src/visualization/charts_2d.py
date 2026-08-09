@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import numpy as np
+import warnings
 from typing import Optional, List, Dict
 
 
@@ -70,18 +71,25 @@ def plot_correlation_heatmap(
     """Plot correlation heatmap"""
     fig, ax = plt.subplots(figsize=figsize)
     
-    sns.heatmap(
-        corr_matrix,
-        annot=True,
-        fmt=".2f",
-        cmap="coolwarm",
-        center=0,
-        vmin=-1,
-        vmax=1,
-        square=True,
-        ax=ax,
-        cbar_kws={"shrink": 0.8},
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="The set_bad function will be deprecated.*",
+            category=PendingDeprecationWarning,
+            module=r"seaborn\.matrix",
+        )
+        sns.heatmap(
+            corr_matrix,
+            annot=True,
+            fmt=".2f",
+            cmap="coolwarm",
+            center=0,
+            vmin=-1,
+            vmax=1,
+            square=True,
+            ax=ax,
+            cbar_kws={"shrink": 0.8},
+        )
     
     ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
     

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 __all__ = [
     "APIConfig",
+    "APIConfigurationError",
+    "ReadinessProbe",
     "APIResponse",
     "ErrorResponse",
     "SuccessResponse",
@@ -32,6 +34,8 @@ __all__ = [
 
 _SUBMODULE_MAP: dict[str, str] = {
     "APIConfig":           "src.api.config",
+    "APIConfigurationError": "src.api.config",
+    "ReadinessProbe":       "src.api.readiness",
     "APIResponse":         "src.api.responses",
     "ErrorResponse":       "src.api.responses",
     "SuccessResponse":     "src.api.responses",

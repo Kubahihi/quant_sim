@@ -45,6 +45,8 @@ Our conservative limits (500 MB, 100 files) ensure we never exceed free tier eve
 Add the following to your Streamlit Cloud secrets (Settings > Secrets):
 
 ```toml
+QUANT_SIM_ENV = "production"
+
 [storage]
 # Storage backend: "r2" for production (REQUIRED on Streamlit Cloud)
 STORAGE_BACKEND = "r2"
@@ -83,6 +85,11 @@ R2_REGION = "auto"
 2. If `STORAGE_BACKEND = "local"` → Use local storage (development only)
 3. If on Streamlit Cloud without proper config → **Show error and block file operations**
 4. **No silent fallback** in production mode
+
+`QUANT_SIM_ENV` can be supplied as an operating-system variable or a top-level
+Streamlit secret. The environment variable wins. A Streamlit server without an
+explicit environment is treated as production by the persistent storage layer,
+so local runs should explicitly set `QUANT_SIM_ENV=development`.
 
 ## Metadata Structure
 

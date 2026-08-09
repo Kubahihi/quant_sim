@@ -33,6 +33,7 @@ for module_name, module_obj in list(sys.modules.items()):
         sys.modules.pop(module_name, None)
 
 from ui.dashboard_shell import inject_dashboard_styles
+from src.utils.environment import resolve_environment
 from ui.runtime_diagnostics import (
     PerformanceTrace,
     append_trace_history,
@@ -243,7 +244,11 @@ def _resolve_authenticated_user_id() -> int | None:
 
 def _auto_login_for_smoke_tests() -> int | None:
     """Auto-login only for pytest-driven Streamlit smoke tests."""
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
+    if (
+        resolve_environment() != "test"
+        or os.environ.get("QUANT_SIM_TEST_AUTO_LOGIN") != "1"
+        or not os.environ.get("PYTEST_CURRENT_TEST")
+    ):
         return None
 
     try:

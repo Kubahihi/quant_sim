@@ -232,16 +232,16 @@ class TestValidateStorageForProduction:
     
     @patch('src.storage.health.storage_config')
     @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)
-    def test_validate_production_local_backend_warns(self, mock_config):
-        """Test that local backend in production shows warning but passes."""
+    def test_validate_production_local_backend_fails_closed(self, mock_config):
+        """Local storage must never be accepted as persistent production storage."""
         mock_config.load_from_secrets.return_value = True
         mock_config.config = {"backend": "local"}
         
-        with patch('src.storage.health.st.warning') as mock_warning:
+        with patch('src.storage.health.show_production_error_message') as mock_show:
             result = validate_storage_for_production()
             
-            assert result is True
-            mock_warning.assert_called_once()
+            assert result is False
+            mock_show.assert_called_once_with(["STORAGE_BACKEND must be set to r2"])
     
     @patch('src.storage.health.storage_config')
     @patch.dict('os.environ', {'QUANT_SIM_ENV': 'production'}, clear=True)

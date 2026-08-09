@@ -1,31 +1,21 @@
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+
+def _locked_requirements() -> list[str]:
+    """Use the same exact dependency set as the deployed Streamlit app."""
+    manifest = Path(__file__).with_name("requirements.txt")
+    return [
+        line.strip()
+        for line in manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
 
 setup(
     name="quant_platform",
     version="0.1.0",
     packages=find_packages(where=".", include=["src", "src.*"]),
-    install_requires=[
-        "numpy>=1.24.0",
-        "pandas>=2.0.0",
-        "scipy>=1.10.0",
-        "matplotlib>=3.7.0",
-        "seaborn>=0.12.0",
-        "plotly>=5.14.0",
-        "streamlit>=1.28.0",
-        "streamlit-agraph==0.0.45",
-        "yfinance>=0.2.28",
-        "pyyaml>=6.0",
-        "cvxpy>=1.3.0",
-        "loguru>=0.7.0",
-        "openai>=1.30.0",
-        "statsmodels>=0.14.0",
-        "arch>=6.2.0",
-        "vaderSentiment>=3.3.2",
-        "bcrypt>=4.0.0",
-        "libsql>=0.1.0",
-        "flask>=2.3.0",
-        "boto3>=1.34.0",
-        "curl_cffi>=0.6.0",
-    ],
-    python_requires=">=3.10",
+    install_requires=_locked_requirements(),
+    python_requires=">=3.12,<3.13",
 )

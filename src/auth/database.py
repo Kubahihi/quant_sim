@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from src.utils.environment import is_production_environment
+
 # Database path - stored in project data directory
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AUTH_DB_PATH = PROJECT_ROOT / "data" / "auth.db"
@@ -38,6 +40,29 @@ _REMOTE_SYNC_LOCK = threading.Lock()
 _LAST_REMOTE_SYNC_BY_DATABASE: dict[str, float] = {}
 _AUTH_INITIALIZATION_LOCK = threading.Lock()
 _INITIALIZED_AUTH_DATABASES: set[str] = set()
+
+
+class ProductionDatabaseConfigError(RuntimeError):
+    """Raised when production would otherwise fall back to local SQLite."""
+
+
+def _resolve_turso_credentials() -> tuple[str | None, str | None]:
+    """Read Turso credentials without logging or exposing their values."""
+    turso_url = None
+    turso_token = None
+    try:
+        import streamlit as st
+
+        turso_url = st.secrets.get("TURSO_DATABASE_URL")
+        turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        pass
+
+    if not turso_url:
+        turso_url = os.environ.get("TURSO_DATABASE_URL")
+    if not turso_token:
+        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+    return turso_url, turso_token
 
 
 def _remote_sync_interval_seconds() -> float:
@@ -181,19 +206,17 @@ def _get_db_path() -> Path:
 
 def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
     """Get a database connection with proper settings. Uses Turso if configured."""
-    turso_url = None
-    turso_token = None
-    try:
-        import streamlit as st
-        turso_url = st.secrets.get("TURSO_DATABASE_URL")
-        turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
-    except Exception:
-        pass
+    turso_url, turso_token = _resolve_turso_credentials()
+    is_production = is_production_environment(fail_closed_streamlit=True)
 
-    if not turso_url:
-        turso_url = os.environ.get("TURSO_DATABASE_URL")
-    if not turso_token:
-        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+    if bool(turso_url) != bool(turso_token):
+        raise ProductionDatabaseConfigError(
+            "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be configured together."
+        )
+    if is_production and not turso_url:
+        raise ProductionDatabaseConfigError(
+            "Turso is required in production; refusing to fall back to local SQLite."
+        )
 
     if turso_url and turso_token:
         try:
@@ -202,6 +225,10 @@ def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
             try:
                 import libsql
             except ImportError:
+                if is_production:
+                    raise ProductionDatabaseConfigError(
+                        "The libsql client is required when Turso is configured in production."
+                    )
                 libsql = sqlite3
                 turso_url = None
 

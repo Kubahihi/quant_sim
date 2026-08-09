@@ -1,0 +1,6 @@
+# Reviewed false positives. Each exception is bound to one historical finding;
+# never ignore a whole rule or path.
+6cdc2df523782f548e7725d2816f0c08d4a5f95d:ui/pages/wharton_dash.py:generic-api-key:82
+69eeeef8d06bf6ec66f336918c0b7ee5d353a870:docs/API.md:curl-auth-header:50
+c7b40467a6ca5193dc578dbe376c7eba98c3d755:tests/test_auth.py:generic-api-key:261
+c7b40467a6ca5193dc578dbe376c7eba98c3d755:tests/test_auth.py:generic-api-key:262

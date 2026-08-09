@@ -13,9 +13,10 @@ import pytest
 from pathlib import Path
 
 import src.api.routes as api_routes
-from src.api.config import APIConfig
+from src.api.config import APIConfig, APIConfigurationError
 from src.api.routes import create_app
 from src.api.responses import APIResponse, make_paginated_response
+from src.utils import environment as runtime_environment
 
 
 @pytest.fixture
@@ -247,6 +248,23 @@ class TestErrorHandling:
         response = client.get("/api/v1/health")
         assert response.headers.get("Access-Control-Allow-Origin") == "*"
 
+    def test_security_headers_and_request_metrics_are_emitted(self, client, caplog):
+        with caplog.at_level(logging.INFO):
+            response = client.get(
+                "/api/v1/health",
+                headers={"X-Request-ID": "health-probe-1"},
+            )
+
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Pragma"] == "no-cache"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert "Strict-Transport-Security" not in response.headers
+        assert "request_id=health-probe-1" in caplog.text
+        assert "path=/api/v1/health" in caplog.text
+        assert "duration_ms=" in caplog.text
+
     def test_handler_5xx_uses_http_status_and_hides_internal_detail(
         self,
         client,
@@ -279,7 +297,8 @@ class TestErrorHandling:
         assert payload["meta"]["status_code"] == 500
         assert payload["meta"]["request_id"] == "test-correlation-123"
         assert response.headers["X-Request-ID"] == "test-correlation-123"
-        assert internal_detail in caplog.text
+        assert internal_detail not in caplog.text
+        assert "error_code=summary_error" in caplog.text
 
     def test_cors_echoes_only_an_allowed_origin(self):
         cors_app = create_app(APIConfig(
@@ -497,3 +516,88 @@ api:
         assert config.default_user_id == 7
         assert config.cors_enabled is False
         assert config.cors_origins == ["https://example.com"]
+
+    def test_config_reads_environment_from_streamlit_secret(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("QUANT_SIM_ENV", raising=False)
+        monkeypatch.setattr(
+            runtime_environment,
+            "_streamlit_environment",
+            lambda: "production",
+        )
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text(
+            "api:\n  cors_enabled: false\n  cors_origins: []\n",
+            encoding="utf-8",
+        )
+
+        config = APIConfig.from_yaml(config_file)
+
+        assert config.environment == "production"
+
+    @pytest.mark.parametrize(
+        ("overrides", "expected_issue"),
+        [
+            ({"debug": True}, "debug mode"),
+            ({"auth_enabled": False}, "authentication"),
+            ({"rate_limit_enabled": False}, "rate limiting"),
+            ({"cors_origins": ["*"]}, "wildcard CORS"),
+            ({"cors_origins": []}, "explicit CORS origin"),
+            ({"default_user_id": 1}, "default_user_id"),
+        ],
+    )
+    def test_production_config_rejects_unsafe_defaults(self, overrides, expected_issue):
+        values = {
+            "environment": "production",
+            "auth_enabled": True,
+            "rate_limit_enabled": True,
+            "cors_enabled": True,
+            "cors_origins": ["https://dashboard.example"],
+            "default_user_id": None,
+        }
+        values.update(overrides)
+
+        with pytest.raises(APIConfigurationError, match=expected_issue):
+            create_app(APIConfig(**values))
+
+    def test_production_config_accepts_explicit_secure_settings(self):
+        app = create_app(APIConfig(
+            environment="production",
+            auth_enabled=True,
+            rate_limit_enabled=True,
+            cors_enabled=True,
+            cors_origins=["https://dashboard.example"],
+        ))
+
+        assert app.extensions["quant_sim_api_config"].environment == "production"
+        assert app.logger.isEnabledFor(logging.INFO)
+        response = app.test_client().get("/api/v1/health")
+        assert response.headers["Strict-Transport-Security"] == (
+            "max-age=31536000; includeSubDomains"
+        )
+
+    def test_empty_cors_origin_list_is_preserved(self, tmp_path: Path):
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text(
+            "api:\n  cors_enabled: false\n  cors_origins: []\n",
+            encoding="utf-8",
+        )
+
+        config = APIConfig.from_yaml(config_file)
+
+        assert config.cors_enabled is False
+        assert config.cors_origins == []
+
+    def test_enabled_cors_with_empty_origin_list_does_not_open_wildcard(self):
+        app = create_app(APIConfig(
+            cors_enabled=True,
+            cors_origins=[],
+            auth_enabled=False,
+            rate_limit_enabled=False,
+        ))
+
+        response = app.test_client().get(
+            "/api/v1/health",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+        assert "Access-Control-Allow-Origin" not in response.headers

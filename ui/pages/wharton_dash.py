@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src.utils.environment import is_production_environment, resolve_environment
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +48,10 @@ MAX_FILE_SIZE_MB = 20
 
 def _is_development_mode() -> bool:
     """Check if the app is running in development mode."""
-    return os.environ.get("QUANT_SIM_ENV") == "development"
+    return (
+        not is_production_environment(fail_closed_streamlit=True)
+        and resolve_environment() == "development"
+    )
 
 
 def _should_sync_seeded_passwords() -> bool:

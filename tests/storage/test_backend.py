@@ -491,6 +491,37 @@ class TestStorageConfig:
             assert config._config['r2_access_key_id'] == 'test-key'
             assert config._config['r2_secret_access_key'] == 'test-secret'
             assert config._config['r2_region'] == 'auto'
+
+    def test_reloading_changed_secrets_invalidates_cached_backend(self):
+        config = StorageConfig()
+        config._config = {'backend': 'local'}
+        config._backend = Mock(backend_name='local')
+        secrets = {
+            'storage': {
+                'STORAGE_BACKEND': 'r2',
+                'R2_BUCKET': 'test-bucket',
+                'R2_ENDPOINT_URL': 'https://test.r2.cloudflarestorage.com',
+                'R2_ACCESS_KEY_ID': 'test-key',
+                'R2_SECRET_ACCESS_KEY': 'test-secret',
+            }
+        }
+
+        with patch('src.storage.backend.st.secrets', secrets):
+            assert config.load_from_secrets() is True
+
+        assert config._backend is None
+        assert config._config['backend'] == 'r2'
+
+    def test_missing_secrets_reset_previous_remote_configuration(self):
+        config = StorageConfig()
+        config._config = {'backend': 'r2', 'r2_bucket': 'old-bucket'}
+        config._backend = Mock(backend_name='r2')
+
+        with patch('src.storage.backend.st.secrets', {}):
+            assert config.load_from_secrets() is False
+
+        assert config._backend is None
+        assert config._config == {'backend': 'local'}
     
     def test_validate_r2_config_complete(self):
         """Test validating complete R2 configuration."""
@@ -533,6 +564,14 @@ class TestStorageConfig:
         # With STREAMLIT_SERVER_PORT
         with patch.dict(os.environ, {'STREAMLIT_SERVER_PORT': '8501'}):
             assert config.is_production_mode() is True
+
+        # An explicit local environment always wins over the heuristic.
+        with patch.dict(
+            os.environ,
+            {'QUANT_SIM_ENV': 'development', 'STREAMLIT_SERVER_PORT': '8501'},
+            clear=True,
+        ):
+            assert config.is_production_mode() is False
     
     def test_create_backend_local(self):
         """Test creating local backend."""
@@ -542,6 +581,14 @@ class TestStorageConfig:
         backend = config.create_backend()
         assert isinstance(backend, LocalStorageBackend)
         assert backend.backend_name == 'local'
+
+    def test_create_backend_local_fails_closed_in_production(self):
+        config = StorageConfig()
+        config._config = {'backend': 'local'}
+
+        with patch.dict(os.environ, {'QUANT_SIM_ENV': 'production'}, clear=True):
+            with pytest.raises(ProductionConfigError, match="must be 'r2'"):
+                config.create_backend()
     
     def test_create_backend_r2_missing_secrets_in_production(self):
         """Test that R2 backend raises error in production with missing secrets."""
@@ -556,7 +603,7 @@ class TestStorageConfig:
             with pytest.raises(ProductionConfigError) as excinfo:
                 config.create_backend()
             
-            assert 'missing secrets' in str(excinfo.value).lower()
+            assert 'production storage configuration' in str(excinfo.value).lower()
     
     def test_create_backend_r2_missing_secrets_in_development(self):
         """Test that R2 backend falls back to local in development with missing secrets."""
@@ -606,6 +653,18 @@ class TestStorageConfig:
         backend2 = config.backend
         
         assert backend1 is backend2  # Same instance
+
+    def test_global_backend_accessor_loads_secrets_before_creation(self, monkeypatch):
+        import src.storage.backend as backend_module
+
+        backend = Mock()
+        config = Mock()
+        config._backend = None
+        config.backend = backend
+        monkeypatch.setattr(backend_module, "storage_config", config)
+
+        assert backend_module.get_storage_backend() is backend
+        config.load_from_secrets.assert_called_once_with()
 
 
 class TestInitializeStorage:

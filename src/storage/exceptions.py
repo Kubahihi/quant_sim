@@ -102,11 +102,13 @@ class DuplicateFileError(StorageError):
 class ProductionConfigError(StorageError):
     """Raised when production configuration is missing or invalid."""
     
-    def __init__(self, missing_secrets: list):
-        self.missing_secrets = missing_secrets
+    def __init__(self, issues: list):
+        self.issues = list(issues)
+        # Compatibility for callers that previously inspected this attribute.
+        self.missing_secrets = self.issues
         super().__init__(
-            f"Production storage configuration missing. Missing secrets: {', '.join(missing_secrets)}. "
-            f"Please add these to Streamlit Cloud secrets."
+            f"Production storage configuration is invalid: {', '.join(self.issues)}. "
+            "Please correct the Streamlit Cloud secrets before starting the app."
         )
 
 

@@ -8,6 +8,7 @@ with proper middleware and configuration.
 from __future__ import annotations
 
 from collections import OrderedDict, deque
+import logging
 import math
 import re
 import threading
@@ -20,6 +21,7 @@ from flask import Flask, current_app, g, jsonify, request
 from .config import APIConfig
 from .auth import set_api_config, require_auth
 from .responses import APIResponse
+from .readiness import ReadinessProbe
 from .handlers import (
     handle_summary,
     handle_portfolio,
@@ -123,14 +125,12 @@ def _json_response(response_obj: Any, status_code: int = 200):
         response_meta.setdefault("request_id", _request_id())
 
     if resolved_status >= 500:
-        internal_detail = data.get("error", "Unknown internal API error")
         current_app.logger.error(
-            "API request failed request_id=%s method=%s path=%s error_code=%s detail=%r",
+            "API request failed request_id=%s method=%s path=%s error_code=%s",
             _request_id(),
             request.method,
             request.path,
             data.get("error_code", "internal_error"),
-            internal_detail,
         )
         data["error"] = "Internal server error"
 
@@ -153,36 +153,47 @@ def _internal_error(error):
     """Handle 500 errors with JSON response."""
     request_id = _request_id()
     current_app.logger.error(
-        "Unhandled API exception request_id=%s method=%s path=%s",
+        "Unhandled API exception request_id=%s method=%s path=%s exception_type=%s",
         request_id,
         request.method,
         request.path,
-        exc_info=(type(error), error, error.__traceback__),
+        type(error).__name__,
     )
     payload = APIResponse.error("Internal server error", "internal_error", 500).to_dict()
     payload.setdefault("meta", {})["request_id"] = request_id
     return jsonify(payload), 500
 
 
-def create_app(config: Optional[APIConfig] = None) -> Flask:
+def create_app(
+    config: Optional[APIConfig] = None,
+    readiness_probe: Callable[[], dict[str, Any]] | None = None,
+) -> Flask:
     """
     Create and configure the Flask API application.
     
     Args:
         config: API configuration. If None, loads from config/settings.yaml
+        readiness_probe: Optional dependency probe override, primarily for tests.
     
     Returns:
         Configured Flask application
     """
     if config is None:
         config = APIConfig.from_yaml()
-    
+
+    config.validate()
+
     # Set config for auth module
     set_api_config(config)
     
     app = Flask(__name__)
     app.config["DEBUG"] = config.debug
     app.extensions["quant_sim_api_config"] = config
+    if readiness_probe is None:
+        readiness_probe = ReadinessProbe(config, logger=app.logger)
+    app.extensions["quant_sim_readiness_probe"] = readiness_probe
+    if config.environment == "production":
+        app.logger.setLevel(logging.INFO)
 
     rate_limiter: _InMemoryRateLimiter | None = None
     if config.rate_limit_enabled:
@@ -194,6 +205,7 @@ def create_app(config: Optional[APIConfig] = None) -> Flask:
 
     @app.before_request
     def prepare_request_context():
+        g.request_started_at = time.perf_counter()
         supplied_request_id = str(request.headers.get("X-Request-ID", "")).strip()
         g.request_id = (
             supplied_request_id
@@ -205,6 +217,10 @@ def create_app(config: Optional[APIConfig] = None) -> Flask:
             rate_limiter is None
             or request.method == "OPTIONS"
             or not request.path.startswith(config.api_prefix)
+            or request.path in {
+                f"{config.api_prefix}/health",
+                f"{config.api_prefix}/ready",
+            }
         ):
             return None
 
@@ -228,8 +244,17 @@ def create_app(config: Optional[APIConfig] = None) -> Flask:
     @app.after_request
     def add_cors_headers(response):
         response.headers["X-Request-ID"] = _request_id()
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if config.environment == "production":
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
         if config.cors_enabled:
-            configured_origins = set(config.cors_origins or ["*"])
+            configured_origins = set(config.cors_origins)
             request_origin = request.headers.get("Origin")
             allowed_origin = None
             if "*" in configured_origins:
@@ -246,15 +271,33 @@ def create_app(config: Optional[APIConfig] = None) -> Flask:
                 if allowed_origin != "*":
                     response.vary.add("Origin")
         response.headers["Content-Type"] = "application/json"
+        started_at = getattr(g, "request_started_at", None)
+        duration_ms = (
+            max(0.0, (time.perf_counter() - float(started_at)) * 1000.0)
+            if started_at is not None
+            else 0.0
+        )
+        current_app.logger.info(
+            "api_request request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+            _request_id(),
+            request.method,
+            request.path,
+            response.status_code,
+            duration_ms,
+        )
         return response
     
     # Register API routes
-    register_routes(app, config)
+    register_routes(app, config, readiness_probe)
     
     return app
 
 
-def register_routes(app: Flask, config: APIConfig) -> None:
+def register_routes(
+    app: Flask,
+    config: APIConfig,
+    readiness_probe: Callable[[], dict[str, Any]],
+) -> None:
     """
     Register all API routes with the Flask application.
     
@@ -289,6 +332,32 @@ def register_routes(app: Flask, config: APIConfig) -> None:
             "api_version": config.version,
         })
         return _json_response(response)
+
+    # Readiness endpoint (no auth required)
+    @app.route(f"{api_prefix}/ready")
+    def readiness_check():
+        """GET /api/v1/ready - Verify the database and storage dependencies."""
+        result = readiness_probe()
+        if result.get("ready") is True:
+            return _json_response(APIResponse.ok(result))
+
+        current_app.logger.warning(
+            "API is not ready request_id=%s checks=%s",
+            _request_id(),
+            {
+                name: check.get("status", "unhealthy")
+                for name, check in result.get("checks", {}).items()
+                if isinstance(check, dict)
+            },
+        )
+        response = APIResponse.error(
+            "Service is not ready",
+            "not_ready",
+            503,
+        ).to_dict()
+        response["data"] = result
+        response.setdefault("meta", {})["request_id"] = _request_id()
+        return jsonify(response), 503, {"Content-Type": "application/json"}
     
     # Summary endpoint
     @app.route(f"{api_prefix}/summary")
@@ -433,6 +502,7 @@ def register_routes(app: Flask, config: APIConfig) -> None:
             "version": config.version,
             "endpoints": [
                 {"path": "/health", "method": "GET", "description": "Health check"},
+                {"path": "/ready", "method": "GET", "description": "Dependency readiness"},
                 {"path": "/summary", "method": "GET", "description": "Portfolio summary"},
                 {"path": "/portfolio", "method": "GET", "description": "Full portfolio"},
                 {"path": "/positions", "method": "GET", "description": "Position list"},

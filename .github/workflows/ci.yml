@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out complete repository history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+      - name: Review dependency changes
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: low
+          show-patched-versions: true
+
+  quality:
+    needs: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install pinned Python
+        run: uv python install "$(cat .python-version)"
+
+      - name: Create isolated environment
+        run: uv venv --python "$(cat .python-version)"
+
+      - name: Install locked dependencies
+        run: uv pip sync --python .venv/bin/python requirements-dev.lock
+
+      - name: Validate installed dependency compatibility
+        run: uv pip check --python .venv/bin/python
+
+      - name: Audit installed dependencies for known vulnerabilities
+        run: >-
+          .venv/bin/python -m pip_audit
+          --local --strict
+          --progress-spinner off
+          --cache-dir .uv-cache/pip-audit
+
+      - name: Validate deployment dependency parity
+        run: .venv/bin/python scripts/validate_dependency_manifests.py --check-runtime
+
+      - name: Validate lock files
+        run: |
+          cp requirements.txt /tmp/requirements.txt
+          cp requirements-dev.lock /tmp/requirements-dev.lock
+          uv pip compile requirements.in --python-version 3.12 --universal --exclude-newer "$(cat .dependency-cutoff)" --output-file /tmp/requirements.txt
+          uv pip compile requirements.in requirements-dev.txt --python-version 3.12 --universal --exclude-newer "$(cat .dependency-cutoff)" --output-file /tmp/requirements-dev.lock
+          diff --strip-trailing-cr <(tail -n +3 requirements.txt) <(tail -n +3 /tmp/requirements.txt)
+          diff --strip-trailing-cr <(tail -n +3 requirements-dev.lock) <(tail -n +3 /tmp/requirements-dev.lock)
+
+      - name: Compile Python sources
+        run: .venv/bin/python -m compileall -q src ui scripts api_server.py main.py setup.py
+
+      - name: Run correctness lint
+        run: .venv/bin/python -m ruff check src ui tests scripts api_server.py main.py setup.py
+
+      - name: Smoke-test real Streamlit server
+        run: .venv/bin/python scripts/smoke_streamlit.py
+
+      - name: Run test suite with coverage gate
+        run: >-
+          .venv/bin/python -m pytest -q
+          -W error
+          --cov=src --cov=ui
+          --cov-report=term:skip-covered
+          --cov-fail-under=57
+
+      - name: Build and verify release manifest
+        run: |
+          .venv/bin/python scripts/release_manifest.py create \
+            --output build/release-manifest.json \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF_NAME"
+          .venv/bin/python scripts/release_manifest.py verify \
+            --manifest build/release-manifest.json \
+            --expected-commit "$GITHUB_SHA"
+
+      - name: Attest release manifest provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@v4
+        with:
+          subject-path: build/release-manifest.json
+
+      - name: Retain verified release manifest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: quant-sim-release-${{ github.sha }}
+          path: build/release-manifest.json
+          if-no-files-found: error
+          retention-days: 90

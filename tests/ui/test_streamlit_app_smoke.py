@@ -17,6 +17,11 @@ matplotlib.use("Agg")
 APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "streamlit_app.py"
 
 
+def _enable_test_auto_login(monkeypatch) -> None:
+    monkeypatch.setenv("QUANT_SIM_ENV", "test")
+    monkeypatch.setenv("QUANT_SIM_TEST_AUTO_LOGIN", "1")
+
+
 def _sample_prices(symbols: list[str], periods: int = 90) -> pd.DataFrame:
     dates = pd.date_range("2024-01-02", periods=periods, freq="B")
     rows: dict[str, np.ndarray] = {}
@@ -105,7 +110,20 @@ def _fake_quant_stack(tmp_path: Path):
     return _runner
 
 
-def test_streamlit_app_shows_workspace_by_default():
+def test_pytest_context_alone_does_not_bypass_login(monkeypatch):
+    monkeypatch.setenv("QUANT_SIM_ENV", "development")
+    monkeypatch.delenv("QUANT_SIM_TEST_AUTO_LOGIN", raising=False)
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=60)
+
+    assert len(at.exception) == 0
+    assert any("Welcome back." in item.value for item in at.markdown)
+    assert not any(item.value == "Workspace Hub" for item in at.subheader)
+
+
+def test_streamlit_app_shows_workspace_by_default(monkeypatch):
+    _enable_test_auto_login(monkeypatch)
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=60)
 
@@ -354,6 +372,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
 
 
 def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):
+    _enable_test_auto_login(monkeypatch)
     import src.ai
     import src.analytics
     import src.data.fetchers.yahoo_fetcher
