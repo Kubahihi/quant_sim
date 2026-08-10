@@ -7,6 +7,7 @@ import math
 import pytest
 from types import SimpleNamespace
 
+from src.auth.wharton_credentials import WhartonCredentialConfigError
 from ui.pages import wharton_dash
 
 
@@ -41,6 +42,20 @@ def test_anonymous_wharton_login_does_not_initialize_database(monkeypatch):
     wharton_dash.render_wharton_cockpit()
 
     assert rendered == ["login"]
+
+
+def test_login_reports_invalid_team_credential_configuration(monkeypatch):
+    errors = []
+
+    def fail_initialization():
+        raise WhartonCredentialConfigError("Wharton credentials are incomplete.")
+
+    monkeypatch.setattr(wharton_dash, "init_db", fail_initialization)
+    monkeypatch.setattr(wharton_dash.st, "error", errors.append)
+
+    assert wharton_dash._initialize_database_for_login() is False
+    assert len(errors) == 1
+    assert "Streamlit Cloud secrets" in errors[0]
 
 
 def test_black_litterman_view_parser_and_optimizer_metadata_adapter():

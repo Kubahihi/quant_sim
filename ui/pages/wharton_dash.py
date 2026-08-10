@@ -24,6 +24,7 @@ import streamlit as st
 
 from src.auth.wharton_credentials import (
     REQUIRED_WHARTON_USERS,
+    WhartonCredentialConfigError,
     validate_wharton_credentials,
 )
 from src.utils.environment import is_production_environment, resolve_environment
@@ -56,11 +57,6 @@ def _is_development_mode() -> bool:
         not is_production_environment(fail_closed_streamlit=True)
         and resolve_environment() == "development"
     )
-
-
-def _should_sync_seeded_passwords() -> bool:
-    """Avoid expensive bcrypt checks on every production start."""
-    return _is_development_mode() or os.environ.get("QUANT_SIM_SYNC_DEFAULT_PASSWORDS") == "1"
 
 
 def _get_default_password() -> str:
@@ -528,12 +524,6 @@ def _initialize_database() -> None:
             user_pass = seeded_passwords[user["username"]]
 
             if existing_users.get(user["username"]):
-                if not _should_sync_seeded_passwords():
-                    conn.execute(
-                        "UPDATE wharton_users SET role = ?, primary_module = ? WHERE username = ?",
-                        (user["role"], user["primary_module"], user["username"]),
-                    )
-                    continue
                 stored_hash = existing_users[user["username"]]
                 if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
                     conn.execute(
@@ -591,6 +581,23 @@ def init_db() -> None:
         _initialize_database()
         return
     _initialize_database_once(str(DB_PATH.resolve()), str(UPLOAD_DIR.resolve()))
+
+
+def _initialize_database_for_login() -> bool:
+    """Initialize login storage while keeping credential failures user-friendly."""
+    try:
+        init_db()
+    except WhartonCredentialConfigError:
+        LOGGER.error(
+            "Wharton login is unavailable because team credentials are not configured correctly."
+        )
+        st.error(
+            "Login is temporarily unavailable because the team credentials are not "
+            "configured correctly. Ask the app administrator to update the Streamlit "
+            "Cloud secrets."
+        )
+        return False
+    return True
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -710,7 +717,8 @@ def _render_login() -> None:
     if submitted:
         # Authentication and brute-force tracking require their schemas, but
         # anonymous visitors should never pay this remote initialization cost.
-        init_db()
+        if not _initialize_database_for_login():
+            return
         from src.auth.database import (
             get_recent_failed_attempts,
             init_auth_database,
