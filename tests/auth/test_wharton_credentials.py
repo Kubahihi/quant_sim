@@ -20,6 +20,12 @@ def test_valid_credentials_are_returned_without_transformation() -> None:
     assert validate_wharton_credentials(credentials) == credentials
 
 
+def test_shared_ten_character_password_is_allowed() -> None:
+    credentials = dict.fromkeys(REQUIRED_WHARTON_USERS, "wharton123")
+
+    assert validate_wharton_credentials(credentials) == credentials
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -27,7 +33,6 @@ def test_valid_credentials_are_returned_without_transformation() -> None:
         lambda values: values.__setitem__("Matěj", "short9"),
         lambda values: values.__setitem__("Matěj", "a" * 73),
         lambda values: values.__setitem__("Matěj", "replace-with-a-strong-password"),
-        lambda values: values.__setitem__("Matěj", values["Martin"]),
     ],
 )
 def test_incomplete_or_unsafe_credentials_fail_closed(mutation) -> None:

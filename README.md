@@ -148,6 +148,10 @@ R2_ACCESS_KEY_ID = "your-r2-access-key-id"
 R2_SECRET_ACCESS_KEY = "your-r2-secret-access-key"
 ```
 
+Vsech pet uctu muze pouzivat jedno spolecne heslo o delce 10–72 UTF-8 bajtu.
+Po zmene prihlasovacich udaju aplikaci restartujte, aby se aktualizovaly ulozene
+otisky hesel.
+
 4. Nastavte hlavni soubor na `ui/streamlit_app.py` a nasadte aplikaci. Po prvnim spusteni se vytvori sdilena databazova struktura a aktualizuji se role zakladnich uzivatelu.
 
 Vsechny realne hodnoty patri pouze do Streamlit Cloud Secrets. Bez Turso by se prihlaseni a sdilena data po redeployi neuchovala; bez R2 by se neuchovaly nahrane soubory.
