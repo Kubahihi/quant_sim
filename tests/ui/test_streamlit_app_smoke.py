@@ -321,7 +321,10 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
         "Home", "Portfolio", "Research", "Risk & Quant", "Scenarios", "Teamspace"
     ]
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == ["Overview & Tasks", "Competition Readiness", "Assignment & Rules"]
+    assert panel_selector.options == [
+        "Overview & Tasks", "Competition Readiness", "Report Evidence Studio",
+        "Assignment & Rules", "Official Rules Watch",
+    ]
 
     panel_selector.set_value("Competition Readiness").run(timeout=60)
     assert len(at.exception) == 0
@@ -337,7 +340,10 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
     area_selector.set_value("Portfolio").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == ["Strategy & Decisions", "Portfolio Tracker"]
+    assert panel_selector.options == [
+        "Strategy & Decisions", "Security Dossiers", "Investment Committee",
+        "Portfolio Tracker",
+    ]
     assert any("Strategy Lab" in item.value for item in at.markdown)
     strategy_tab_labels = [tab.label for tab in at.tabs]
     assert "Client Mandate" in strategy_tab_labels
@@ -345,6 +351,16 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert "Alignment & Drift" in strategy_tab_labels
     assert "Thesis Monitor" in strategy_tab_labels
 
+    panel_selector.set_value("Security Dossiers").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Security Dossiers" in item.value for item in at.markdown)
+
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    panel_selector.set_value("Investment Committee").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Investment Committee" in item.value for item in at.markdown)
+
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     panel_selector.set_value("Portfolio Tracker").run(timeout=60)
     assert any("Portfolio Tracker" in item.value for item in at.markdown)
     assert not any("Company Analysis" in item.value for item in at.markdown)
@@ -380,16 +396,27 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert any("Regional Macro Drill-down" in item.value for item in at.markdown)
     assert any(item.label == "Macro resilience (2024)" for item in at.metric)
 
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    panel_selector.set_value("Bond Analysis").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any(item.label == "Canonical Security Dossier" for item in at.selectbox)
+    assert any(item.label == "Instrument type" for item in at.radio)
+
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
     area_selector.set_value("Risk & Quant").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     assert panel_selector.options == [
+        "Live Portfolio & Data Reliability",
         "Quant Engine",
         "Risk Cockpit",
         "Currency Risk & Hedging",
         "Factor Exposure",
         "Regime Detection",
     ]
+    panel_selector.set_value("Live Portfolio & Data Reliability").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Live Portfolio & Data Reliability" in item.value for item in at.markdown)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     panel_selector.set_value("Currency Risk & Hedging").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Currency Risk & Hedging" in item.value for item in at.markdown)

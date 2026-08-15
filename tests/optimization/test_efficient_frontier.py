@@ -50,3 +50,49 @@ def test_single_asset_has_one_feasible_frontier_point():
     assert len(points) == 1
     assert np.array_equal(points[0]["weights"], np.array([1.0]))
     assert points[0]["return"] == pytest.approx(float(returns.mean().iloc[0] * 252))
+
+
+@pytest.mark.parametrize(
+    ("allow_short", "max_weight"),
+    [(False, None), (False, 0.30), (True, 0.40)],
+)
+def test_reusable_solver_matches_slsqp_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    allow_short: bool,
+    max_weight: float | None,
+):
+    returns = _sample_returns(periods=320, assets=6)
+    accelerated = calculate_efficient_frontier(
+        returns,
+        n_points=12,
+        allow_short=allow_short,
+        max_weight=max_weight,
+    )
+
+    import osqp
+
+    class UnavailableSolver:
+        def setup(self, **_kwargs):
+            raise RuntimeError("solver unavailable")
+
+    monkeypatch.setattr(osqp, "OSQP", UnavailableSolver)
+    fallback = calculate_efficient_frontier(
+        returns,
+        n_points=12,
+        allow_short=allow_short,
+        max_weight=max_weight,
+    )
+
+    assert len(accelerated) == len(fallback) == 12
+    np.testing.assert_allclose(
+        [point["return"] for point in accelerated],
+        [point["return"] for point in fallback],
+        atol=1e-7,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        [point["volatility"] for point in accelerated],
+        [point["volatility"] for point in fallback],
+        atol=1e-7,
+        rtol=0.0,
+    )
