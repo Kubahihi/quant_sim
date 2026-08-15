@@ -74,3 +74,42 @@ def test_readiness_exposes_gaps_and_generates_defensible_brief():
     assert "Competition Readiness Brief" in brief
     assert "60% ACWI / 40% AGG" in brief
     assert "team must verify every claim" in brief
+
+
+def test_pitch_ready_is_gated_by_committee_reconciliation_and_frozen_report():
+    source = {"ticker": "ABC", "title": "10-K", "primary_source": True}
+    catalyst = {"ticker": "ABC", "title": "Investor day"}
+    common = dict(
+        mandate=MANDATE,
+        strategy=STRATEGY,
+        theses=[THESIS],
+        sources=[source],
+        catalysts=[catalyst],
+        decisions=[{"ticker": "ABC"}],
+        thesis_reviews=[{"ticker": "ABC"}],
+        red_team_reviews=[{"ticker": "ABC"}],
+        ai_usage=[{"tool": "assistant"}],
+        qa_sessions=[{"score": 4}],
+        rules_snapshot={"hash": "abc", "acknowledged_by": ["team"]},
+    )
+
+    gated = build_competition_readiness(**common)
+    assert gated["overall_score"] < 90
+    assert gated["operating_gates"] == {
+        "investment_committee": False,
+        "wins_reconciliation": False,
+        "report_frozen_to_snapshot": False,
+    }
+
+    ready = build_competition_readiness(
+        **common,
+        investment_cases=[{
+            "status": "approved",
+            "pre_votes": {"a": {}, "b": {}},
+            "post_votes": {"a": {}, "b": {}},
+            "final_approvals": ["Jakub", "Matej"],
+        }],
+        reconciliation={"status": "clean", "open_exceptions": []},
+        report_workspace={"status": "frozen", "portfolio_snapshot_id": "wins-42"},
+    )
+    assert all(ready["operating_gates"].values())

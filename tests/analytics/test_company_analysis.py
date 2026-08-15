@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+import yfinance as yf
+
+import src.analytics.company_analysis as company_analysis
 
 from src.analytics.company_analysis import (
     _extract_geographic_revenue_from_ixbrl,
@@ -18,9 +21,38 @@ from src.analytics.company_analysis import (
     fetch_imf_general_government_debt,
     fetch_macro_snapshot,
     fetch_management_biography,
+    fetch_company_data,
     format_statement,
     infer_macro_economy,
 )
+
+
+def test_company_snapshot_degrades_gracefully_when_yahoo_rate_limits(monkeypatch):
+    class RateLimitedTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, **kwargs):
+            raise RuntimeError("Too Many Requests")
+
+        def __getattr__(self, name):
+            raise RuntimeError(f"Too Many Requests: {name}")
+
+    monkeypatch.setattr(yf, "Ticker", RateLimitedTicker)
+    monkeypatch.setattr(
+        company_analysis,
+        "fetch_geographic_revenue",
+        lambda *args, **kwargs: {"available": False, "source_name": "manual evidence required"},
+    )
+
+    snapshot = fetch_company_data("grab")
+
+    assert snapshot["ticker"] == "GRAB"
+    assert snapshot["provider_status"] == "degraded"
+    assert snapshot["provider_errors"]
+    assert snapshot["info"] == {}
+    assert snapshot["history"].empty
+    assert snapshot["income_statement"].empty
 
 
 SAMPLE_IXBRL = b'''<?xml version="1.0" encoding="UTF-8"?>

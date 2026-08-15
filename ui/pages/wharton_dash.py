@@ -101,10 +101,17 @@ LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
 HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
 
 COCKPIT_AREAS = {
-    "Home": ("Overview & Tasks", "Competition Readiness", "Assignment & Rules"),
-    "Portfolio": ("Strategy & Decisions", "Portfolio Tracker"),
+    "Home": (
+        "Overview & Tasks", "Competition Readiness", "Report Evidence Studio",
+        "Assignment & Rules", "Official Rules Watch",
+    ),
+    "Portfolio": (
+        "Strategy & Decisions", "Security Dossiers", "Investment Committee",
+        "Portfolio Tracker",
+    ),
     "Research": ("Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"),
     "Risk & Quant": (
+        "Live Portfolio & Data Reliability",
         "Quant Engine",
         "Risk Cockpit",
         "Currency Risk & Hedging",
@@ -118,7 +125,7 @@ COCKPIT_AREAS = {
         "Advanced Monte Carlo",
         "Advanced Analytics",
     ),
-    "Teamspace": ("Mind Map", "Sub-Projects", "War Room", "File Vault"),
+    "Teamspace": ("Q&A Rehearsal", "Mind Map", "Sub-Projects", "War Room", "File Vault"),
 }
 
 COCKPIT_AREA_DESCRIPTIONS = {
@@ -133,14 +140,19 @@ COCKPIT_AREA_DESCRIPTIONS = {
 COCKPIT_PANEL_DESCRIPTIONS = {
     "Overview & Tasks": "Start here for the team's current workload and immediate priorities.",
     "Competition Readiness": "Close strategy, evidence, governance, report, and pitch gaps before submission.",
+    "Report Evidence Studio": "Build frozen mid-project and final reports from linked claims, sources, figures, decisions, and one reconciled snapshot.",
     "Assignment & Rules": "Keep competition requirements and team readiness in one place.",
+    "Official Rules Watch": "Hash official publications, inspect changes, and collect team acknowledgements.",
     "Strategy & Decisions": "Document the mandate, strategy, theses, catalysts, and decisions.",
+    "Security Dossiers": "Maintain one canonical thesis and KPI monitor per security.",
+    "Investment Committee": "Run locked pre-votes, discussion, post-votes, rule checks, approvals, sizing, and execution.",
     "Portfolio Tracker": "Track positions, performance, ownership, and reconciliation.",
     "Company Analysis": "Review company evidence, regions, financials, management, moat, and valuation.",
     "Bond Analysis": "Value a bond or bond ETF and inspect yield, cash flows, duration, and rate sensitivity.",
     "Commodity Analysis": "Compare commodity proxies, inspect diversification, and stress a proposed position.",
     "Stock Screener": "Filter and rank the investable universe before deeper research.",
     "Quant Engine": "Configure and run the shared analytical pipeline.",
+    "Live Portfolio & Data Reliability": "Bind every analytical consumer to the latest reconciled WInS snapshot and inspect data health.",
     "Risk Cockpit": "Inspect portfolio-level risk signals and concentrations.",
     "Currency Risk & Hedging": "Measure FX exposure, stress exchange rates, and optimize hedge ratios after costs.",
     "Factor Exposure": "Understand systematic drivers behind portfolio behavior.",
@@ -151,6 +163,7 @@ COCKPIT_PANEL_DESCRIPTIONS = {
     "Advanced Monte Carlo": "Add jumps and richer distribution assumptions.",
     "Advanced Analytics": "Open specialist diagnostics after the core review.",
     "Sub-Projects": "Organize focused workstreams and their supporting material.",
+    "Q&A Rehearsal": "Run timed evidence-linked mock rounds and track member performance.",
 }
 
 TASK_PRIORITIES = ["Critical", "High", "Medium", "Low"]
@@ -300,7 +313,13 @@ def _initialize_database() -> None:
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
         from src.portfolio_tracker.competition_audit import init_competition_audit_tables
+        from src.portfolio_tracker.authoritative_universe_store import init_authoritative_universe_tables
         from src.portfolio_tracker.governance_store import init_governance_tables
+        from src.portfolio_tracker.investment_lifecycle_store import (
+            init_investment_lifecycle_tables,
+        )
+        from src.portfolio_tracker.operating_system_store import init_operating_system_tables
+        from src.portfolio_tracker.security_dossier_store import init_security_dossier_tables
         from src.portfolio_tracker.strategy_store import init_strategy_tables
 
         # Shared, versioned macro cache. With Turso configured this table is
@@ -309,6 +328,10 @@ def _initialize_database() -> None:
         init_strategy_tables(conn)
         init_governance_tables(conn)
         init_competition_audit_tables(conn)
+        init_operating_system_tables(conn)
+        init_security_dossier_tables(conn)
+        init_authoritative_universe_tables(conn)
+        init_investment_lifecycle_tables(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wharton_users (
                 id INTEGER PRIMARY KEY,
@@ -334,9 +357,26 @@ def _initialize_database() -> None:
                 assignee TEXT,
                 due_date TEXT,
                 tags TEXT,
+                client_goal TEXT DEFAULT '',
+                dossier_id TEXT DEFAULT '',
+                decision_id TEXT DEFAULT '',
+                subproject_id INTEGER,
                 is_done INTEGER DEFAULT 0
             )
         """)
+        task_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        for col, definition in [
+            ("due_date", "TEXT"),
+            ("tags", "TEXT DEFAULT ''"),
+            ("client_goal", "TEXT DEFAULT ''"),
+            ("dossier_id", "TEXT DEFAULT ''"),
+            ("decision_id", "TEXT DEFAULT ''"),
+            ("subproject_id", "INTEGER"),
+        ]:
+            if col not in task_cols:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {definition}")
         # Extended files table with project/description support
         # login_attempts table is managed by src.auth.database.py, so we don't recreate it here.
         # Decision log stores the analytical context captured with each action.
@@ -464,7 +504,8 @@ def _initialize_database() -> None:
                 recovery_rate REAL,
                 competition_eligibility_status TEXT DEFAULT 'Pending verification',
                 eligibility_source TEXT DEFAULT '',
-                eligibility_checked_at TEXT
+                eligibility_checked_at TEXT,
+                lifecycle_id INTEGER
             )
         """)
         position_cols = {
@@ -507,6 +548,7 @@ def _initialize_database() -> None:
             ("competition_eligibility_status", "TEXT DEFAULT 'Pending verification'"),
             ("eligibility_source", "TEXT DEFAULT ''"),
             ("eligibility_checked_at", "TEXT"),
+            ("lifecycle_id", "INTEGER"),
         ]:
             if col not in position_cols:
                 conn.execute(f"ALTER TABLE competition_positions ADD COLUMN {col} {definition}")
@@ -548,9 +590,26 @@ def _initialize_database() -> None:
                 name TEXT,
                 description TEXT,
                 status TEXT DEFAULT 'active',
-                tags TEXT DEFAULT ''
+                tags TEXT DEFAULT '',
+                client_goal TEXT DEFAULT '',
+                dossier_id TEXT DEFAULT '',
+                decision_id TEXT DEFAULT '',
+                owner TEXT DEFAULT '',
+                due_date TEXT
             )
         """)
+        subproject_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(subprojects)").fetchall()
+        }
+        for col, definition in [
+            ("client_goal", "TEXT DEFAULT ''"),
+            ("dossier_id", "TEXT DEFAULT ''"),
+            ("decision_id", "TEXT DEFAULT ''"),
+            ("owner", "TEXT DEFAULT ''"),
+            ("due_date", "TEXT"),
+        ]:
+            if col not in subproject_cols:
+                conn.execute(f"ALTER TABLE subprojects ADD COLUMN {col} {definition}")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS subproject_files (
                 id INTEGER PRIMARY KEY,
@@ -974,14 +1033,23 @@ def _inject_cockpit_styles() -> None:
 def _fetch_task_rows() -> pd.DataFrame:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, priority, task_text, assignee, is_done FROM tasks ORDER BY "
+            "SELECT id, priority, task_text, assignee, due_date, client_goal, "
+            "dossier_id, decision_id, subproject_id, is_done FROM tasks ORDER BY "
             "CASE priority WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END, id ASC"
         ).fetchall()
     return pd.DataFrame(
         [{"id": int(r["id"]), "priority": str(r["priority"] or "Medium"),
           "task_text": str(r["task_text"] or ""), "assignee": str(r["assignee"] or ""),
+          "due_date": str(r["due_date"] or ""),
+          "client_goal": str(r["client_goal"] or ""),
+          "dossier_id": str(r["dossier_id"] or ""),
+          "decision_id": str(r["decision_id"] or ""),
+          "subproject_id": r["subproject_id"],
           "is_done": bool(r["is_done"])} for r in rows],
-        columns=["id", "priority", "task_text", "assignee", "is_done"],
+        columns=[
+            "id", "priority", "task_text", "assignee", "due_date",
+            "client_goal", "dossier_id", "decision_id", "subproject_id", "is_done",
+        ],
     )
 
 
@@ -1000,10 +1068,23 @@ def _clean_priority(value: object) -> str:
 
 def _clean_task_payload(row_data: dict, default_assignee: str) -> dict:
     assignee = str(row_data.get("assignee") or default_assignee).strip() or default_assignee
+    due_value = row_data.get("due_date")
+    if hasattr(due_value, "isoformat"):
+        due_value = due_value.isoformat()
     return {
         "priority": _clean_priority(row_data.get("priority")),
         "task_text": str(row_data.get("task_text") or "").strip(),
         "assignee": assignee,
+        "due_date": str(due_value or "").strip()[:10] or None,
+        "client_goal": str(row_data.get("client_goal") or "").strip(),
+        "dossier_id": str(row_data.get("dossier_id") or "").strip().upper(),
+        "decision_id": str(row_data.get("decision_id") or "").strip(),
+        "subproject_id": (
+            int(float(row_data["subproject_id"]))
+            if row_data.get("subproject_id") not in (None, "")
+            and pd.notna(row_data.get("subproject_id"))
+            else None
+        ),
         "is_done": int(_truthy(row_data.get("is_done"))),
     }
 
@@ -1040,8 +1121,13 @@ def _apply_task_editor_changes(state: dict, original: pd.DataFrame, default_assi
             payload = _clean_task_payload(current, default_assignee)
             task_id = int(original.iloc[idx]["id"])
             conn.execute(
-                "UPDATE tasks SET priority=?, task_text=?, assignee=?, is_done=? WHERE id=?",
-                (payload["priority"], payload["task_text"], payload["assignee"], payload["is_done"], task_id),
+                "UPDATE tasks SET priority=?, task_text=?, assignee=?, due_date=?, "
+                "client_goal=?, dossier_id=?, decision_id=?, subproject_id=?, is_done=? WHERE id=?",
+                (
+                    payload["priority"], payload["task_text"], payload["assignee"],
+                    payload["due_date"], payload["client_goal"], payload["dossier_id"],
+                    payload["decision_id"], payload["subproject_id"], payload["is_done"], task_id,
+                ),
             )
 
         for row in (added if isinstance(added, list) else []):
@@ -1049,8 +1135,13 @@ def _apply_task_editor_changes(state: dict, original: pd.DataFrame, default_assi
             payload = _clean_task_payload(row, default_assignee)
             if not payload["task_text"]: continue
             conn.execute(
-                "INSERT INTO tasks (priority, task_text, assignee, is_done) VALUES (?, ?, ?, ?)",
-                (payload["priority"], payload["task_text"], payload["assignee"], payload["is_done"]),
+                "INSERT INTO tasks (priority, task_text, assignee, due_date, client_goal, "
+                "dossier_id, decision_id, subproject_id, is_done) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    payload["priority"], payload["task_text"], payload["assignee"],
+                    payload["due_date"], payload["client_goal"], payload["dossier_id"],
+                    payload["decision_id"], payload["subproject_id"], payload["is_done"],
+                ),
             )
         conn.commit()
         if hasattr(conn, 'sync'): conn.sync()
@@ -1092,12 +1183,27 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
                 quick_priority = st.selectbox("Priority", TASK_PRIORITIES, index=2)
             with qc3:
                 quick_assignee = st.text_input("Assign to (optional)", value=str(profile["username"]))
+            ql1, ql2, ql3, ql4 = st.columns(4)
+            with ql1:
+                quick_due = st.date_input("Deadline", value=date.today() + timedelta(days=7))
+            with ql2:
+                quick_goal = st.text_input("Client goal", placeholder="Goal bucket")
+            with ql3:
+                quick_dossier = st.text_input("Security dossier", placeholder="e.g. MSFT")
+            with ql4:
+                quick_decision = st.text_input("Decision / case ID", placeholder="e.g. IC-MSFT-01")
             if st.form_submit_button("Add Task", type="primary", use_container_width=True):
                 if quick_text.strip():
                     with get_connection() as conn:
                         conn.execute(
-                            "INSERT INTO tasks (priority, task_text, assignee, is_done) VALUES (?, ?, ?, 0)",
-                            (quick_priority, quick_text.strip(), quick_assignee.strip() or str(profile["username"])),
+                            "INSERT INTO tasks (priority, task_text, assignee, due_date, client_goal, "
+                            "dossier_id, decision_id, is_done) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+                            (
+                                quick_priority, quick_text.strip(),
+                                quick_assignee.strip() or str(profile["username"]),
+                                quick_due.isoformat(), quick_goal.strip(),
+                                quick_dossier.strip().upper(), quick_decision.strip(),
+                            ),
                         )
                         conn.commit()
                         if hasattr(conn, 'sync'): conn.sync()
@@ -1114,13 +1220,21 @@ def _render_task_manager(profile: dict[str, str | int]) -> None:
         use_container_width=True,
         hide_index=True,
         key=editor_key,
-        column_order=["id", "priority", "task_text", "assignee", "is_done"],
+        column_order=[
+            "id", "priority", "task_text", "assignee", "due_date", "client_goal",
+            "dossier_id", "decision_id", "subproject_id", "is_done",
+        ],
         height=440,
         column_config={
             "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
             "priority": st.column_config.SelectboxColumn("Priority", options=TASK_PRIORITIES, required=True, width="small"),
             "task_text": st.column_config.TextColumn("Task", required=True, width="large"),
             "assignee": st.column_config.TextColumn("Assignee", required=True, width="medium"),
+            "due_date": st.column_config.TextColumn("Deadline", help="YYYY-MM-DD", width="small"),
+            "client_goal": st.column_config.TextColumn("Client Goal", width="medium"),
+            "dossier_id": st.column_config.TextColumn("Dossier", width="small"),
+            "decision_id": st.column_config.TextColumn("Decision", width="small"),
+            "subproject_id": st.column_config.NumberColumn("Project ID", min_value=1, step=1, width="small"),
             "is_done": st.column_config.CheckboxColumn("Done ✓", width="small"),
         },
     )
@@ -1607,7 +1721,9 @@ def _render_file_center(profile: dict[str, str | int]) -> None:
 def _fetch_subprojects() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
-            "SELECT id, created_at, created_by, name, description, status, tags FROM subprojects ORDER BY id DESC"
+            "SELECT id, created_at, created_by, name, description, status, tags, "
+            "client_goal, dossier_id, decision_id, owner, due_date "
+            "FROM subprojects ORDER BY id DESC"
         ).fetchall()
 
 
@@ -1641,13 +1757,28 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                 sp_status = st.selectbox("Status", ["active", "in-review", "complete", "archived"])
             with sp2:
                 sp_tags = st.text_input("Tags", placeholder="risk, eu, regulation")
+            link1, link2, link3, link4 = st.columns(4)
+            with link1:
+                sp_goal = st.text_input("Client goal", placeholder="Goal bucket")
+            with link2:
+                sp_dossier = st.text_input("Security dossier", placeholder="e.g. ASML")
+            with link3:
+                sp_decision = st.text_input("Decision / case ID", placeholder="IC-ASML-01")
+            with link4:
+                sp_due = st.date_input("Deadline", value=date.today() + timedelta(days=14))
             if st.form_submit_button("Create Sub-Project", type="primary"):
                 if sp_name.strip():
                     with get_connection() as conn:
                         conn.execute(
-                            "INSERT INTO subprojects (created_at, created_by, name, description, status, tags) VALUES (?, ?, ?, ?, ?, ?)",
-                            (_now_iso(), str(profile["username"]), sp_name.strip(),
-                             sp_desc.strip(), sp_status, sp_tags.strip()),
+                            "INSERT INTO subprojects (created_at, created_by, name, description, "
+                            "status, tags, client_goal, dossier_id, decision_id, owner, due_date) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                _now_iso(), str(profile["username"]), sp_name.strip(),
+                                sp_desc.strip(), sp_status, sp_tags.strip(), sp_goal.strip(),
+                                sp_dossier.strip().upper(), sp_decision.strip(),
+                                str(profile["username"]), sp_due.isoformat(),
+                            ),
                         )
                         conn.commit()
                         if hasattr(conn, 'sync'): conn.sync()
@@ -1688,6 +1819,15 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                   <div style="margin-top:0.5rem;font-size:0.82rem;color:#64748b;">Tags: {escape(str(sp['tags'] or '—'))}</div>
                 </div>
             """, unsafe_allow_html=True)
+
+            st.caption(
+                "Linked workflow: "
+                f"client goal {sp['client_goal'] or 'unassigned'} · "
+                f"dossier {sp['dossier_id'] or 'unassigned'} · "
+                f"decision {sp['decision_id'] or 'unassigned'} · "
+                f"owner {sp['owner'] or sp['created_by']} · "
+                f"deadline {sp['due_date'] or 'not set'}"
+            )
 
             if sp_files:
                 st.markdown("**Attached Files:**")
@@ -1875,6 +2015,9 @@ def _compute_quant_run(
     short_term_tax_rate=0.35,
     long_term_tax_rate=0.20,
     universe_membership=None,
+    portfolio_snapshot_id=None,
+    portfolio_snapshot_as_of=None,
+    portfolio_snapshot_source=None,
 ) -> dict[str, Any]:
     run_started_at = time.perf_counter()
     phase_started_at = run_started_at
@@ -2375,6 +2518,9 @@ def _compute_quant_run(
             "research_stack_seconds": None,
         },
         "inputs": {
+            "portfolio_snapshot_id": portfolio_snapshot_id,
+            "portfolio_snapshot_as_of": portfolio_snapshot_as_of,
+            "portfolio_snapshot_source": portfolio_snapshot_source,
             "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
             "risk_free_rate": risk_free_rate, "current_value": current_value,
             "max_weight": effective_max_weight, "requested_max_weight": max_weight,
@@ -2411,28 +2557,90 @@ def _compute_quant_run(
     }
 
 
+def _load_canonical_quant_input() -> dict[str, Any]:
+    """Resolve the strict competition pipeline input for Quant and Risk."""
+    from src.portfolio_tracker.operating_system_store import get_current_record
+    from src.portfolio_tracker.portfolio_pipeline import (
+        build_live_portfolio_pipeline,
+        materialize_consumer_input,
+    )
+
+    with get_connection() as connection:
+        record = get_current_record(connection, "portfolio_pipeline", "competition")
+    workspace = (record or {}).get("payload", {})
+    strategy_data = _load_strategy_workspace_data()
+    pipeline = build_live_portfolio_pipeline(
+        workspace.get("snapshots", []),
+        workspace.get("ledger", {"reconciliations": [], "events": []}),
+        mandate=_strategy_payload(strategy_data.get("mandate_record")),
+        rulebook=_strategy_payload(strategy_data.get("strategy_record")),
+        expected_return_assumptions=workspace.get("expected_return_assumptions", {}),
+        max_age_seconds=86_400,
+    )
+    return {
+        "pipeline": pipeline,
+        "input": materialize_consumer_input(pipeline, "quant"),
+        "workspace_version": int((record or {}).get("version") or 0),
+    }
+
+
 def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
     default_start = date(2014, 1, 1)
+    canonical = _load_canonical_quant_input()
+    quant_input = canonical["input"]
+    portfolio_payload = quant_input.get("portfolio") or {}
+    canonical_positions = portfolio_payload.get("positions") or []
+    canonical_tickers = [
+        str(item.get("ticker") or "").strip().upper()
+        for item in canonical_positions if item.get("ticker")
+    ]
+    canonical_weights = [
+        float(item.get("weight") or 0.0) for item in canonical_positions if item.get("ticker")
+    ]
+    invested_weight = sum(canonical_weights)
+    sleeve_weights = (
+        [weight / invested_weight for weight in canonical_weights]
+        if invested_weight > 0 else []
+    )
+    canonical_value = float(portfolio_payload.get("total_value") or 100_000.0)
+    canonical_assumptions = quant_input.get("expected_return_assumptions") or {}
+    canonical_views = canonical_assumptions.get("values") or {}
 
     with st.expander(" Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
+        if quant_input["allowed"]:
+            st.success(
+                f"Canonical competition input: {quant_input['portfolio_snapshot_id']} · "
+                f"as of {quant_input['portfolio_as_of']} · source {quant_input['portfolio_source'].get('provider', 'unknown')}."
+            )
+        else:
+            st.error(
+                "Competition Quant is blocked until the live portfolio pipeline is complete: "
+                + ", ".join(quant_input["blockers"])
+            )
         with st.form("wharton_quant_config_form"):
             col_in, col_risk = st.columns([1, 1], gap="large")
             with col_in:
                 tickers_text = st.text_area(
                     "Market Tickers",
-                    value="\n".join(DEFAULT_QUANT_TICKERS),
+                    value="\n".join(canonical_tickers),
                     height=145,
-                    help="Stocks and traded ETFs. Leave empty for a manual-bond-only portfolio.",
+                    help="Read-only securities from the canonical reconciled WInS snapshot.",
+                    disabled=True,
                 )
                 weights_text = st.text_area(
-                    "Market Sleeve Weights (leave empty = equal)",
-                    value="",
+                    "Canonical invested-sleeve weights",
+                    value="\n".join(f"{weight:.10f}" for weight in sleeve_weights),
                     height=115,
-                    help="Relative weights inside the portion left after explicit manual-bond weights.",
+                    help="Derived from WInS market values; cash remains explicit in the snapshot.",
+                    disabled=True,
                 )
                 benchmark_ticker = st.text_input("Benchmark Ticker", value="SPY").strip().upper()
-                current_value = st.number_input("Portfolio Value ($)", min_value=1_000.0, value=100_000.0, step=5_000.0)
+                current_value = st.number_input(
+                    "Portfolio Value ($)", min_value=1_000.0,
+                    value=max(1_000.0, canonical_value), step=5_000.0,
+                    disabled=True,
+                )
             with col_risk:
                 start_date = st.date_input("Start Date", value=default_start)
                 end_date = st.date_input("End Date", value=default_end)
@@ -2471,7 +2679,8 @@ def _render_quant_configuration() -> None:
                 )
                 apply_strategy_rulebook = st.checkbox(
                     "Apply active Client Mandate / Strategy Rulebook",
-                    value=False,
+                    value=True,
+                    disabled=True,
                     help="Uses saved exclusions, approval, sector, cash, beta, position and turnover rules.",
                 )
                 return_model_labels = {
@@ -2481,6 +2690,8 @@ def _render_quant_configuration() -> None:
                 return_model_label = st.selectbox(
                     "Expected-return estimate",
                     list(return_model_labels),
+                    index=1 if canonical_views else 0,
+                    disabled=True,
                     help=(
                         "Black-Litterman uses the entered current weights as its neutral reference; "
                         "they are not claimed to be market-cap weights."
@@ -2488,7 +2699,10 @@ def _render_quant_configuration() -> None:
                 )
                 black_litterman_views_text = st.text_input(
                     "Black-Litterman absolute views",
-                    value="",
+                    value=", ".join(
+                        f"{ticker}={float(value) * 100:g}"
+                        for ticker, value in canonical_views.items()
+                    ),
                     placeholder="MSFT=10, NVDA=12",
                     help="Expected annual returns in percent. Leave empty for equilibrium returns only.",
                     disabled=return_model_labels[return_model_label] != "black_litterman",
@@ -2571,13 +2785,13 @@ def _render_quant_configuration() -> None:
                         "Membership is lagged by one trading observation and forward-filled only; "
                         "future membership is never back-filled."
                     )
-            st.markdown("#### Manual Individual Bonds")
+            st.markdown("#### Individual bonds from canonical portfolio")
             st.caption(
-                "Add bonds without exchange tickers. Their explicit weights reduce the market sleeve. "
-                "The selected traded bond ETF proxy supplies covariance; YTW and the entered annual volatility set the proxy series' mean and risk."
+                "Competition-mode bond inputs come from the Security Dossier and reconciled WInS snapshot. "
+                "This legacy duplicate editor is read-only."
             )
             manual_bond_rows = st.data_editor(
-                pd.DataFrame([{
+                pd.DataFrame([] if canonical_tickers else [{
                     "Identifier": "",
                     "Weight %": 10.0,
                     "Clean Price": 100.0,
@@ -2602,6 +2816,7 @@ def _render_quant_configuration() -> None:
                 num_rows="dynamic",
                 hide_index=True,
                 use_container_width=True,
+                disabled=True,
                 key="wharton_quant_manual_bonds",
                 column_config={
                     "Maturity": st.column_config.DateColumn("Maturity", format="YYYY-MM-DD"),
@@ -2612,11 +2827,17 @@ def _render_quant_configuration() -> None:
                     "First Call Date": st.column_config.DateColumn("First Call Date", format="YYYY-MM-DD"),
                 },
             )
-            run_clicked = st.form_submit_button(" Run Full Quant Engine", type="primary")
+            run_clicked = st.form_submit_button(
+                " Run Full Quant Engine",
+                type="primary",
+                disabled=not quant_input["allowed"],
+            )
 
     if run_clicked:
         st.session_state.pop(QUANT_ERROR_KEY, None)
         try:
+            if not quant_input["allowed"]:
+                raise ValueError("Canonical competition portfolio is not ready: " + ", ".join(quant_input["blockers"]))
             if start_date >= end_date: raise ValueError("Start Date must be before End Date.")
             from src.portfolio_tracker.manual_bond_quant import parse_manual_bond_rows
 
@@ -2642,20 +2863,19 @@ def _render_quant_configuration() -> None:
                 ].parse_point_in_time_membership(
                     pd.read_csv(BytesIO(universe_membership_file.getvalue()))
                 )
-            if apply_strategy_rulebook:
-                strategy_data = _load_strategy_workspace_data()
-                from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
+            strategy_data = _load_strategy_workspace_data()
+            from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
 
-                raw_strategy = _strategy_payload(strategy_data.get("strategy_record"))
-                if not raw_strategy:
-                    raise ValueError(
-                        "No active Strategy Rulebook is saved. Configure one in Strategy & Decisions first."
-                    )
-                strategy_rulebook = normalize_strategy_rulebook(
-                    raw_strategy,
-                    _strategy_payload(strategy_data.get("mandate_record")),
+            raw_strategy = _strategy_payload(strategy_data.get("strategy_record"))
+            if not raw_strategy:
+                raise ValueError(
+                    "No active Strategy Rulebook is saved. Configure one in Strategy & Decisions first."
                 )
-                optimizer_asset_metadata = _build_optimizer_asset_metadata(strategy_data)
+            strategy_rulebook = normalize_strategy_rulebook(
+                raw_strategy,
+                _strategy_payload(strategy_data.get("mandate_record")),
+            )
+            optimizer_asset_metadata = _build_optimizer_asset_metadata(strategy_data)
             with st.spinner("Fetching data and running full quant stack..."):
                 st.session_state[QUANT_RESULT_KEY] = _compute_quant_run(
                     tickers=tickers, weights=weights, benchmark_ticker=benchmark_ticker,
@@ -2690,6 +2910,9 @@ def _render_quant_configuration() -> None:
                     short_term_tax_rate=float(short_term_tax_rate_pct) / 100.0,
                     long_term_tax_rate=float(long_term_tax_rate_pct) / 100.0,
                     universe_membership=universe_membership,
+                    portfolio_snapshot_id=quant_input["portfolio_snapshot_id"],
+                    portfolio_snapshot_as_of=quant_input["portfolio_as_of"],
+                    portfolio_snapshot_source=quant_input["portfolio_source"],
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -5496,6 +5719,26 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
             {"Goal": "", "Target %": 0.0, "Priority (1–5)": 3, "Horizon": "Short term", "Description / success condition": ""},
         ])
 
+    provenance_fields = [
+        "Risk tolerance", "Risk capacity", "Maximum drawdown", "Drawdown response",
+        "Financial picture", "Policy benchmark", "Primary horizon", "Liquidity need",
+        "Base currency", "Values and exclusions", "Goal buckets", "Mandate summary",
+    ]
+    saved_provenance = (
+        current.get("field_provenance")
+        if isinstance(current.get("field_provenance"), dict)
+        else {}
+    )
+    provenance_frame = pd.DataFrame([
+        {
+            "Mandate field": field,
+            "Origin": str((saved_provenance.get(field) or {}).get("origin") or "Temporary assumption"),
+            "Case reference": str((saved_provenance.get(field) or {}).get("reference") or ""),
+            "Notes": str((saved_provenance.get(field) or {}).get("notes") or ""),
+        }
+        for field in provenance_fields
+    ])
+
     risk_options = ["Not specified", "Conservative", "Moderate", "Growth", "Aggressive"]
     saved_risk = str(current.get("risk_tolerance") or "Not specified")
     risk_index = risk_options.index(saved_risk) if saved_risk in risk_options else 0
@@ -5603,6 +5846,28 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "Horizon": st.column_config.SelectboxColumn("Horizon", options=["Short term", "Medium term", "Long term"]),
             },
         )
+        st.markdown("##### Field-level provenance")
+        st.caption(
+            "Label every mandate input as a case fact, client statement, team inference, or temporary assumption, "
+            "and point to the exact case passage when one exists."
+        )
+        edited_provenance = st.data_editor(
+            provenance_frame,
+            hide_index=True,
+            use_container_width=True,
+            key="strategy_client_provenance_editor",
+            column_config={
+                "Mandate field": st.column_config.TextColumn("Mandate field", disabled=True),
+                "Origin": st.column_config.SelectboxColumn(
+                    "Origin",
+                    options=["Case fact", "Client statement", "Team inference", "Temporary assumption"],
+                    required=True,
+                ),
+                "Case reference": st.column_config.TextColumn(
+                    "Case reference", help="Page, paragraph, table, exhibit, or quotation locator."
+                ),
+            },
+        )
         save_mandate = st.form_submit_button("Save Client Mandate", type="primary", use_container_width=True)
 
     if save_mandate:
@@ -5619,10 +5884,27 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "description": str(row.get("Description / success condition") or "").strip(),
             })
         total_target = sum(float(item["target_weight"]) for item in goals)
+        field_provenance = {
+            str(row.get("Mandate field") or "").strip(): {
+                "origin": str(row.get("Origin") or "Temporary assumption").strip(),
+                "reference": str(row.get("Case reference") or "").strip(),
+                "notes": str(row.get("Notes") or "").strip(),
+            }
+            for row in edited_provenance.to_dict("records")
+            if str(row.get("Mandate field") or "").strip()
+        }
+        missing_case_references = [
+            field for field, item in field_provenance.items()
+            if item["origin"] in {"Case fact", "Client statement"} and not item["reference"]
+        ]
         if not client_name.strip() or not goals:
             st.error("Enter a mandate name and at least one measurable client goal.")
         elif abs(total_target - 1.0) > 0.005:
             st.error(f"Client goal targets must total 100%; the current total is {total_target:.1%}.")
+        elif missing_case_references:
+            st.error(
+                "Add an exact case reference for: " + ", ".join(missing_case_references) + "."
+            )
         else:
             payload = normalize_client_mandate({
                 "client_name": client_name.strip(),
@@ -5658,6 +5940,7 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "mandate_summary": mandate_summary.strip(),
                 "values_constraints_text": values_constraints.strip(),
                 "behavioral_profile": current.get("behavioral_profile", {}),
+                "field_provenance": field_provenance,
             })
             with get_connection() as conn:
                 save_client_mandate(conn, payload, updated_by=str(profile["username"]))
@@ -5988,7 +6271,7 @@ def _render_client_behavioral_profile(
 
 def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any]) -> None:
     from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
-    from src.portfolio_tracker.strategy_store import append_strategy_version, set_active_strategy_version
+    from src.portfolio_tracker.strategy_store import append_strategy_version
 
     record = data.get("strategy_record")
     current = _strategy_payload(record)
@@ -6022,6 +6305,11 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             {"Factor": "Growth", "Weight %": 0.0, "Minimum / decision rule": ""},
         ])
 
+    try:
+        saved_effective_from = date.fromisoformat(str(current.get("effective_from") or ""))
+    except ValueError:
+        saved_effective_from = date.today()
+
     with st.form("strategy_rulebook_form"):
         name = st.text_input("Strategy name", value=str(current.get("name") or ""))
         thesis = st.text_area(
@@ -6034,6 +6322,45 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             "Selection, review, and sell discipline",
             value=str(current.get("process") or ""),
             height=110,
+        )
+        st.markdown("##### Change governance")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            proposed_by = st.text_input(
+                "Proposed by",
+                value=str(profile["username"]),
+                disabled=True,
+            )
+        with g2:
+            approver_options = [
+                str(user["username"])
+                for user in DEFAULT_USERS
+                if str(user["username"]) != str(profile["username"])
+            ]
+            approved_by = st.selectbox("Independent approver", approver_options)
+        with g3:
+            effective_from = st.date_input("Effective from", value=saved_effective_from)
+        change_reason = st.text_area(
+            "Why is this version changing?",
+            value="",
+            height=75,
+            placeholder="New case evidence, rule clarification, portfolio lesson, or approved correction.",
+        )
+        impact_analysis = st.text_area(
+            "Impact on the current portfolio",
+            value="",
+            height=75,
+            placeholder="List breaches, trades, sizing changes, or state explicitly that there is no impact.",
+        )
+        retroactive_override = st.checkbox(
+            "Allow an exceptional effective date before today",
+            value=False,
+            help="The override remains visible in the immutable version history.",
+        )
+        override_reason = st.text_input(
+            "Override justification",
+            value="",
+            disabled=not retroactive_override,
         )
         r1, r2, r3, r4 = st.columns(4)
         with r1:
@@ -6129,6 +6456,12 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
         )
         if not name.strip() or not thesis.strip():
             st.error("Strategy name and one-sentence thesis are required.")
+        elif not change_reason.strip() or not impact_analysis.strip():
+            st.error("Every version requires a change reason and current-portfolio impact analysis.")
+        elif effective_from < date.today() and not retroactive_override:
+            st.error("A past effective date requires an explicit retroactive override.")
+        elif retroactive_override and not override_reason.strip():
+            st.error("Explain why the retroactive override is necessary.")
         elif min_cash > max_cash:
             st.error("Minimum cash cannot exceed maximum cash.")
         elif min_holdings and max_holdings and min_holdings > max_holdings:
@@ -6166,6 +6499,22 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
                 "selection_factors": parsed_factors,
             }, mandate)
             payload.update({"process": process.strip(), "selection_factors": parsed_factors})
+            previous_version = (
+                int(record.get("version") or record.get("version_number") or 0)
+                if isinstance(record, dict)
+                else 0
+            )
+            payload.update({
+                "proposed_by": proposed_by,
+                "approved_by": approved_by,
+                "effective_from": effective_from.isoformat(),
+                "change_reason": change_reason.strip(),
+                "portfolio_impact": impact_analysis.strip(),
+                "previous_version": previous_version or None,
+                "retroactive_override": bool(retroactive_override),
+                "override_reason": override_reason.strip() if retroactive_override else "",
+                "approved_at": _now_iso(),
+            })
             with get_connection() as conn:
                 append_strategy_version(conn, payload, created_by=str(profile["username"]), activate=True)
             st.success("A new active strategy version was saved.")
@@ -6182,11 +6531,27 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             "Active": bool(item.get("is_active") or item.get("active")),
         } for item in versions]), use_container_width=True, hide_index=True)
         version_options = [int(item.get("version") or item.get("version_number") or item.get("id")) for item in versions]
-        selected_version = st.selectbox("Activate an earlier version", version_options, key="strategy_version_selector")
-        if st.button("Set Selected Version Active", use_container_width=True):
-            with get_connection() as conn:
-                set_active_strategy_version(conn, int(selected_version))
-            st.rerun()
+        selected_version = st.selectbox("Compare with version", version_options, key="strategy_version_selector")
+        selected_record = next(
+            item for item in versions
+            if int(item.get("version") or item.get("version_number") or item.get("id")) == int(selected_version)
+        )
+        compare_payload = _strategy_payload(selected_record)
+        if record and int(selected_version) != int(record.get("version") or 0):
+            before_after = pd.DataFrame([
+                {
+                    "Rule": key,
+                    f"Version {selected_version}": json.dumps(compare_payload.get(key), ensure_ascii=False),
+                    "Active": json.dumps(current.get(key), ensure_ascii=False),
+                }
+                for key in sorted(set(compare_payload) | set(current))
+                if compare_payload.get(key) != current.get(key)
+            ])
+            st.dataframe(before_after, use_container_width=True, hide_index=True)
+        st.caption(
+            "Earlier versions are immutable and cannot be reactivated in place. "
+            "To restore a rule, save it as a new governed version with a reason and impact analysis."
+        )
 
 
 def _render_approved_universe(profile: dict[str, str | int], data: dict[str, Any]) -> None:
@@ -6209,11 +6574,21 @@ def _render_approved_universe(profile: dict[str, str | int], data: dict[str, Any
             "Approved tickers (comma, space, or newline separated)",
             value="\n".join(current_tickers), height=220,
         )
-        u1, u2 = st.columns(2)
+        universe_status_options = ["official", "analyst assumption", "outdated", "not checked"]
+        saved_universe_status = str(first_payload.get("authority_status") or "not checked").lower()
+        if saved_universe_status not in universe_status_options:
+            saved_universe_status = "not checked"
+        u1, u2, u3 = st.columns(3)
         with u1:
             source_name = st.text_input("List source", value=str(first_payload.get("source_name") or "Analyst-entered list"))
         with u2:
             source_url = st.text_input("Source URL", value=str(first_payload.get("source_url") or ""))
+        with u3:
+            authority_status = st.selectbox(
+                "Authoritative status",
+                universe_status_options,
+                index=universe_status_options.index(saved_universe_status),
+            )
         source_as_of = st.date_input("List as-of date", value=saved_source_as_of)
         save_universe = st.form_submit_button("Replace Approved Universe", type="primary", use_container_width=True)
     if save_universe:
@@ -6224,21 +6599,30 @@ def _render_approved_universe(profile: dict[str, str | int], data: dict[str, Any
             "source_name": source_name.strip() or "Analyst-entered list",
             "source_url": source_url.strip(),
             "source_as_of": source_as_of.isoformat(),
+            "authority_status": authority_status,
         }
-        try:
+        if authority_status == "official" and not source_url.strip():
+            st.error("An official universe requires a direct official source URL.")
+        else:
+          try:
             with get_connection() as conn:
                 replace_approved_securities(
                     conn,
                     [{"ticker": ticker, "payload": shared_payload, "approved": True} for ticker in tickers],
                     updated_by=str(profile["username"]),
                 )
-        except ValueError as exc:
-            st.error(str(exc))
-        else:
-            st.success(f"Approved universe now contains {len(tickers)} securities.")
-            st.rerun()
+          except ValueError as exc:
+              st.error(str(exc))
+          else:
+              st.success(f"Approved universe now contains {len(tickers)} securities.")
+              st.rerun()
     if current_tickers:
         st.metric("Approved securities", len(current_tickers))
+        st.caption(
+            f"Authority: {saved_universe_status} · source: "
+            f"{first_payload.get('source_name') or 'not recorded'} · "
+            f"as of {first_payload.get('source_as_of') or 'unknown'}"
+        )
         st.dataframe(pd.DataFrame({"Ticker": current_tickers}), use_container_width=True, hide_index=True)
     else:
         st.warning("No approved list is loaded. Alignment analysis will label universe validation as not configured.")
@@ -8940,6 +9324,10 @@ def _render_commodity_analysis(profile: dict[str, str | int]) -> None:
 
 
 def _render_bond_analysis(profile: dict[str, str | int]) -> None:
+    from src.portfolio_tracker.authoritative_universe_store import (
+        check_security_eligibility,
+        get_active_authoritative_universe,
+    )
     from src.portfolio_tracker.bond_analytics import (
         assess_bond_data_quality,
         build_bond_sensitivity,
@@ -8959,6 +9347,7 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
         generate_bond_competition_memo,
     )
     from src.portfolio_tracker.wharton_competition import calculate_portfolio_performance
+    from src.portfolio_tracker.security_dossier_store import list_security_dossiers
 
     st.markdown("### Bond Analysis")
     st.caption(
@@ -8967,27 +9356,109 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
     single_tab, portfolio_tab = st.tabs(["Single Bond / ETF", "Saved Fixed-Income Portfolio"])
 
     with single_tab:
+        with get_connection() as conn:
+            canonical_dossiers = [
+                item for item in list_security_dossiers(conn)
+                if item.get("latest_frozen_version")
+                and str(
+                    item.get("latest_frozen_version", {}).get("payload", {}).get("asset_type") or ""
+                ).casefold() == "bond"
+            ]
+            active_universe = get_active_authoritative_universe(conn)
+        dossier_options = [None, *[int(item["id"]) for item in canonical_dossiers]]
+        selected_dossier_id = st.selectbox(
+            "Canonical Security Dossier",
+            dossier_options,
+            format_func=lambda value: (
+                "Exploratory analysis (not committee-ready)"
+                if value is None
+                else next(
+                    f"{item['ticker']} · dossier #{item['id']} · "
+                    f"frozen v{item['latest_frozen_version']['version']}"
+                    for item in canonical_dossiers if int(item["id"]) == value
+                )
+            ),
+            help="Competition-case fields are sourced from this one dossier and cannot be rewritten here.",
+        )
+        selected_dossier = next(
+            (item for item in canonical_dossiers if int(item["id"]) == selected_dossier_id),
+            None,
+        )
+        dossier_payload = dict(
+            (selected_dossier or {}).get("latest_frozen_version", {}).get("payload") or {}
+        )
+        canonical_identifier = str((selected_dossier or {}).get("ticker") or "")
+        if canonical_identifier:
+            with get_connection() as conn:
+                eligibility = check_security_eligibility(conn, canonical_identifier)
+        else:
+            eligibility = {"can_trade": False, "eligibility": "unknown"}
+        if eligibility.get("can_trade"):
+            canonical_eligibility = ELIGIBILITY_VERIFIED
+        elif eligibility.get("eligibility") == "ineligible":
+            canonical_eligibility = ELIGIBILITY_INELIGIBLE
+        else:
+            canonical_eligibility = ELIGIBILITY_PENDING
+        strategy_workspace = _load_strategy_workspace_data()
+        active_rulebook_payload = _strategy_payload(strategy_workspace.get("strategy_record"))
+        canonical_max_weight_pct = float(
+            active_rulebook_payload.get("max_position_weight") or 0.0
+        ) * 100.0
+        canonical_source = " · ".join(
+            item for item in [
+                str((active_universe or {}).get("source_name") or ""),
+                str((active_universe or {}).get("source_url") or ""),
+            ] if item
+        )
+        if selected_dossier is None:
+            st.info(
+                "Exploratory valuation remains available, but a committee-ready bond case must first "
+                "reference one canonical Security Dossier."
+            )
+        instrument_label = st.radio(
+            "Instrument type",
+            ["Individual bond", "Bond ETF"],
+            horizontal=True,
+            help="Only fields relevant to the selected instrument are shown below.",
+        )
+        individual_instrument = instrument_label == "Individual bond"
         with st.form("standalone_bond_analysis_form"):
             a1, a2, a3, a4 = st.columns(4)
             with a1:
-                identifier = st.text_input("Identifier", placeholder="Ticker, ISIN, or internal code").strip().upper()
-                instrument_label = st.selectbox("Instrument", ["Individual bond", "Bond ETF"])
+                identifier = st.text_input(
+                    "Identifier",
+                    value=canonical_identifier,
+                    placeholder="Ticker, ISIN, or internal code",
+                    disabled=bool(canonical_identifier),
+                ).strip().upper()
                 issuer = st.text_input("Issuer / fund provider")
                 bond_category = st.selectbox("Category", ["Corporate", "Government", "Municipal", "Sovereign", "Other"])
             with a2:
                 quantity = st.number_input("Quantity", min_value=0.000001, value=1.0, step=1.0)
-                face_value = st.number_input("Face value per bond", min_value=0.01, value=1000.0, step=100.0)
+                face_value = (
+                    st.number_input("Face value per bond", min_value=0.01, value=1000.0, step=100.0)
+                    if individual_instrument else 1.0
+                )
                 entry_price = st.number_input("Entry clean price / unit price", min_value=0.000001, value=100.0, step=0.01)
                 current_price = st.number_input("Current clean price / unit price", min_value=0.000001, value=100.0, step=0.01)
             with a3:
-                coupon_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.01)
-                coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1, key="analysis_coupon_frequency")
-                accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
-                entry_accrued = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                if individual_instrument:
+                    coupon_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.01)
+                    coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1, key="analysis_coupon_frequency")
+                    accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                    entry_accrued = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
+                else:
+                    coupon_pct, coupon_frequency = 0.0, 2
+                    accrued_interest, entry_accrued = 0.0, 0.0
+                    st.caption("Coupon cash-flow fields do not apply to a changing-holdings bond ETF.")
             with a4:
                 as_of = st.date_input("Analysis date", value=date.today())
-                maturity = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
-                next_coupon = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
+                if individual_instrument:
+                    maturity = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
+                    next_coupon = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
+                else:
+                    maturity = date.today() + timedelta(days=365 * 5)
+                    next_coupon = date.today() + timedelta(days=182)
                 coupon_income = st.number_input("Coupons received (USD)", min_value=0.0, value=0.0, step=1.0)
 
             b1, b2, b3, b4 = st.columns(4)
@@ -9006,9 +9477,15 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
                 source_url = st.text_input("Source URL / document reference")
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                callable_bond = st.checkbox("Callable bond")
-                call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2))
-                call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01)
+                if individual_instrument:
+                    callable_bond = st.checkbox("Callable bond")
+                    call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2))
+                    call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01)
+                else:
+                    callable_bond = False
+                    call_date = date.today() + timedelta(days=365 * 2)
+                    call_price = 100.0
+                    st.caption("Call schedule does not apply at ETF level.")
             with c2:
                 benchmark_name = st.text_input("Yield benchmark", placeholder="e.g. 5Y U.S. Treasury")
                 benchmark_yield_pct = st.number_input("Benchmark yield (%)", value=0.0, step=0.01)
@@ -9019,34 +9496,91 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
             with c4:
                 scenario_horizon = st.number_input("Scenario horizon (years)", min_value=0.1, max_value=10.0, value=1.0, step=0.5)
             st.markdown("##### Competition case")
+            st.caption(
+                "Client fit, thesis, catalysts, invalidation, risks and sell discipline are read-only "
+                "projections of the selected Security Dossier."
+            )
             d1, d2, d3, d4 = st.columns(4)
             with d1:
-                client_goal = st.text_input("Client goal served", placeholder="e.g. income with capital preservation")
-                portfolio_role = st.selectbox(
+                client_goal = st.text_input(
+                    "Client goal served",
+                    value=str(dossier_payload.get("client_goal") or ""),
+                    disabled=True,
+                )
+                portfolio_role = st.text_input(
                     "Portfolio role",
-                    ["Income", "Capital preservation", "Diversifier", "Liquidity reserve", "Liability matching", "Tactical rate view", "Other"],
+                    value=str(dossier_payload.get("portfolio_role") or ""),
+                    disabled=True,
                 )
             with d2:
                 proposed_weight_pct = st.number_input("Proposed portfolio weight (%)", min_value=0.0, max_value=100.0, value=2.0, step=0.5)
-                max_position_weight_pct = st.number_input("Team position limit (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.5)
-            with d3:
-                eligibility_status = st.selectbox(
-                    "Current WInS eligibility",
-                    [ELIGIBILITY_PENDING, ELIGIBILITY_VERIFIED, ELIGIBILITY_INELIGIBLE],
-                    help="Do not mark eligible until the current official trading rules or WInS security list confirms it.",
+                max_position_weight_pct = st.number_input(
+                    "Rulebook position limit (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=canonical_max_weight_pct,
+                    step=0.5,
+                    disabled=True,
                 )
-                eligibility_checked_at = st.date_input("Eligibility checked on", value=date.today())
+            with d3:
+                eligibility_status = st.text_input(
+                    "Authoritative WInS eligibility",
+                    value=canonical_eligibility,
+                    disabled=True,
+                )
+                eligibility_checked_at = st.date_input(
+                    "Eligibility snapshot date",
+                    value=(
+                        date.fromisoformat(str(active_universe["as_of_date"]))
+                        if active_universe and active_universe.get("as_of_date")
+                        else date.today()
+                    ),
+                    disabled=True,
+                )
             with d4:
-                eligibility_source = st.text_input("Eligibility source", placeholder="Official rules or WInS list reference")
-            thesis = st.text_area("Bond thesis", height=75, placeholder="Why this security should deliver the intended client outcome")
+                eligibility_source = st.text_input(
+                    "Eligibility source",
+                    value=canonical_source,
+                    disabled=True,
+                )
+            thesis = st.text_area(
+                "Canonical bond thesis",
+                value=str(dossier_payload.get("thesis") or ""),
+                height=75,
+                disabled=True,
+            )
             e1, e2 = st.columns(2)
             with e1:
-                why_now = st.text_area("Why now / catalyst", height=70)
-                risks = st.text_area("Key risks", height=70)
+                why_now = st.text_area(
+                    "Catalysts",
+                    value="\n".join(dossier_payload.get("catalysts") or []),
+                    height=70,
+                    disabled=True,
+                )
+                risks = st.text_area(
+                    "Key risks",
+                    value="\n".join(dossier_payload.get("risks") or []),
+                    height=70,
+                    disabled=True,
+                )
             with e2:
-                invalidation = st.text_area("Observable invalidation condition", height=70)
-                sell_discipline = st.text_area("Sell / review discipline", height=70)
-            counter_thesis = st.text_input("Strongest counter-thesis")
+                invalidation = st.text_area(
+                    "Observable invalidation condition",
+                    value=str(dossier_payload.get("invalidation_condition") or ""),
+                    height=70,
+                    disabled=True,
+                )
+                sell_discipline = st.text_area(
+                    "Sell / review discipline",
+                    value=str(dossier_payload.get("sell_discipline") or ""),
+                    height=70,
+                    disabled=True,
+                )
+            counter_thesis = st.text_input(
+                "Strongest counter-thesis",
+                value=str(dossier_payload.get("bear_case") or ""),
+                disabled=True,
+            )
             run_analysis = st.form_submit_button("Run Bond Analysis", type="primary", use_container_width=True)
 
         if run_analysis:
@@ -9369,7 +9903,15 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
 
     st.markdown("### Portfolio Tracker — Wharton 2026–2027")
     st.caption("Returns are measured from USD 500,000. Every position records its creator, dates, entry price, and performance.")
-    with st.expander("Add a New Position", expanded=False):
+    st.info(
+        "New positions are created only by Investment Committee → WInS execution → clean reconciliation. "
+        "The tracker is now a projection of that lifecycle, not a second source of truth."
+    )
+    with st.expander("Legacy position form (read-only migration reference)", expanded=False):
+        st.caption(
+            "This retired form is retained temporarily so historical bond fields can be inspected. "
+            "Use Security Dossiers for thesis data and Investment Committee for every new position."
+        )
         with st.form("competition_add_position", clear_on_submit=True):
             p1, p2, p3 = st.columns(3)
             with p1:
@@ -9454,8 +9996,12 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                 eligibility_checked_at = st.date_input(
                     "Eligibility checked on", value=date.today(), key="portfolio_bond_eligibility_date",
                 )
-            notes = st.text_area("Notes / Investment Thesis", height=80)
-            add_position = st.form_submit_button("Add Position", type="primary", use_container_width=True)
+            notes = st.text_area("Legacy migration notes", height=80)
+            add_position = st.form_submit_button(
+                "Direct position entry disabled",
+                use_container_width=True,
+                disabled=True,
+            )
         if add_position:
             individual_bond = security_type == "Bond" and bond_instrument_type == "Individual bond"
             clean_ticker = ticker.strip().upper() or (isin if individual_bond else "")
@@ -9698,6 +10244,11 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                                 conn.sync()
                         st.rerun()
             with close_col:
+                canonical_position = bool(row.get("lifecycle_id"))
+                if canonical_position:
+                    st.info(
+                        f"Lifecycle #{row['lifecycle_id']} owns this position. Record its exit in Investment Committee."
+                    )
                 with st.form(f"competition_close_{row['id']}"):
                     exit_price = st.number_input("Exit Price", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
                     exit_date = st.date_input("Closing Date", value=date.today(), key=f"competition_exit_date_{row['id']}")
@@ -9712,7 +10263,12 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                             value=float(row.get("fx_rate_to_usd") or 1.0), step=0.01, format="%.6f",
                             key=f"competition_exit_fx_{row['id']}",
                         )
-                    if st.form_submit_button("Close Position", type="primary", use_container_width=True):
+                    if st.form_submit_button(
+                        "Close Position" if not canonical_position else "Exit controlled by lifecycle",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=canonical_position,
+                    ):
                         with get_connection() as conn:
                             if individual_bond:
                                 conn.execute(
@@ -9729,7 +10285,15 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                             if hasattr(conn, "sync"):
                                 conn.sync()
                         st.rerun()
-            if st.button("Delete Incorrectly Entered Position", key=f"competition_delete_{row['id']}"):
+            if st.button(
+                "Delete Incorrectly Entered Position",
+                key=f"competition_delete_{row['id']}",
+                disabled=bool(row.get("lifecycle_id")),
+                help=(
+                    "Canonical lifecycle positions cannot be deleted from the projection."
+                    if row.get("lifecycle_id") else None
+                ),
+            ):
                 with get_connection() as conn:
                     conn.execute("DELETE FROM competition_positions WHERE id = ?", (int(row["id"]),))
                     conn.commit()
@@ -10772,11 +11336,21 @@ def _render_research_evidence(
         "Store provenance separately from conclusions: who published the evidence, what period it covers, when the "
         "team accessed and verified it, and which claim it supports."
     )
-    auto1, auto2, auto3 = st.columns(3)
-    auto1.metric("Market-data provider", "Yahoo Finance")
-    auto2.metric("Company snapshot fetched", str(snapshot.get("fetched_at") or "Unknown"))
+    auto1, auto2, auto3, auto4 = st.columns(4)
+    auto1.metric("Market-data source", str(snapshot.get("source") or "Yahoo Finance"))
+    auto2.metric("Snapshot timestamp", str(snapshot.get("fetched_at") or "Unknown"))
+    provider_status = str(snapshot.get("provider_status") or "live").title()
+    auto3.metric("Provider status", provider_status)
     geographic = snapshot.get("geographic_revenue", {}) if isinstance(snapshot.get("geographic_revenue"), dict) else {}
-    auto3.metric("Geographic source", str(geographic.get("source_name") or "Not disclosed"))
+    auto4.metric("Geographic source", str(geographic.get("source_name") or "Not disclosed"))
+    if snapshot.get("provider_errors"):
+        st.warning(
+            "The live provider returned only a partial snapshot. Research and the canonical dossier remain "
+            "available; verify missing values from primary evidence or a manual snapshot."
+        )
+        with st.expander("Provider diagnostics"):
+            for issue in snapshot["provider_errors"]:
+                st.write(f"• {issue}")
 
     with st.form(f"research_source_form_{ticker}"):
         s1, s2, s3 = st.columns(3)
@@ -11431,9 +12005,10 @@ def _render_custom_quant_context(result: dict[str, Any]) -> None:
     if result:
         generated = str(result.get("generated_at") or "unknown time")
         tickers = ", ".join(str(item) for item in result.get("tickers", [])) or "unknown universe"
+        snapshot_id = str(result.get("inputs", {}).get("portfolio_snapshot_id") or "legacy run")
         st.info(
-            f"Context: latest manually configured Quant Sandbox run ({tickers}; generated {generated}). "
-            "This is not automatically the live Portfolio Tracker."
+            f"Context: canonical competition Quant run ({tickers}; snapshot {snapshot_id}; generated {generated}). "
+            "Risk, factors, scenarios, FX, and reporting must use this same snapshot ID."
         )
 
 
@@ -11514,6 +12089,13 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
         list_research_sources,
         list_thesis_reviews,
     )
+    from src.portfolio_tracker.operating_system_store import (
+        get_current_record,
+        list_current_records,
+    )
+    from src.portfolio_tracker.investment_lifecycle_store import (
+        list_investment_lifecycles,
+    )
 
     data = _load_strategy_workspace_data()
     with get_connection() as conn:
@@ -11524,6 +12106,11 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
         red_team_reviews = list_red_team_reviews(conn)
         ai_usage = list_ai_usage(conn)
         decisions = [dict(row) for row in conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()]
+        investment_cases = list_investment_lifecycles(conn)
+        qa_rounds = [item["payload"] for item in list_current_records(conn, "qa_round")]
+        latest_reconciliation_record = get_current_record(conn, "workspace", "latest_reconciliation")
+        report_record = get_current_record(conn, "report_workspace", "final")
+        rules_record = get_current_record(conn, "workspace", "latest_rules")
 
     readiness = build_competition_readiness(
         mandate=data.get("mandate_record"),
@@ -11536,6 +12123,11 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
         decision_reviews=decision_reviews,
         red_team_reviews=red_team_reviews,
         ai_usage=ai_usage,
+        investment_cases=investment_cases,
+        reconciliation=(latest_reconciliation_record or {}).get("payload", {}),
+        report_workspace=(report_record or {}).get("payload", {}),
+        qa_sessions=qa_rounds,
+        rules_snapshot=(rules_record or {}).get("payload", {}),
     )
 
     st.markdown("### Competition Readiness")
@@ -11549,6 +12141,9 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
     top[2].metric("Security dossiers", f"{readiness['dossier_score']}/100")
     top[3].metric("Governance trail", f"{readiness['governance']['score']}/100")
     st.progress(float(readiness["overall_score"]) / 100.0, text=str(readiness["status"]))
+    gate_cols = st.columns(3)
+    for column, (gate, passed) in zip(gate_cols, readiness.get("operating_gates", {}).items()):
+        column.metric(gate.replace("_", " ").title(), "Ready" if passed else "Blocked")
 
     gaps_tab, audit_tab, report_tab, quant_tab = st.tabs(
         ["Priority Gaps", "Red Team & AI Audit", "Report & Pitch", "Quant Standard"]
@@ -11693,6 +12288,58 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
         st.info("Do not call a backtest competition-grade until its manifest, point-in-time inputs, costs, holdout, and benchmark comparison are attached.")
 
 
+def _render_ios_security_dossiers(profile: Mapping[str, Any]) -> None:
+    from ui.investment_os import render_security_dossiers
+
+    render_security_dossiers(profile, get_connection, DEFAULT_USERS)
+
+
+def _render_ios_live_pipeline(profile: Mapping[str, Any]) -> None:
+    from ui.investment_os import render_live_portfolio_pipeline
+
+    render_live_portfolio_pipeline(
+        profile,
+        get_connection,
+        _load_strategy_workspace_data(),
+        _fetch_competition_positions(),
+        DEFAULT_USERS,
+    )
+
+
+def _render_ios_investment_committee(profile: Mapping[str, Any]) -> None:
+    from ui.investment_os import render_investment_committee
+
+    render_investment_committee(
+        profile,
+        get_connection,
+        _load_strategy_workspace_data(),
+        DEFAULT_USERS,
+    )
+
+
+def _render_ios_report_studio(profile: Mapping[str, Any]) -> None:
+    from ui.investment_os import render_report_evidence_studio
+
+    render_report_evidence_studio(
+        profile,
+        get_connection,
+        DEFAULT_USERS,
+        _load_strategy_workspace_data(),
+    )
+
+
+def _render_ios_qa(profile: Mapping[str, Any]) -> None:
+    from ui.investment_os import render_qa_rehearsal
+
+    render_qa_rehearsal(profile, get_connection, DEFAULT_USERS)
+
+
+def _render_ios_rules(profile: Mapping[str, Any]) -> None:
+    from ui.investment_os import render_official_rules_watch
+
+    render_official_rules_watch(profile, get_connection, DEFAULT_USERS)
+
+
 def render_wharton_cockpit() -> None:
     _inject_cockpit_styles()
 
@@ -11724,13 +12371,18 @@ def render_wharton_cockpit() -> None:
     tab_renderers = [
         ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
         ("Competition Readiness", lambda: _render_competition_readiness(profile)),
+        ("Report Evidence Studio", lambda: _render_ios_report_studio(profile)),
         ("Assignment & Rules", lambda: _render_competition_rules(profile)),
+        ("Official Rules Watch", lambda: _render_ios_rules(profile)),
         ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
+        ("Security Dossiers", lambda: _render_ios_security_dossiers(profile)),
+        ("Investment Committee", lambda: _render_ios_investment_committee(profile)),
         ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
         ("Company Analysis", lambda: _render_company_analysis(profile)),
         ("Bond Analysis", lambda: _render_bond_analysis(profile)),
         ("Commodity Analysis", lambda: _render_commodity_analysis(profile)),
         ("Stock Screener", _render_stock_screener),
+        ("Live Portfolio & Data Reliability", lambda: _render_ios_live_pipeline(profile)),
         ("Quant Engine", lambda: _render_quant_engine(profile)),
         ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),
         ("Currency Risk & Hedging", lambda: _render_currency_risk(profile)),
@@ -11741,6 +12393,7 @@ def render_wharton_cockpit() -> None:
         ("Monte Carlo", _with_quant_context(_render_monte_carlo, require_simulation=True)),
         ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo, require_simulation=True)),
         ("Advanced Analytics", _with_quant_context(_render_advanced_analytics)),
+        ("Q&A Rehearsal", lambda: _render_ios_qa(profile)),
         ("Mind Map", _render_mindmap),
         ("Sub-Projects", lambda: _render_subprojects(profile)),
         ("War Room", lambda: _render_chat(profile)),

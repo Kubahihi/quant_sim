@@ -108,19 +108,104 @@ def build_competition_readiness(
     decision_reviews: Sequence[Mapping[str, Any]] = (),
     red_team_reviews: Sequence[Mapping[str, Any]] = (),
     ai_usage: Sequence[Mapping[str, Any]] = (),
+    investment_cases: Sequence[Mapping[str, Any]] = (),
+    reconciliation: Mapping[str, Any] | None = None,
+    report_workspace: Mapping[str, Any] | None = None,
+    qa_sessions: Sequence[Mapping[str, Any]] = (),
+    rules_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     constitution = assess_strategy_constitution(mandate, strategy)
     dossiers = [assess_security_dossier(str(item.get("ticker") or ""), item, sources, catalysts) for item in theses if item.get("ticker")]
     dossier_score = round(sum(item["score"] for item in dossiers) / len(dossiers)) if dossiers else 0
+    approved_cases = [
+        item for item in investment_cases
+        if str(item.get("state") or item.get("status") or item.get("stage") or "").lower()
+        in {
+            "approved", "sized", "executed", "reconciled", "closed",
+            "sizing", "wins_execution", "reconciliation", "active", "exited",
+        }
+    ]
+
+    def _round_complete(item: Mapping[str, Any], round_name: str) -> bool:
+        canonical = item.get(f"{round_name}_vote")
+        if isinstance(canonical, Mapping):
+            return bool(
+                canonical.get("revealed")
+                and int(canonical.get("submitted_count") or 0) >= 2
+            )
+        legacy = item.get(f"{round_name}_votes")
+        return isinstance(legacy, Mapping) and len(legacy) >= 2
+
+    independently_voted = [
+        item for item in approved_cases
+        if _round_complete(item, "pre")
+        and _round_complete(item, "post")
+        and bool(
+            item.get("final_approval_complete")
+            or _present(item.get("final_approvals"))
+            or _present(item.get("sign_offs"))
+        )
+    ]
+    reconciliation_data = dict(reconciliation or {})
+    reconciliation_clean = (
+        str(reconciliation_data.get("status") or "").lower() in {"clean", "reconciled"}
+        and not reconciliation_data.get("open_exceptions")
+        and not reconciliation_data.get("exceptions")
+    )
+    report_data = dict(report_workspace or {})
+    report_frozen = bool(
+        report_data.get("frozen")
+        or str(report_data.get("status") or "").lower() in {"frozen", "approved", "final"}
+    )
+    nested_report_snapshot = (
+        report_data.get("portfolio_snapshot")
+        if isinstance(report_data.get("portfolio_snapshot"), Mapping)
+        else {}
+    )
+    report_has_snapshot = _present(
+        report_data.get("portfolio_snapshot_id")
+        or report_data.get("as_of_snapshot")
+        or nested_report_snapshot.get("snapshot_id")
+    )
+    rules_data = dict(rules_snapshot or {})
+    rules_acknowledged = bool(
+        rules_data
+        and _present(rules_data.get("content_hash") or rules_data.get("hash"))
+        and bool(rules_data.get("all_acknowledged") or rules_data.get("acknowledged_by"))
+    )
     governance_checks = [
         ("decisions", "Decision journal is populated", bool(decisions)),
         ("reviews", "Theses or decisions have append-only reviews", bool(thesis_reviews or decision_reviews)),
         ("red_team", "Independent red-team challenge is recorded", bool(red_team_reviews)),
+        (
+            "investment_committee",
+            "An approved case has independent pre/post votes and final sign-off",
+            bool(independently_voted),
+        ),
+        (
+            "reconciliation",
+            "Latest WInS reconciliation is clean with no open exceptions",
+            reconciliation_clean,
+        ),
+        (
+            "report",
+            "Report is frozen against an as-of portfolio snapshot",
+            report_frozen and report_has_snapshot and reconciliation_clean,
+        ),
+        ("qa", "At least one scored Q&A rehearsal is recorded", bool(qa_sessions)),
+        ("rules", "Latest official-rules snapshot is hashed and acknowledged", rules_acknowledged),
         ("sources", "Research evidence register is populated", bool(sources)),
         ("ai", "AI usage/disclosure log is recorded", bool(ai_usage)),
     ]
     governance = _assessment(governance_checks)
     overall = round(0.40 * constitution["score"] + 0.40 * dossier_score + 0.20 * governance["score"])
+    operating_gates = {
+        "investment_committee": bool(independently_voted),
+        "wins_reconciliation": reconciliation_clean,
+        "report_frozen_to_snapshot": report_frozen and report_has_snapshot and reconciliation_clean,
+    }
+    if not all(operating_gates.values()):
+        overall = min(overall, 89)
     return {
         "overall_score": overall,
         "status": "Pitch ready" if overall >= 90 else "Evidence build" if overall >= 65 else "Foundation incomplete",
@@ -128,6 +213,7 @@ def build_competition_readiness(
         "dossiers": dossiers,
         "dossier_score": dossier_score,
         "governance": governance,
+        "operating_gates": operating_gates,
     }
 
 

@@ -1327,22 +1327,42 @@ def fetch_geographic_revenue(
 
 
 def fetch_company_data(ticker: str) -> dict[str, Any]:
-    """Fetch a broad company snapshot from Yahoo Finance with graceful gaps."""
+    """Fetch a broad company snapshot without letting one Yahoo endpoint block research."""
     import yfinance as yf
 
     symbol = ticker.strip().upper()
     if not symbol:
         raise ValueError("Ticker is required.")
     company = yf.Ticker(symbol)
-    info = company.info or {}
-    history = company.history(period="5y", interval="1d", auto_adjust=False)
+    provider_errors: list[str] = []
+
+    def safe_value(label: str, loader: Any, fallback: Any) -> Any:
+        try:
+            value = loader()
+        except Exception as exc:  # Yahoo regularly rate-limits individual endpoints.
+            provider_errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            return fallback
+        return fallback if value is None else value
+
+    info = safe_value("company profile", lambda: company.info, {})
+    if not isinstance(info, dict):
+        info = {}
+    history = safe_value(
+        "price history",
+        lambda: company.history(period="5y", interval="1d", auto_adjust=False),
+        pd.DataFrame(),
+    )
+    if not isinstance(history, pd.DataFrame):
+        history = pd.DataFrame()
     try:
         news = company.news or []
-    except Exception:
+    except Exception as exc:
+        provider_errors.append(f"news: {type(exc).__name__}: {exc}")
         news = []
     try:
         sec_filings = company.sec_filings or []
-    except Exception:
+    except Exception as exc:
+        provider_errors.append(f"filings: {type(exc).__name__}: {exc}")
         sec_filings = []
     officers = info.get("companyOfficers") if isinstance(info.get("companyOfficers"), list) else []
     scalar_metrics = {
@@ -1351,20 +1371,36 @@ def fetch_company_data(ticker: str) -> dict[str, Any]:
         if isinstance(value, (str, int, float, bool)) or value is None
     }
     geographic_revenue = fetch_geographic_revenue(symbol, sec_filings=sec_filings)
+    statements = {
+        "income_statement": safe_value(
+            "income statement", lambda: company.income_stmt, pd.DataFrame()
+        ),
+        "balance_sheet": safe_value(
+            "balance sheet", lambda: company.balance_sheet, pd.DataFrame()
+        ),
+        "cash_flow": safe_value("cash flow", lambda: company.cashflow, pd.DataFrame()),
+        "quarterly_income_statement": safe_value(
+            "quarterly income statement", lambda: company.quarterly_income_stmt, pd.DataFrame()
+        ),
+        "quarterly_balance_sheet": safe_value(
+            "quarterly balance sheet", lambda: company.quarterly_balance_sheet, pd.DataFrame()
+        ),
+        "quarterly_cash_flow": safe_value(
+            "quarterly cash flow", lambda: company.quarterly_cashflow, pd.DataFrame()
+        ),
+    }
     return {
         "ticker": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "provider_status": "degraded" if provider_errors else "live",
+        "provider_errors": provider_errors,
+        "source": "Yahoo Finance (partial fallback allowed)",
         "info": info,
         "metrics": scalar_metrics,
         "officers": officers,
         "history": history,
         "news": news[:20],
         "sec_filings": sec_filings,
-        "income_statement": company.income_stmt,
-        "balance_sheet": company.balance_sheet,
-        "cash_flow": company.cashflow,
-        "quarterly_income_statement": company.quarterly_income_stmt,
-        "quarterly_balance_sheet": company.quarterly_balance_sheet,
-        "quarterly_cash_flow": company.quarterly_cashflow,
+        **statements,
         "geographic_revenue": geographic_revenue,
     }
