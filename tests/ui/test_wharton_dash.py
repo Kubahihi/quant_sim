@@ -58,6 +58,60 @@ def test_login_reports_invalid_team_credential_configuration(monkeypatch):
     assert "Streamlit Cloud secrets" in errors[0]
 
 
+def test_local_shared_password_overrides_stale_per_user_secrets():
+    credentials = wharton_dash.resolve_wharton_credentials(
+        {
+            "WHARTON_PASSWORD": "local-fallback-pass",
+            "wharton_users": {
+                "Jakub": "jakub-local-pass",
+                "Martin": "martin-local-pass",
+            },
+        },
+        production=False,
+    )
+
+    assert set(credentials.values()) == {"local-fallback-pass"}
+
+
+def test_local_credentials_support_legacy_nested_shared_secret():
+    credentials = wharton_dash.resolve_wharton_credentials(
+        {"wharton_users": {"WHARTON_PASSWORD": "nested-local-pass"}},
+        production=False,
+    )
+
+    assert set(credentials.values()) == {"nested-local-pass"}
+
+
+def test_production_shared_secret_applies_to_every_team_member():
+    credentials = wharton_dash.resolve_wharton_credentials(
+        {"WHARTON_SHARED_PASSWORD": "wharton123"},
+        production=True,
+    )
+
+    assert credentials == dict.fromkeys(
+        wharton_dash.REQUIRED_WHARTON_USERS,
+        "wharton123",
+    )
+
+
+def test_production_supports_existing_top_level_shared_password():
+    credentials = wharton_dash.resolve_wharton_credentials(
+        {
+            "WHARTON_PASSWORD": "wharton123",
+            "wharton_users": {
+                "Jakub": "stale-jakub-password",
+                "Martin": "stale-martin-password",
+            },
+        },
+        production=True,
+    )
+
+    assert credentials == dict.fromkeys(
+        wharton_dash.REQUIRED_WHARTON_USERS,
+        "wharton123",
+    )
+
+
 def test_black_litterman_view_parser_and_optimizer_metadata_adapter():
     assert wharton_dash._parse_black_litterman_views(
         "msft=10%; NVDA=12.5"
@@ -152,7 +206,14 @@ def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-te
     upload_dir = tmp_path / "data" / "wharton_uploads"
     monkeypatch.setattr(wharton_dash, "DB_PATH", db_path)
     monkeypatch.setattr(wharton_dash, "UPLOAD_DIR", upload_dir)
-    monkeypatch.setattr(wharton_dash, "DEFAULT_PASSWORD", password)
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_credentials",
+        lambda *args, **kwargs: dict.fromkeys(
+            wharton_dash.REQUIRED_WHARTON_USERS,
+            password,
+        ),
+    )
     return db_path
 
 
@@ -195,6 +256,27 @@ def test_init_db_materializes_executemany_parameters_for_libsql(monkeypatch, tmp
             for row in connection.execute("SELECT username FROM wharton_users")
         }
     assert usernames == {user["username"] for user in wharton_dash.DEFAULT_USERS}
+
+
+def test_init_db_removes_departed_team_member(monkeypatch, tmp_path):
+    db_path = _configure_temp_wharton(monkeypatch, tmp_path)
+    wharton_dash.init_db()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "INSERT INTO wharton_users (username, password_hash, role, primary_module) "
+            "VALUES (?, ?, ?, ?)",
+            ("Alexandra", "retired-hash", "Team Member", "Teamspace"),
+        )
+
+    wharton_dash.init_db()
+
+    with sqlite3.connect(db_path) as connection:
+        departed_user = connection.execute(
+            "SELECT 1 FROM wharton_users WHERE username = ?",
+            ("Alexandra",),
+        ).fetchone()
+    assert departed_user is None
 
 
 def test_init_db_uses_configured_paths_when_cwd_changes(monkeypatch, tmp_path):
@@ -264,7 +346,14 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
 
     # Fix the 'current' password so it is deterministic in the test environment
     current_password = "test-current-pass"
-    monkeypatch.setattr(wharton_dash, "DEFAULT_PASSWORD", current_password)
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_credentials",
+        lambda *args, **kwargs: dict.fromkeys(
+            wharton_dash.REQUIRED_WHARTON_USERS,
+            current_password,
+        ),
+    )
     # Prevent init_db from trying to read st.secrets per-user passwords in production path
     monkeypatch.setattr(wharton_dash, "_is_development_mode", lambda: True)
 
@@ -302,11 +391,39 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
         ), f"Hash {h!r} still matches old password — password was NOT re-synced"
 
 
+def test_production_initialization_accepts_shared_legacy_password(monkeypatch, tmp_path):
+    db_path = tmp_path / "data" / "wharton.db"
+    upload_dir = tmp_path / "data" / "wharton_uploads"
+    monkeypatch.setenv("QUANT_SIM_ENV", "production")
+    monkeypatch.setattr(wharton_dash, "DB_PATH", db_path)
+    monkeypatch.setattr(wharton_dash, "UPLOAD_DIR", upload_dir)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def get_test_connection():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    monkeypatch.setattr(wharton_dash, "get_connection", get_test_connection)
+    monkeypatch.setattr(
+        wharton_dash.st,
+        "secrets",
+        {"WHARTON_PASSWORD": "wharton123"},
+    )
+
+    wharton_dash._initialize_database()
+
+    for username in wharton_dash.REQUIRED_WHARTON_USERS:
+        profile = wharton_dash.authenticate_user(username, "wharton123")
+        assert profile is not None
+        assert profile["username"] == username
+
+
 def test_team_roster_is_alphabetical_and_captains_keep_their_roles(monkeypatch, tmp_path):
     _configure_temp_wharton(monkeypatch, tmp_path)
     wharton_dash.init_db()
 
-    expected_names = ["Alexandra", "Jakub", "Lukáš", "Martin", "Matěj"]
+    expected_names = ["Jakub", "Lukáš", "Martin", "Matěj"]
     assert [user["username"] for user in wharton_dash.DEFAULT_USERS] == expected_names
 
     users = wharton_dash._fetch_users()

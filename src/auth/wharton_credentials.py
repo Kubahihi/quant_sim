@@ -7,7 +7,6 @@ from typing import Any
 
 
 REQUIRED_WHARTON_USERS = (
-    "Alexandra",
     "Jakub",
     "Lukáš",
     "Martin",
@@ -48,3 +47,44 @@ def validate_wharton_credentials(raw: Any) -> dict[str, str]:
         credentials[username] = password
 
     return credentials
+
+
+def resolve_wharton_credentials(
+    secret_values: Mapping[str, Any],
+    *,
+    production: bool,
+) -> dict[str, str]:
+    """Resolve the shared team secret, with per-user credentials as a fallback."""
+    raw_users = secret_values.get("wharton_users")
+    user_values = raw_users if isinstance(raw_users, Mapping) else {}
+
+    if production:
+        shared_password = secret_values.get("WHARTON_SHARED_PASSWORD")
+        # Older deployments used WHARTON_PASSWORD at the top level. Keep that
+        # value working online so a production restart can synchronize every
+        # team account without requiring an immediate secrets migration.
+        if shared_password is None:
+            shared_password = secret_values.get("WHARTON_PASSWORD")
+        if shared_password is None:
+            shared_password = user_values.get("WHARTON_PASSWORD")
+        if shared_password is not None:
+            return validate_wharton_credentials(
+                dict.fromkeys(REQUIRED_WHARTON_USERS, shared_password)
+            )
+        return validate_wharton_credentials(user_values)
+
+    # A shared local password intentionally applies to all four accounts, even
+    # when an older secrets file still contains stale per-user values.
+    shared_password = secret_values.get("WHARTON_PASSWORD")
+    if shared_password is None:
+        shared_password = user_values.get("WHARTON_PASSWORD")
+    if shared_password is not None:
+        return validate_wharton_credentials(
+            dict.fromkeys(REQUIRED_WHARTON_USERS, shared_password)
+        )
+
+    local_credentials = {
+        username: user_values.get(username)
+        for username in REQUIRED_WHARTON_USERS
+    }
+    return validate_wharton_credentials(local_credentials)
