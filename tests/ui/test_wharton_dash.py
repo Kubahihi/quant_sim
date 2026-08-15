@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import subprocess
+import sys
+
 import bcrypt
 import math
 import pytest
@@ -9,6 +12,21 @@ from types import SimpleNamespace
 
 from src.auth.wharton_credentials import WhartonCredentialConfigError
 from ui.pages import wharton_dash
+
+
+def test_wharton_page_can_start_directly_outside_repository(tmp_path):
+    page_path = Path(wharton_dash.__file__).resolve()
+
+    completed = subprocess.run(
+        [sys.executable, str(page_path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
