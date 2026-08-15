@@ -29,12 +29,34 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.auth.wharton_credentials import (
-    REQUIRED_WHARTON_USERS,
-    WhartonCredentialConfigError,
-    resolve_wharton_credentials,
-)
+from src.auth import wharton_credentials as _wharton_credentials
 from src.utils.environment import is_production_environment, resolve_environment
+
+
+# Streamlit reruns can retain an older dependency module after deploying an
+# updated page.  Refresh this small, stateless module if its expected API is
+# incomplete so a rolling deployment cannot mix the two revisions.
+_WHARTON_CREDENTIAL_EXPORTS = (
+    "REQUIRED_WHARTON_USERS",
+    "WhartonCredentialConfigError",
+    "resolve_wharton_credentials",
+)
+if not all(hasattr(_wharton_credentials, name) for name in _WHARTON_CREDENTIAL_EXPORTS):
+    _existing_config_error = getattr(
+        _wharton_credentials,
+        "WhartonCredentialConfigError",
+        None,
+    )
+    importlib.invalidate_caches()
+    _wharton_credentials = importlib.reload(_wharton_credentials)
+    # Other authentication modules may already hold this class for ``except``
+    # checks. Keep its identity stable while refreshing the module functions.
+    if _existing_config_error is not None:
+        _wharton_credentials.WhartonCredentialConfigError = _existing_config_error
+
+REQUIRED_WHARTON_USERS = _wharton_credentials.REQUIRED_WHARTON_USERS
+WhartonCredentialConfigError = _wharton_credentials.WhartonCredentialConfigError
+resolve_wharton_credentials = _wharton_credentials.resolve_wharton_credentials
 
 
 LOGGER = logging.getLogger(__name__)
