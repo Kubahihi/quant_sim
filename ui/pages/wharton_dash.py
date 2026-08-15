@@ -29,8 +29,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src import __build_date__, __version__
 from src.auth import wharton_credentials as _wharton_credentials
 from src.utils.environment import is_production_environment, resolve_environment
+from ui.runtime_diagnostics import resolve_build_identity
 
 
 # Streamlit reruns can retain an older dependency module after deploying an
@@ -60,6 +62,8 @@ resolve_wharton_credentials = _wharton_credentials.resolve_wharton_credentials
 
 
 LOGGER = logging.getLogger(__name__)
+
+WHARTON_BUILD_IDENTITY = resolve_build_identity(PROJECT_ROOT)
 
 DB_PATH = Path("data/wharton_production.db")
 UPLOAD_DIR = Path("data/wharton_uploads")
@@ -791,6 +795,18 @@ def _login_client_address() -> str:
     return str(st.session_state[LOGIN_CLIENT_KEY])
 
 
+def _build_fingerprint_label() -> str:
+    """Return the public, immutable identity of the running Wharton build."""
+    return (
+        f"QuantSim v{__version__} · build {__build_date__} · "
+        f"{WHARTON_BUILD_IDENTITY.label}"
+    )
+
+
+def _render_build_fingerprint() -> None:
+    st.caption(_build_fingerprint_label())
+
+
 def _render_login() -> None:
     # The team roster is static configuration, so the anonymous landing page
     # does not need a remote database connection.  Database/schema setup is
@@ -811,6 +827,7 @@ def _render_login() -> None:
             """,
             unsafe_allow_html=True,
         )
+        _render_build_fingerprint()
         with st.form("wharton_login_form", clear_on_submit=False):
             username = st.selectbox(
                 "Team member",
@@ -11962,6 +11979,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
 
 
 def _render_header(profile: dict[str, str | int]) -> None:
+    _render_build_fingerprint()
     username = escape(str(profile["username"]))
     role = escape(str(profile["role"]))
     initial = username[:1].upper()

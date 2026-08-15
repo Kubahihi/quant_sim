@@ -83,6 +83,8 @@ def test_ci_security_gate_has_least_privilege_and_blocks_quality() -> None:
     }
     audit = quality_steps["Audit installed dependencies for known vulnerabilities"]
     assert "--local --strict" in audit["run"]
+    prepare = quality_steps["Prepare release artifact directory"]
+    assert prepare["run"] == "mkdir -p build"
     sbom = quality_steps["Generate and validate production SBOM"]["run"]
     assert "--format cyclonedx-json" in sbom
     assert "scripts/validate_sbom.py" in sbom
@@ -98,6 +100,13 @@ def test_ci_security_gate_has_least_privilege_and_blocks_quality() -> None:
     upload_paths = quality_steps["Retain verified release manifest"]["with"]["path"]
     assert "build/release-sbom.cdx.json" in upload_paths
     assert "build/release-licenses.json" in upload_paths
+
+    quality_names = [
+        step["name"] for step in workflow["jobs"]["quality"]["steps"]
+    ]
+    assert quality_names.index("Prepare release artifact directory") < quality_names.index(
+        "Generate and validate production SBOM"
+    )
 
 
 def test_dependency_license_policy_is_explicit_and_permissive_only() -> None:

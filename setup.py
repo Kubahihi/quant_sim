@@ -14,7 +14,7 @@ def _locked_requirements() -> list[str]:
 
 setup(
     name="quant_platform",
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(where=".", include=["src", "src.*"]),
     install_requires=_locked_requirements(),
     python_requires=">=3.12,<3.13",
