@@ -25,7 +25,7 @@ import streamlit as st
 from src.auth.wharton_credentials import (
     REQUIRED_WHARTON_USERS,
     WhartonCredentialConfigError,
-    validate_wharton_credentials,
+    resolve_wharton_credentials,
 )
 from src.utils.environment import is_production_environment, resolve_environment
 
@@ -59,27 +59,12 @@ def _is_development_mode() -> bool:
     )
 
 
-def _get_default_password() -> str:
-    try:
-        pw = st.secrets.get("WHARTON_PASSWORD")
-        if pw:
-            return str(pw)
-    except Exception:
-        pass
-    if _is_development_mode():
-        return "CHANGE_ME_IN_SECRETS"
-    return secrets.token_urlsafe(32)
-
-# This is now a fallback for seeding, not a direct password.
-# Actual password will be read from st.secrets["wharton_users"][username]
-# or generated if in development mode.
 DEV_ONLY_INSECURE_DEFAULT_PASSWORD = "DEV_ONLY_INSECURE_DEFAULT"
 
 # Login attempt limits
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPT_WINDOW_MINUTES = 10
 
-DEFAULT_PASSWORD = _get_default_password()
 TASK_EDITOR_VERSION_KEY = "wharton_task_editor_version"
 QUANT_RESULT_KEY = "wharton_quant_result"
 QUANT_ERROR_KEY = "wharton_quant_error"
@@ -176,7 +161,6 @@ def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str,
 
 
 DEFAULT_USERS = [
-    {"username": "Alexandra", "role": "Team Member", "primary_module": "Teamspace"},
     {"username": "Jakub", "role": "Co-Captain", "primary_module": "Quant Engine"},
     {"username": "Lukáš", "role": "Geopolitics", "primary_module": "Macro Intelligence"},
     {"username": "Martin", "role": "Logistics/Risk", "primary_module": "Risk Operations"},
@@ -185,7 +169,7 @@ DEFAULT_USERS = [
 
 assert tuple(user["username"] for user in DEFAULT_USERS) == REQUIRED_WHARTON_USERS
 
-LEGACY_USERS = {"Janek", "Matfyz_Genius"}
+LEGACY_USERS = {"Alexandra", "Janek", "Matfyz_Genius"}
 
 DEFAULT_MINDMAP_NODES = [
     ("node_eu_tech_regulation", "EU Tech Regulation", "Policy"),
@@ -224,16 +208,14 @@ def _now_iso() -> str:
 def _initialize_database() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    if _is_development_mode():
-        seeded_passwords = {
-            user["username"]: DEFAULT_PASSWORD for user in DEFAULT_USERS
-        }
-    else:
-        try:
-            configured_credentials = st.secrets["wharton_users"]
-        except Exception:
-            configured_credentials = None
-        seeded_passwords = validate_wharton_credentials(configured_credentials)
+    try:
+        secret_values = st.secrets
+    except Exception:
+        secret_values = {}
+    seeded_passwords = resolve_wharton_credentials(
+        secret_values,
+        production=not _is_development_mode(),
+    )
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
@@ -608,13 +590,12 @@ def _fetch_users() -> list[sqlite3.Row]:
             """
             SELECT id, username, role, primary_module
             FROM wharton_users
-            WHERE username IN (?, ?, ?, ?, ?)
+            WHERE username IN (?, ?, ?, ?)
             ORDER BY CASE username
-                WHEN 'Alexandra' THEN 0
-                WHEN 'Jakub' THEN 1
-                WHEN 'Lukáš' THEN 2
-                WHEN 'Martin' THEN 3
-                WHEN 'Matěj' THEN 4
+                WHEN 'Jakub' THEN 0
+                WHEN 'Lukáš' THEN 1
+                WHEN 'Martin' THEN 2
+                WHEN 'Matěj' THEN 3
             END
             """,
             tuple(user["username"] for user in DEFAULT_USERS),

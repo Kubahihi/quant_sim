@@ -54,12 +54,15 @@ Required Streamlit `[storage]` settings:
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 
-The `[wharton_users]` section must contain all five named team accounts. Each
-password must be 10–72 UTF-8 bytes and must not be an example placeholder. The
-accounts may intentionally use one shared password. Missing or unsafe team
-credentials stop production initialization and fail the preflight without
-printing their values. Restart the app after a credential change so the stored
-password hashes are synchronized from the configured secrets.
+Production can set `WHARTON_SHARED_PASSWORD` to apply one password to all four
+named team accounts. Existing deployments may keep a top-level
+`WHARTON_PASSWORD`, which is treated as the shared production password for
+backward compatibility. Without either shared value, the `[wharton_users]`
+section must contain all four accounts. Each password must be 10–72 UTF-8 bytes and must not be an
+example placeholder. Missing or unsafe team credentials stop production
+initialization and fail the preflight without printing their values. Restart
+the app after a credential change so the stored password hashes are synchronized
+from the configured secrets.
 
 If the standalone Flask API is deployed, production also requires:
 

@@ -128,13 +128,13 @@ streamlit run ui/streamlit_app.py
 
 ```toml
 QUANT_SIM_ENV = "production"
+WHARTON_SHARED_PASSWORD = "replace-with-the-shared-password"
 
 TURSO_DATABASE_URL = "libsql://your-database.turso.io"
 TURSO_AUTH_TOKEN = "your-turso-auth-token"
 TURSO_SYNC_INTERVAL_SECONDS = 30
 
 [wharton_users]
-Alexandra = "strong-unique-password"
 Jakub = "strong-unique-password"
 "Lukáš" = "strong-unique-password"
 Martin = "strong-unique-password"
@@ -148,9 +148,13 @@ R2_ACCESS_KEY_ID = "your-r2-access-key-id"
 R2_SECRET_ACCESS_KEY = "your-r2-secret-access-key"
 ```
 
-Vsech pet uctu muze pouzivat jedno spolecne heslo o delce 10–72 UTF-8 bajtu.
-Po zmene prihlasovacich udaju aplikaci restartujte, aby se aktualizovaly ulozene
-otisky hesel.
+V produkci `WHARTON_SHARED_PASSWORD` nastavi jedno spolecne heslo pro vsechny ctyri
+uctu a ma prednost pred `[wharton_users]`. Kvuli kompatibilite online nasazeni
+akceptuje jako sdilene heslo take drive pouzivany top-level `WHARTON_PASSWORD`.
+Lokalni development pouziva
+jednotliva hesla z `[wharton_users]` a chybejici ucty muze doplnit hodnotou
+`WHARTON_PASSWORD`. Heslo musi mit 10–72 UTF-8 bajtu. Po zmene prihlasovacich
+udaju aplikaci restartujte, aby se aktualizovaly ulozene otisky hesel.
 
 4. Nastavte hlavni soubor na `ui/streamlit_app.py` a nasadte aplikaci. Po prvnim spusteni se vytvori sdilena databazova struktura a aktualizuji se role zakladnich uzivatelu.
 

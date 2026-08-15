@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+import sys
+from types import SimpleNamespace
 
 from src.operations import preflight
 
@@ -49,6 +51,16 @@ def test_restore_drill_rejects_corrupt_file_without_exposing_details(tmp_path):
 
     assert result == {"status": "unhealthy", "reason": "restore_check_failed"}
     assert str(backup) not in json.dumps(result)
+
+
+def test_wharton_preflight_accepts_production_shared_password(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "streamlit",
+        SimpleNamespace(secrets={"WHARTON_SHARED_PASSWORD": "wharton123"}),
+    )
+
+    assert preflight._check_wharton_credentials() is None
 
 
 def test_config_preflight_can_pass_without_live_mutating_checks(monkeypatch):

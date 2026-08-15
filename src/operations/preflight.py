@@ -72,14 +72,14 @@ def _check_storage_configuration() -> str | None:
 def _check_wharton_credentials() -> str | None:
     import streamlit as st
 
-    from src.auth.wharton_credentials import validate_wharton_credentials
+    from src.auth.wharton_credentials import resolve_wharton_credentials
 
     try:
-        raw_credentials = st.secrets["wharton_users"]
+        secret_values = st.secrets
     except Exception:
         return "wharton_credentials_not_configured"
     try:
-        validate_wharton_credentials(raw_credentials)
+        resolve_wharton_credentials(secret_values, production=True)
     except Exception:
         return "wharton_credentials_invalid"
     return None
