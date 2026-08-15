@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import src.optimization.estimators as estimators_module
+import src.optimization.walk_forward as walk_forward_module
 from src.optimization import run_optimization_walk_forward
 
 
@@ -135,3 +137,83 @@ def test_walk_forward_minimum_variance_keeps_mandate_constraints():
         result["weights_history"]["A0"] + result["weights_history"]["A1"]
     )
     assert np.all(technology_weights <= 0.50 + 1e-5)
+
+
+@pytest.mark.parametrize("optimizer", ["minimum_variance", "maximum_utility"])
+def test_walk_forward_estimates_and_cleans_each_window_once(
+    monkeypatch: pytest.MonkeyPatch,
+    optimizer: str,
+):
+    returns = _sample_returns(periods=180, assets=4)
+    calls = {"clean": 0, "estimate": 0}
+    original_clean = estimators_module.clean_returns
+    original_estimate = walk_forward_module.estimate_portfolio_inputs
+
+    def counted_clean(frame: pd.DataFrame) -> pd.DataFrame:
+        calls["clean"] += 1
+        return original_clean(frame)
+
+    def counted_estimate(frame: pd.DataFrame, **kwargs):
+        calls["estimate"] += 1
+        return original_estimate(frame, **kwargs)
+
+    monkeypatch.setattr(estimators_module, "clean_returns", counted_clean)
+    monkeypatch.setattr(walk_forward_module, "clean_returns", counted_clean)
+    monkeypatch.setattr(
+        walk_forward_module,
+        "estimate_portfolio_inputs",
+        counted_estimate,
+    )
+
+    result = walk_forward_module.run_optimization_walk_forward(
+        returns,
+        optimizer=optimizer,
+        train_periods=100,
+        rebalance_periods=20,
+        max_weight=0.50,
+    )
+
+    window_count = len(result["windows"])
+    assert calls["estimate"] == window_count
+    assert calls["clean"] == window_count + 1
+
+
+def test_walk_forward_black_litterman_estimates_each_window_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    returns = _sample_returns(periods=180, assets=4)
+    calls = {"clean": 0, "black_litterman": 0}
+    original_clean = estimators_module.clean_returns
+    original_black_litterman = (
+        walk_forward_module.estimate_black_litterman_inputs
+    )
+
+    def counted_clean(frame: pd.DataFrame) -> pd.DataFrame:
+        calls["clean"] += 1
+        return original_clean(frame)
+
+    def counted_black_litterman(frame: pd.DataFrame, **kwargs):
+        calls["black_litterman"] += 1
+        return original_black_litterman(frame, **kwargs)
+
+    monkeypatch.setattr(estimators_module, "clean_returns", counted_clean)
+    monkeypatch.setattr(walk_forward_module, "clean_returns", counted_clean)
+    monkeypatch.setattr(
+        walk_forward_module,
+        "estimate_black_litterman_inputs",
+        counted_black_litterman,
+    )
+
+    result = walk_forward_module.run_optimization_walk_forward(
+        returns,
+        optimizer="maximum_utility",
+        train_periods=100,
+        rebalance_periods=20,
+        max_weight=0.50,
+        expected_return_model="black_litterman",
+        black_litterman_views={"A0": 0.08},
+    )
+
+    window_count = len(result["windows"])
+    assert calls["black_litterman"] == window_count
+    assert calls["clean"] == window_count + 1

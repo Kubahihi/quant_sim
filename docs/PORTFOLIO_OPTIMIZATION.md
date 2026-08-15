@@ -15,6 +15,11 @@ This makes minimum variance, maximum Sharpe, the efficient frontier, sampled
 portfolios and cost-aware rebalancing directly comparable. The metadata is
 included in every optimization result.
 
+Already-numeric return matrices use a vectorized finite-row mask; mixed or text
+inputs retain the stricter coercion path. Black-Litterman views are updated in
+view space, so a small set of views requires a small linear solve instead of two
+asset-by-asset pseudoinverses.
+
 The dashboard constructs this bundle once per return matrix and passes the
 same immutable object to minimum variance, maximum Sharpe, the efficient
 frontier, portfolio sampling and cost-aware rebalancing. Reuse is accepted
@@ -29,6 +34,17 @@ optimizer is requested. Wharton's full simulation paths, models, news retrieval
 and causal backtest are also computed on demand when their module is opened.
 The initial portfolio and optimizer results therefore do not wait for external
 research providers or retain unused path matrices in each user session.
+
+When a Wharton simulation view is opened, each full Monte Carlo matrix exists
+only long enough to derive the exact terminal distribution, seven percentile
+paths and 50 reproducible sample paths. The full matrix is then released before
+the second simulation model runs. At the UI maximum of 1,260 periods and 15,000
+paths, this reduces persistent session storage for both models from about 303 MB
+to about 1.4 MB while preserving every value used by the charts and risk metrics.
+
+Multi-asset Yahoo OHLCV and liquidity requests use the same bounded concurrent
+fetch path as close-price requests. Results are assembled in the caller's ticker
+order, and each ticker's download is still reused for both prices and rolling ADV.
 
 This is deferred execution, not reduced precision. Requested modules retain
 their full data windows, solver tolerances, simulation counts and validation
@@ -68,6 +84,11 @@ The 3D portfolio cloud is projected onto the same capped long-only simplex.
 The current single-period objective maximizes:
 
 `expected return - risk aversion * variance - execution cost`
+
+This convex objective and its turnover constraint are solved through the
+project's validated CVXPY solver chain rather than a nonsmooth finite-difference
+search. This keeps large universes fast and avoids slow or failed SLSQP
+convergence.
 
 Turnover is the L1 change in weights. Execution cost can contain:
 
@@ -143,6 +164,9 @@ also recomputed from that window rather than reused from the full sample:
 5. deduct commission, spread and square-root impact costs on rebalance dates
    when causal liquidity inputs are available;
 6. compare after-cost results with an equal-weight baseline.
+
+Each rolling window cleans and estimates its training matrix once, then passes
+the same immutable estimate bundle to the selected optimizer.
 
 The output includes target-weight history, active symbols by window, gross and
 net returns, turnover, cost breakdown, return, volatility, Sharpe ratio and

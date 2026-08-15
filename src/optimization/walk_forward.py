@@ -12,6 +12,7 @@ from .estimators import (
     TRADING_DAYS,
     clean_returns,
     estimate_black_litterman_inputs,
+    estimate_portfolio_inputs,
 )
 from .engine import optimize_portfolio
 from .execution import estimate_trade_costs
@@ -266,12 +267,6 @@ def run_optimization_walk_forward(
             active_indices,
         ]
         training.columns = active_symbols
-        training = clean_returns(training)
-        if len(training) < 20:
-            raise ValueError(
-                "point-in-time training window has fewer than 20 complete observations "
-                f"for: {', '.join(active_symbols)}."
-            )
 
         active_current_raw = current_weights[active_indices]
         active_current_total = float(active_current_raw.sum())
@@ -310,6 +305,37 @@ def run_optimization_walk_forward(
             and turnover_limit is None
             and not has_liquidity_model
         )
+        if not use_legacy_optimizer and str(expected_return_model) == "black_litterman":
+            views = {
+                symbol: value
+                for symbol, value in dict(black_litterman_views or {}).items()
+                if symbol in active_symbols
+            }
+            portfolio_estimates = estimate_black_litterman_inputs(
+                training,
+                market_weights=active_current,
+                views=views,
+                view_confidences={
+                    symbol: float(black_litterman_confidence)
+                    for symbol in views
+                },
+                risk_aversion=risk_aversion,
+                covariance_shrinkage=covariance_shrinkage,
+                return_shrinkage=return_shrinkage,
+            )
+        else:
+            portfolio_estimates = estimate_portfolio_inputs(
+                training,
+                covariance_shrinkage=covariance_shrinkage,
+                return_shrinkage=return_shrinkage,
+            )
+        training = portfolio_estimates.returns
+        if len(training) < 20:
+            raise ValueError(
+                "point-in-time training window has fewer than 20 complete observations "
+                f"for: {', '.join(active_symbols)}."
+            )
+
         if use_legacy_optimizer:
             optimizer_fn = (
                 optimize_maximum_sharpe
@@ -322,27 +348,9 @@ def run_optimization_walk_forward(
                 max_weight=max_weight,
                 covariance_shrinkage=covariance_shrinkage,
                 return_shrinkage=return_shrinkage,
+                portfolio_estimates=portfolio_estimates,
             )
         else:
-            portfolio_estimates = None
-            if str(expected_return_model) == "black_litterman":
-                views = {
-                    symbol: value
-                    for symbol, value in dict(black_litterman_views or {}).items()
-                    if symbol in active_symbols
-                }
-                portfolio_estimates = estimate_black_litterman_inputs(
-                    training,
-                    market_weights=active_current,
-                    views=views,
-                    view_confidences={
-                        symbol: float(black_litterman_confidence)
-                        for symbol in views
-                    },
-                    risk_aversion=risk_aversion,
-                    covariance_shrinkage=covariance_shrinkage,
-                    return_shrinkage=return_shrinkage,
-                )
             active_benchmark = None
             if method == "minimum_tracking_error":
                 if benchmark_weights is None:

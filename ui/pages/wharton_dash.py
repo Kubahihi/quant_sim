@@ -176,12 +176,68 @@ QUANT_MODULES = [
 ]
 QUANT_OPERATOR_USERS = {"Jakub"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
+_SIMULATION_DISPLAY_PERCENTILES = (5, 10, 25, 50, 75, 90, 95)
+_SIMULATION_SAMPLE_PATH_COUNT = 50
 
 
 def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str, np.ndarray]:
     """Calculate all requested path percentiles in one partitioning pass."""
     values = np.percentile(paths, percentiles, axis=1)
     return {f"p{percentile}": values[index] for index, percentile in enumerate(percentiles)}
+
+
+def _compact_simulation_paths(paths: np.ndarray) -> dict[str, Any]:
+    """Keep every displayed result without retaining the full path matrix."""
+    values = np.asarray(paths, dtype=float)
+    if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] < 2:
+        raise ValueError("simulation paths must be a non-empty 2D matrix.")
+
+    percentile_paths = _percentile_path_map(
+        values, list(_SIMULATION_DISPLAY_PERCENTILES)
+    )
+    sample_count = min(_SIMULATION_SAMPLE_PATH_COUNT, values.shape[1])
+    sample_indices = np.random.default_rng(42).choice(
+        values.shape[1], sample_count, replace=False
+    )
+    return {
+        "percentile_paths": percentile_paths,
+        "terminal_values": values[-1].copy(),
+        "sample_paths": values[:, sample_indices].copy(),
+        "path_count": int(values.shape[1]),
+        "period_count": int(values.shape[0] - 1),
+    }
+
+
+def _simulation_artifacts(
+    result: Mapping[str, Any],
+    *,
+    advanced: bool = False,
+) -> dict[str, Any] | None:
+    """Resolve compact results while supporting older in-session matrices."""
+    artifact_key = (
+        "advanced_simulation_artifacts" if advanced else "simulation_artifacts"
+    )
+    artifact = result.get(artifact_key)
+    required_keys = {"percentile_paths", "terminal_values", "sample_paths"}
+    if isinstance(artifact, dict) and required_keys.issubset(artifact):
+        return artifact
+
+    legacy_key = "adv_price_paths" if advanced else "price_paths"
+    legacy_paths = result.get(legacy_key)
+    if legacy_paths is None:
+        return None
+    resolved = _compact_simulation_paths(np.asarray(legacy_paths, dtype=float))
+    if isinstance(result, dict):
+        result[artifact_key] = resolved
+        result[legacy_key] = None
+    return resolved
+
+
+def _simulations_ready(result: Mapping[str, Any]) -> bool:
+    return (
+        _simulation_artifacts(result) is not None
+        and _simulation_artifacts(result, advanced=True) is not None
+    )
 
 
 DEFAULT_USERS = [
@@ -2304,9 +2360,11 @@ def _compute_quant_run(
         "frontier": frontier,
         "portfolio_cloud": portfolio_cloud,
         "optimization_validation": optimization_validation,
+        "simulation_artifacts": None,
         "price_paths": None,
         "simulation_stats": None,
         "model_validation": {},
+        "advanced_simulation_artifacts": None,
         "adv_price_paths": None,
         "adv_simulation_stats": None,
         "quant_stack": None,
@@ -2796,7 +2854,7 @@ def _run_quant_research_stack(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
-    """Attach full seeded simulation paths only when a simulation view is opened."""
+    """Attach chart-ready simulation artifacts only when a view requests them."""
     started_at = time.perf_counter()
     analytics = importlib.import_module("src.analytics")
     simulation = importlib.import_module("src.simulation")
@@ -2817,6 +2875,8 @@ def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
         n_simulations=n_simulations,
         random_seed=random_seed,
     )
+    simulation_artifacts = _compact_simulation_paths(price_paths)
+    del price_paths
     adv_price_paths, adv_simulation_stats = (
         simulation.run_advanced_monte_carlo_simulation(
             current_value=current_value,
@@ -2830,9 +2890,15 @@ def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
             jump_volatility=float(inputs.get("jump_volatility", 0.08)),
         )
     )
-    result["price_paths"] = price_paths
+    advanced_simulation_artifacts = _compact_simulation_paths(adv_price_paths)
+    del adv_price_paths
+    # Keep the legacy keys empty so old sessions remain readable while new
+    # runs retain only chart-ready data and the exact terminal distribution.
+    result["price_paths"] = None
+    result["simulation_artifacts"] = simulation_artifacts
     result["simulation_stats"] = simulation_stats
-    result["adv_price_paths"] = adv_price_paths
+    result["adv_price_paths"] = None
+    result["advanced_simulation_artifacts"] = advanced_simulation_artifacts
     result["adv_simulation_stats"] = adv_simulation_stats
 
     quant_stack = result.get("quant_stack")
@@ -3057,18 +3123,25 @@ def _render_performance_attribution(result: dict, advanced: bool) -> None:
 def _render_simulation(result: dict, advanced: bool) -> None:
     st.markdown("### Monte Carlo Simulation")
     stats = result["simulation_stats"]
-    paths = result["price_paths"]
+    artifacts = _simulation_artifacts(result)
+    if artifacts is None:
+        st.warning("No simulation results available.")
+        return
     r = st.columns(4)
     r[0].metric("Mean Final Value", f"${stats['mean']:,.0f}")
     r[1].metric("Median", f"${stats['median']:,.0f}")
     r[2].metric("5th Percentile", f"${stats['percentile_5']:,.0f}")
     r[3].metric("95th Percentile", f"${stats['percentile_95']:,.0f}")
 
-    pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
+    all_percentiles = dict(artifacts["percentile_paths"])
+    pcts = {
+        key: all_percentiles[key]
+        for key in ("p5", "p25", "p50", "p75", "p95")
+    }
     st.markdown("#### Percentile Paths")
     st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
-    final_values = pd.Series(paths[-1])
+    final_values = pd.Series(artifacts["terminal_values"])
     counts, bins = np.histogram(final_values, bins=40)
     hist_df = pd.DataFrame({
         "Bucket": [f"{bins[i]:,.0f}–{bins[i+1]:,.0f}" for i in range(len(counts))],
@@ -3404,13 +3477,16 @@ def _render_monte_carlo(result: dict) -> None:
         return
 
     stats = result.get("simulation_stats", {})
-    paths = result.get("price_paths")
+    artifacts = _simulation_artifacts(result)
     inputs = result.get("inputs", {})
     current_value = inputs.get("current_value", 100_000)
 
-    if paths is None:
-        st.warning("No simulation paths available.")
+    if artifacts is None:
+        st.warning("No simulation results available.")
         return
+    final_values = np.asarray(artifacts["terminal_values"], dtype=float)
+    sample_paths = np.asarray(artifacts["sample_paths"], dtype=float)
+    percentile_paths = dict(artifacts["percentile_paths"])
 
     # KPI cards
     st.markdown("#### Key Outcomes")
@@ -3424,7 +3500,6 @@ def _render_monte_carlo(result: dict) -> None:
     k[4].metric(" Std Dev", f"${stats.get('std', 0):,.0f}")
 
     # Probability of loss
-    final_values = paths[-1] if paths is not None else np.array([])
     if len(final_values) > 0:
         prob_loss = float(np.mean(final_values < current_value)) * 100
         prob_20_loss = float(np.mean(final_values < current_value * 0.80)) * 100
@@ -3439,7 +3514,10 @@ def _render_monte_carlo(result: dict) -> None:
         # Fan chart with percentile bands
         st.markdown("#### Percentile Fan Chart")
         percentiles = [5, 10, 25, 50, 75, 90, 95]
-        pctl_data = _percentile_path_map(paths, percentiles)
+        pctl_data = {
+            f"p{percentile}": percentile_paths[f"p{percentile}"]
+            for percentile in percentiles
+        }
         days = list(range(len(pctl_data["p50"])))
 
         fig_fan = go.Figure()
@@ -3517,18 +3595,15 @@ def _render_monte_carlo(result: dict) -> None:
 
         # Sample paths
         st.markdown("#### Sample Simulated Paths")
-        n_show = min(50, paths.shape[1])
         fig_paths = go.Figure()
-        rng = np.random.default_rng(42)
-        sample_indices = rng.choice(paths.shape[1], n_show, replace=False)
-        for idx in sample_indices:
+        for idx in range(sample_paths.shape[1]):
             fig_paths.add_trace(go.Scatter(
-                x=list(range(paths.shape[0])), y=paths[:, idx].tolist(),
+                x=list(range(sample_paths.shape[0])), y=sample_paths[:, idx].tolist(),
                 mode="lines", line=dict(width=0.5, color="rgba(99,102,241,0.15)"),
                 showlegend=False,
             ))
         fig_paths.add_trace(go.Scatter(
-            x=list(range(paths.shape[0])), y=pctl_data["p50"].tolist(),
+            x=list(range(sample_paths.shape[0])), y=pctl_data["p50"].tolist(),
             mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
         ))
         fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
@@ -3540,7 +3615,10 @@ def _render_monte_carlo(result: dict) -> None:
         st.plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
-        pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
+        pcts = {
+            key: percentile_paths[key]
+            for key in ("p5", "p25", "p50", "p75", "p95")
+        }
         st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
@@ -3563,13 +3641,16 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         return
 
     stats = result.get("adv_simulation_stats", {})
-    paths = result.get("adv_price_paths")
+    artifacts = _simulation_artifacts(result, advanced=True)
     inputs = result.get("inputs", {})
     current_value = inputs.get("current_value", 100_000)
 
-    if paths is None:
-        st.warning("No simulation paths available.")
+    if artifacts is None:
+        st.warning("No simulation results available.")
         return
+    final_values = np.asarray(artifacts["terminal_values"], dtype=float)
+    sample_paths = np.asarray(artifacts["sample_paths"], dtype=float)
+    percentile_paths = dict(artifacts["percentile_paths"])
 
     # KPI cards
     st.markdown("#### Key Outcomes")
@@ -3583,7 +3664,6 @@ def _render_advanced_monte_carlo(result: dict) -> None:
     k[4].metric(" Std Dev", f"${stats.get('std', 0):,.0f}")
 
     # Probability of loss
-    final_values = paths[-1] if paths is not None else np.array([])
     if len(final_values) > 0:
         prob_loss = float(np.mean(final_values < current_value)) * 100
         prob_20_loss = float(np.mean(final_values < current_value * 0.80)) * 100
@@ -3598,7 +3678,10 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         # Fan chart with percentile bands
         st.markdown("#### Percentile Fan Chart")
         percentiles = [5, 10, 25, 50, 75, 90, 95]
-        pctl_data = _percentile_path_map(paths, percentiles)
+        pctl_data = {
+            f"p{percentile}": percentile_paths[f"p{percentile}"]
+            for percentile in percentiles
+        }
         days = list(range(len(pctl_data["p50"])))
 
         fig_fan = go.Figure()
@@ -3676,18 +3759,15 @@ def _render_advanced_monte_carlo(result: dict) -> None:
 
         # Sample paths
         st.markdown("#### Sample Simulated Paths")
-        n_show = min(50, paths.shape[1])
         fig_paths = go.Figure()
-        rng = np.random.default_rng(42)
-        sample_indices = rng.choice(paths.shape[1], n_show, replace=False)
-        for idx in sample_indices:
+        for idx in range(sample_paths.shape[1]):
             fig_paths.add_trace(go.Scatter(
-                x=list(range(paths.shape[0])), y=paths[:, idx].tolist(),
+                x=list(range(sample_paths.shape[0])), y=sample_paths[:, idx].tolist(),
                 mode="lines", line=dict(width=0.5, color="rgba(99,102,241,0.15)"),
                 showlegend=False,
             ))
         fig_paths.add_trace(go.Scatter(
-            x=list(range(paths.shape[0])), y=pctl_data["p50"].tolist(),
+            x=list(range(sample_paths.shape[0])), y=pctl_data["p50"].tolist(),
             mode="lines", line=dict(width=2.5, color="#22c55e"), name="Median",
         ))
         fig_paths.add_hline(y=current_value, line_dash="dash", line_color="#ef4444")
@@ -3699,7 +3779,10 @@ def _render_advanced_monte_carlo(result: dict) -> None:
         st.plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
-        pcts = _percentile_path_map(paths, [5, 25, 50, 75, 95])
+        pcts = {
+            key: percentile_paths[key]
+            for key in ("p5", "p25", "p50", "p75", "p95")
+        }
         st.line_chart(pd.DataFrame(pcts), use_container_width=True, height=420)
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
@@ -5118,7 +5201,7 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
     result_updated = False
     if (
         selected in {"Simulation", "Methodology & Validation"}
-        and result.get("price_paths") is None
+        and not _simulations_ready(result)
     ):
         with st.spinner("Running the full seeded simulation set..."):
             result = _run_quant_simulations(result)
@@ -11629,7 +11712,7 @@ def render_wharton_cockpit() -> None:
 
     def _with_quant_context(renderer, *, require_simulation: bool = False):
         def _render() -> None:
-            if require_simulation and result and result.get("price_paths") is None:
+            if require_simulation and result and not _simulations_ready(result):
                 with st.spinner("Running the full seeded simulation set..."):
                     _run_quant_simulations(result)
                     st.session_state[QUANT_RESULT_KEY] = result

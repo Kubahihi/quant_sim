@@ -188,8 +188,7 @@ class YahooFetcher(BaseFetcher):
         prices: dict[str, pd.Series] = {}
         adv_history: dict[str, pd.Series] = {}
         latest_adv: dict[str, float] = {}
-        for symbol in symbols:
-            fetch_result = self.fetch_prices(symbol, start_date, end_date)
+        for symbol, fetch_result in self._fetch_many(symbols, start_date, end_date):
             if not fetch_result.success or fetch_result.data.empty:
                 continue
             data = fetch_result.data

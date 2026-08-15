@@ -67,8 +67,19 @@ def clean_returns(returns: pd.DataFrame) -> pd.DataFrame:
     if frame.columns.has_duplicates:
         raise ValueError("returns columns must be unique.")
 
-    frame = frame.apply(pd.to_numeric, errors="coerce")
-    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    real_numeric = all(
+        pd.api.types.is_numeric_dtype(dtype)
+        and not pd.api.types.is_complex_dtype(dtype)
+        for dtype in frame.dtypes
+    )
+    if real_numeric:
+        values = frame.to_numpy(dtype=float, na_value=np.nan)
+        frame = frame.iloc[np.isfinite(values).all(axis=1)]
+    else:
+        # Preserve coercion semantics for object, string, categorical, and
+        # other mixed inputs that may contain numeric text.
+        frame = frame.apply(pd.to_numeric, errors="coerce")
+        frame = frame.replace([np.inf, -np.inf], np.nan).dropna(how="any")
     if frame.empty:
         raise ValueError("returns are empty after cleaning.")
     if frame.shape[0] < 2:
@@ -250,15 +261,16 @@ def estimate_black_litterman_inputs(
                 base_uncertainty * (1.0 - confidence) / confidence,
                 1e-12,
             )
-        inverse_scaled_covariance = np.linalg.pinv(scaled_covariance)
-        inverse_omega = np.diag(1.0 / omega_diagonal)
-        posterior_covariance = np.linalg.pinv(
-            inverse_scaled_covariance + pick.T @ inverse_omega @ pick
+        # Apply the Woodbury form of the Black-Litterman update.  Solving in
+        # view space avoids two N x N pseudoinverses when only K assets have
+        # views (normally K is much smaller than N).
+        view_covariance = pick @ scaled_covariance @ pick.T
+        view_covariance.flat[:: len(view_symbols) + 1] += omega_diagonal
+        view_adjustment = np.linalg.solve(
+            view_covariance,
+            view_returns - pick @ equilibrium,
         )
-        posterior = posterior_covariance @ (
-            inverse_scaled_covariance @ equilibrium
-            + pick.T @ inverse_omega @ view_returns
-        )
+        posterior = equilibrium + scaled_covariance @ pick.T @ view_adjustment
     else:
         view_symbols = []
         resolved_confidences = {}
