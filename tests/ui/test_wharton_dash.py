@@ -9,10 +9,24 @@ import sys
 import bcrypt
 import math
 import pytest
+from streamlit.testing.v1 import AppTest
 from types import SimpleNamespace
 
 from src.auth.wharton_credentials import WhartonCredentialConfigError
 from ui.pages import wharton_dash
+
+
+def test_wharton_build_fingerprint_is_visible_and_auditable(monkeypatch):
+    captions = []
+    monkeypatch.setattr(wharton_dash.st, "caption", captions.append)
+
+    wharton_dash._render_build_fingerprint()
+
+    assert captions == [wharton_dash._build_fingerprint_label()]
+    assert "QuantSim v0.2.0" in captions[0]
+    assert "build 2026-08-16" in captions[0]
+    assert wharton_dash.WHARTON_BUILD_IDENTITY.commit in captions[0]
+    assert wharton_dash.WHARTON_BUILD_IDENTITY.branch in captions[0]
 
 
 def test_wharton_page_refreshes_stale_credential_module(monkeypatch):
@@ -41,6 +55,18 @@ def test_wharton_page_can_start_directly_outside_repository(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_public_login_renders_build_fingerprint_before_authentication():
+    page_path = Path(wharton_dash.__file__).resolve()
+
+    app = AppTest.from_file(str(page_path)).run(timeout=45)
+
+    assert not app.exception
+    captions = [str(item.value) for item in app.caption]
+    assert any("QuantSim v0.2.0" in item for item in captions)
+    assert any("build 2026-08-16" in item for item in captions)
+    assert any(wharton_dash.WHARTON_BUILD_IDENTITY.commit in item for item in captions)
 
 
 def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():

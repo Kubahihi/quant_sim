@@ -78,6 +78,9 @@ jobs:
           --progress-spinner off
           --cache-dir .uv-cache/pip-audit
 
+      - name: Prepare release artifact directory
+        run: mkdir -p build
+
       - name: Generate and validate production SBOM
         run: |
           .venv/bin/python -m pip_audit \
