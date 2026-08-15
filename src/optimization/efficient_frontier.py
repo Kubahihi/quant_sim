@@ -270,34 +270,119 @@ def calculate_efficient_frontier(
     frontier_points: list[dict[str, Any]] = []
     initial_weights = minimum_variance_weights
 
+    # Every interior frontier point has the same quadratic objective and
+    # constraint matrix; only the target-return equality changes.  Preparing
+    # OSQP once lets it reuse its factorization and the previous point as a
+    # warm start instead of asking SLSQP to rebuild the problem for every
+    # target.  Keep the established SLSQP path as a per-point fallback so a
+    # missing optional solver or a numerically difficult endpoint cannot make
+    # the frontier less robust.
+    frontier_solver: Any = None
+    frontier_lower: Optional[np.ndarray] = None
+    frontier_upper: Optional[np.ndarray] = None
+    if len(target_returns) > 2:
+        try:
+            import osqp
+            from scipy import sparse
+
+            lower_bounds = np.asarray([lower for lower, _ in bounds], dtype=float)
+            upper_bounds = np.asarray([upper for _, upper in bounds], dtype=float)
+            constraint_matrix = sparse.vstack(
+                (
+                    sparse.csc_matrix(ones.reshape(1, -1)),
+                    sparse.csc_matrix(mean_returns.reshape(1, -1)),
+                    sparse.eye(n_assets, format="csc"),
+                ),
+                format="csc",
+            )
+            first_target = float(target_returns[1])
+            frontier_lower = np.concatenate(
+                (np.array([1.0, first_target]), lower_bounds)
+            )
+            frontier_upper = np.concatenate(
+                (np.array([1.0, first_target]), upper_bounds)
+            )
+            frontier_solver = osqp.OSQP()
+            frontier_solver.setup(
+                P=sparse.csc_matrix(2.0 * covariance),
+                q=np.zeros(n_assets, dtype=float),
+                A=constraint_matrix,
+                l=frontier_lower,
+                u=frontier_upper,
+                eps_abs=1e-9,
+                eps_rel=1e-9,
+                max_iter=100_000,
+                polishing=True,
+                verbose=False,
+            )
+            frontier_solver.warm_start(x=minimum_variance_weights)
+        except Exception as exc:
+            logger.debug(f"Reusable frontier solver unavailable: {exc}")
+            frontier_solver = None
+
     for index, target_return in enumerate(target_returns):
         if index == 0:
             weights = minimum_variance_weights
         elif index == len(target_returns) - 1:
             weights = maximum_return_weights
         else:
-            target_constraint = {
-                "type": "eq",
-                "fun": lambda values, target=target_return: float(
-                    values @ mean_returns - target
-                ),
-                "jac": lambda _values: mean_returns,
-            }
-            result = minimize(
-                portfolio_variance,
-                initial_weights,
-                jac=portfolio_variance_gradient,
-                method="SLSQP",
-                bounds=bounds,
-                constraints=(fully_invested_constraint, target_constraint),
-                options={"maxiter": 1000, "ftol": 1e-12, "disp": False},
-            )
-            if not result.success:
-                logger.warning(
-                    f"Frontier target {target_return:.6f} failed: {result.message}"
+            weights = None
+            if (
+                frontier_solver is not None
+                and frontier_lower is not None
+                and frontier_upper is not None
+            ):
+                frontier_lower[1] = float(target_return)
+                frontier_upper[1] = float(target_return)
+                try:
+                    frontier_solver.update(l=frontier_lower, u=frontier_upper)
+                    frontier_solver.warm_start(x=initial_weights)
+                    solver_result = frontier_solver.solve(raise_error=False)
+                    if solver_result.info.status_val in {1, 2}:
+                        candidate = validate_weight_solution(
+                            solver_result.x,
+                            bounds,
+                            tolerance=1e-6,
+                        )
+                        if np.isclose(
+                            float(candidate @ mean_returns),
+                            target_return,
+                            atol=1e-6,
+                            rtol=0.0,
+                        ):
+                            weights = candidate
+                except Exception as exc:
+                    logger.debug(
+                        f"Reusable frontier solve failed at {target_return:.6f}: {exc}"
+                    )
+
+            if weights is None:
+                target_constraint = {
+                    "type": "eq",
+                    "fun": lambda values, target=target_return: float(
+                        values @ mean_returns - target
+                    ),
+                    "jac": lambda _values: mean_returns,
+                }
+                result = minimize(
+                    portfolio_variance,
+                    initial_weights,
+                    jac=portfolio_variance_gradient,
+                    method="SLSQP",
+                    bounds=bounds,
+                    constraints=(fully_invested_constraint, target_constraint),
+                    options={"maxiter": 1000, "ftol": 1e-12, "disp": False},
                 )
-                continue
-            weights = validate_weight_solution(result.x, bounds, tolerance=1e-6)
+                if not result.success:
+                    logger.warning(
+                        f"Frontier target {target_return:.6f} failed: {result.message}"
+                    )
+                    continue
+                weights = validate_weight_solution(
+                    result.x,
+                    bounds,
+                    tolerance=1e-6,
+                )
             if not np.isclose(
                 float(weights @ mean_returns), target_return, atol=1e-6, rtol=0.0
             ):
