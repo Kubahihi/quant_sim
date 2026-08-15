@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -12,6 +13,19 @@ from types import SimpleNamespace
 
 from src.auth.wharton_credentials import WhartonCredentialConfigError
 from ui.pages import wharton_dash
+
+
+def test_wharton_page_refreshes_stale_credential_module(monkeypatch):
+    credential_module = importlib.import_module("src.auth.wharton_credentials")
+    existing_config_error = credential_module.WhartonCredentialConfigError
+    monkeypatch.delattr(credential_module, "resolve_wharton_credentials")
+
+    reloaded_page = importlib.reload(wharton_dash)
+
+    assert reloaded_page.resolve_wharton_credentials is (
+        credential_module.resolve_wharton_credentials
+    )
+    assert reloaded_page.WhartonCredentialConfigError is existing_config_error
 
 
 def test_wharton_page_can_start_directly_outside_repository(tmp_path):
