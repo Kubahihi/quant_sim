@@ -17,6 +17,13 @@ from typing import Any, Mapping
 import uuid
 import secrets
 
+# Streamlit Cloud can execute this page as the entrypoint, in which case Python
+# starts with ``ui/pages`` (not the repository root) on its import path.  Make
+# the local packages importable before importing anything from ``src``.
+PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import bcrypt
 import numpy as np
 import pandas as pd
@@ -31,11 +38,6 @@ from src.utils.environment import is_production_environment, resolve_environment
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 
 DB_PATH = Path("data/wharton_production.db")
 UPLOAD_DIR = Path("data/wharton_uploads")
