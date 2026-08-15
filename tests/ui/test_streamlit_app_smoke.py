@@ -6,6 +6,8 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 import pandas as pd
+import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from src.analytics.modular.results import NewsResult, RunRecord, SummaryResult
@@ -129,6 +131,29 @@ def test_streamlit_app_shows_workspace_by_default(monkeypatch):
 
     assert len(at.exception) == 0
     assert any(item.value == "Workspace Hub" for item in at.subheader)
+
+
+def test_streamlit_app_loads_default_portfolio_only_once(monkeypatch):
+    _enable_test_auto_login(monkeypatch)
+    import src.portfolio_tracker.manager
+
+    load_calls: list[tuple[str, object]] = []
+
+    def fake_load_portfolio(name="default", user_id=None):
+        load_calls.append((name, user_id))
+        return {"name": name, "positions": []}
+
+    monkeypatch.setattr(
+        src.portfolio_tracker.manager,
+        "load_portfolio",
+        fake_load_portfolio,
+    )
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=60)
+
+    assert len(at.exception) == 0
+    assert load_calls == [("default", None)]
 
 
 def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
@@ -371,18 +396,41 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert any(item.label == "Reporting currency" for item in at.selectbox)
 
 
-def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("benchmark", "expected_market_data_calls"),
+    [
+        ("AAPL", [("AAPL", "MSFT", "VTI", "GLD", "BND")]),
+        (
+            "SPY",
+            [("AAPL", "MSFT", "VTI", "GLD", "BND"), ("SPY",)],
+        ),
+    ],
+)
+def test_streamlit_app_evaluate_flow_renders_both_export_sections(
+    monkeypatch,
+    tmp_path,
+    benchmark,
+    expected_market_data_calls,
+):
     _enable_test_auto_login(monkeypatch)
+    st.cache_data.clear()
     import src.ai
     import src.analytics
     import src.data.fetchers.yahoo_fetcher
     import src.optimization
     import src.simulation
 
+    market_data_calls: list[tuple[str, ...]] = []
+
+    def fake_fetch_close_prices(self, symbols, start_date, end_date):
+        requested = tuple(symbols)
+        market_data_calls.append(requested)
+        return _sample_prices(list(requested))
+
     monkeypatch.setattr(
         src.data.fetchers.yahoo_fetcher.YahooFetcher,
         "fetch_close_prices",
-        lambda self, symbols, start_date, end_date: _sample_prices(list(symbols)),
+        fake_fetch_close_prices,
     )
     monkeypatch.setattr(
         src.ai,
@@ -457,10 +505,12 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(monkeypatch, t
     at.session_state["dashboard_visible_pages_selector"] = ["overview", "reports"]
     at.run(timeout=60)
 
+    next(item for item in at.text_input if item.label == "Benchmark").set_value(benchmark)
     next(button for button in at.button if button.label == "Evaluate Portfolio").click()
     at.run(timeout=60)
 
     assert len(at.exception) == 0
+    assert market_data_calls == expected_market_data_calls
     markdown_values = [item.value for item in at.markdown]
     assert "### Quick Exports" in markdown_values
     warning_values = [item.value for item in at.warning]

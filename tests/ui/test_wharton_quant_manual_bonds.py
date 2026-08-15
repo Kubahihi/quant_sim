@@ -182,7 +182,111 @@ def test_quant_run_combines_market_asset_and_manual_individual_bond(monkeypatch)
     assert enriched["runtime"]["research_stack_seconds"] >= 0.0
 
     simulated = wharton_dash._run_quant_simulations(enriched)
-    assert simulated["price_paths"].shape == (31, 200)
-    assert simulated["adv_price_paths"].shape == (31, 200)
+    assert simulated["price_paths"] is None
+    assert simulated["adv_price_paths"] is None
+    assert simulated["simulation_artifacts"]["sample_paths"].shape == (31, 50)
+    assert simulated["advanced_simulation_artifacts"]["sample_paths"].shape == (31, 50)
+    assert simulated["simulation_artifacts"]["terminal_values"].shape == (200,)
+    assert simulated["advanced_simulation_artifacts"]["terminal_values"].shape == (200,)
+    assert wharton_dash._simulations_ready(simulated) is True
     assert simulated["simulation_stats"]["random_seed"] == 42
     assert simulated["runtime"]["simulation_seconds"] >= 0.0
+
+
+def test_compact_simulation_artifacts_preserve_displayed_distribution() -> None:
+    paths = np.random.default_rng(818).lognormal(size=(91, 1_000))
+
+    artifacts = wharton_dash._compact_simulation_paths(paths)
+
+    assert artifacts["path_count"] == 1_000
+    assert artifacts["period_count"] == 90
+    assert artifacts["sample_paths"].shape == (91, 50)
+    assert np.array_equal(artifacts["terminal_values"], paths[-1])
+    for percentile in wharton_dash._SIMULATION_DISPLAY_PERCENTILES:
+        assert np.array_equal(
+            artifacts["percentile_paths"][f"p{percentile}"],
+            np.percentile(paths, percentile, axis=1),
+        )
+
+    compact_bytes = (
+        artifacts["terminal_values"].nbytes
+        + artifacts["sample_paths"].nbytes
+        + sum(values.nbytes for values in artifacts["percentile_paths"].values())
+    )
+    assert compact_bytes < paths.nbytes * 0.10
+
+
+def test_legacy_simulation_matrix_is_compacted_and_released() -> None:
+    paths = np.random.default_rng(17).lognormal(size=(21, 100))
+    result = {"price_paths": paths, "simulation_artifacts": None}
+
+    artifacts = wharton_dash._simulation_artifacts(result)
+
+    assert artifacts is result["simulation_artifacts"]
+    assert result["price_paths"] is None
+    assert np.array_equal(artifacts["terminal_values"], paths[-1])
+
+
+def test_compact_artifacts_render_in_baseline_and_advanced_views(monkeypatch) -> None:
+    class MetricColumn:
+        def metric(self, *_args, **_kwargs):
+            return None
+
+    class StreamlitStub:
+        def __init__(self):
+            self.plotly_calls = 0
+            self.warnings: list[str] = []
+
+        def columns(self, count):
+            return [MetricColumn() for _ in range(count)]
+
+        def markdown(self, *_args, **_kwargs):
+            return None
+
+        def plotly_chart(self, *_args, **_kwargs):
+            self.plotly_calls += 1
+
+        def line_chart(self, *_args, **_kwargs):
+            return None
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def warning(self, message, **_kwargs):
+            self.warnings.append(str(message))
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+    paths = np.random.default_rng(27).lognormal(size=(31, 200)) * 100_000.0
+    artifacts = wharton_dash._compact_simulation_paths(paths)
+    terminal = paths[-1]
+    stats = {
+        "mean": float(np.mean(terminal)),
+        "median": float(np.median(terminal)),
+        "std": float(np.std(terminal)),
+        "percentile_5": float(np.percentile(terminal, 5)),
+        "percentile_95": float(np.percentile(terminal, 95)),
+    }
+    result = {
+        "inputs": {
+            "current_value": 100_000.0,
+            "n_simulations": 200,
+            "simulation_days": 30,
+            "random_seed": 27,
+        },
+        "simulation_stats": stats,
+        "adv_simulation_stats": stats,
+        "simulation_artifacts": artifacts,
+        "advanced_simulation_artifacts": artifacts,
+        "price_paths": None,
+        "adv_price_paths": None,
+    }
+    streamlit_stub = StreamlitStub()
+    monkeypatch.setattr(wharton_dash, "st", streamlit_stub)
+
+    wharton_dash._render_monte_carlo(result)
+    wharton_dash._render_advanced_monte_carlo(result)
+
+    assert streamlit_stub.plotly_calls == 6
+    assert streamlit_stub.warnings == []

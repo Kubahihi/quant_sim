@@ -887,7 +887,11 @@ def _compute_analysis(
     benchmark_symbol = (benchmark_ticker or "").strip().upper()
     benchmark_returns = pd.Series(dtype=float)
     if benchmark_symbol:
-        benchmark_prices = fetch_market_data_cached((benchmark_symbol,), start_date, end_date)
+        benchmark_prices = (
+            aligned_prices[[benchmark_symbol]]
+            if benchmark_symbol in aligned_prices.columns
+            else fetch_market_data_cached((benchmark_symbol,), start_date, end_date)
+        )
         if benchmark_symbol in benchmark_prices.columns:
             benchmark_returns = benchmark_prices[benchmark_symbol].pct_change().dropna()
 
@@ -1866,7 +1870,10 @@ def _render_screener_bulk_actions(
             use_container_width=True,
         )
         if add_clicked and not selected_rows.empty:
-            portfolio = dict(st.session_state.get("current_portfolio", load_portfolio("default")))
+            current_portfolio = st.session_state.get("current_portfolio")
+            if current_portfolio is None:
+                current_portfolio = load_portfolio("default")
+            portfolio = dict(current_portfolio)
             for _, row in selected_rows.iterrows():
                 ticker = str(row.get("Ticker", "")).strip().upper()
                 if not ticker:
@@ -2516,7 +2523,9 @@ def _render_portfolio_tracker_tab() -> None:
             _invalidate_portfolio_live_snapshot()
             st.success(f"Position for {new_ticker} was added/updated.")
 
-    portfolio = st.session_state.get("current_portfolio", load_portfolio("default", user_id=user_id))
+    portfolio = st.session_state.get("current_portfolio")
+    if portfolio is None:
+        portfolio = load_portfolio("default", user_id=user_id)
     positions_df = _portfolio_positions_dataframe(portfolio)
 
     st.markdown("### Holdings")

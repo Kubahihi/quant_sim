@@ -134,8 +134,9 @@ def sample_portfolio_cloud(
     if max_weight is not None:
         weights = _project_to_capped_simplex(weights, float(max_weight))
     portfolio_returns = weights @ estimates.mean_returns
+    weighted_covariance = weights @ estimates.covariance
     portfolio_variance = np.einsum(
-        "ij,jk,ik->i", weights, estimates.covariance, weights
+        "ij,ij->i", weighted_covariance, weights, optimize=True
     )
     portfolio_volatility = np.sqrt(
         np.clip(portfolio_variance, a_min=0.0, a_max=None)
