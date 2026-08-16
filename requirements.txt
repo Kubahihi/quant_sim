@@ -6,7 +6,7 @@ annotated-types==0.8.0
     # via pydantic
 anyio==4.14.2
     # via
-    #   httpx
+    #   httpx2
     #   openai
     #   starlette
     #   streamlit
@@ -33,8 +33,6 @@ botocore==1.43.67
 certifi==2026.7.22
     # via
     #   curl-cffi
-    #   httpcore
-    #   httpx
     #   requests
 cffi==2.1.1
     # via
@@ -49,11 +47,6 @@ click==8.4.2
     #   flask
     #   streamlit
     #   uvicorn
-colorama==0.4.6 ; sys_platform == 'win32'
-    # via
-    #   click
-    #   loguru
-    #   tqdm
 contourpy==1.3.3
     # via matplotlib
 curl-cffi==0.16.0
@@ -72,20 +65,20 @@ fonttools==4.63.0
     # via matplotlib
 h11==0.16.0
     # via
-    #   httpcore
+    #   httpcore2
     #   uvicorn
 highspy==1.15.1
     # via cvxpy
-httpcore==1.0.9
-    # via httpx
+httpcore2==2.10.0
+    # via httpx2
 httptools==0.8.0
     # via streamlit
-httpx==0.28.1
+httpx2==2.10.0
     # via openai
 idna==3.18
     # via
     #   anyio
-    #   httpx
+    #   httpx2
     #   requests
 itsdangerous==2.2.0
     # via
@@ -153,7 +146,7 @@ numpy==2.5.1
     #   statsmodels
     #   streamlit
     #   yfinance
-openai==2.53.0
+openai==3.0.0
     # via -r requirements.in
 osqp==1.1.3
     # via cvxpy
@@ -191,7 +184,7 @@ protobuf==7.35.1
     #   yfinance
 pyarrow==24.0.0
     # via streamlit
-pycparser==3.0 ; implementation_name != 'PyPy'
+pycparser==3.0
     # via cffi
 pydantic==2.13.4
     # via openai
@@ -247,8 +240,6 @@ scs==3.2.11
     # via cvxpy
 seaborn==0.13.2
     # via -r requirements.in
-setuptools==84.0.0
-    # via osqp
 six==1.17.0
     # via python-dateutil
 sniffio==1.3.1
@@ -275,11 +266,16 @@ toml==0.10.2
     # via streamlit
 tqdm==4.70.0
     # via openai
+truststore==0.10.4
+    # via
+    #   httpcore2
+    #   httpx2
 typing-extensions==4.16.0
     # via
     #   altair
     #   anyio
     #   beautifulsoup4
+    #   httpx2
     #   openai
     #   pydantic
     #   pydantic-core
@@ -289,8 +285,6 @@ typing-extensions==4.16.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via pydantic
-tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
-    # via pandas
 urllib3==2.7.0
     # via
     #   botocore
@@ -299,7 +293,7 @@ uvicorn==0.52.1
     # via streamlit
 vadersentiment==3.3.2
     # via -r requirements.in
-watchdog==6.0.0 ; sys_platform != 'darwin'
+watchdog==6.0.0
     # via streamlit
 websockets==16.1.1
     # via
@@ -307,7 +301,5 @@ websockets==16.1.1
     #   yfinance
 werkzeug==3.1.8
     # via flask
-win32-setctime==1.2.0 ; sys_platform == 'win32'
-    # via loguru
 yfinance==1.5.2
     # via -r requirements.in
