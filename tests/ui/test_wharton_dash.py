@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -48,6 +49,66 @@ def test_wharton_page_can_start_directly_outside_repository(tmp_path):
     completed = subprocess.run(
         [sys.executable, str(page_path)],
         cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_wharton_page_replaces_preloaded_non_local_src_package(tmp_path):
+    page_path = Path(wharton_dash.__file__).resolve()
+    project_root = page_path.parents[2]
+    fake_src = tmp_path / "src"
+    fake_src.mkdir()
+    (fake_src / "__init__.py").write_text(
+        '"""Unrelated package that happens to be named src."""\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    python_path = [str(tmp_path), str(project_root)]
+    if existing_python_path := environment.get("PYTHONPATH"):
+        python_path.append(existing_python_path)
+    environment["PYTHONPATH"] = os.pathsep.join(python_path)
+    command = (
+        "import runpy, src; "
+        f"assert src.__file__.startswith({str(fake_src)!r}); "
+        f"runpy.run_path({str(page_path)!r}, run_name='__main__')"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_wharton_page_refreshes_stale_local_src_metadata(tmp_path):
+    page_path = Path(wharton_dash.__file__).resolve()
+    project_root = page_path.parents[2]
+    environment = os.environ.copy()
+    python_path = [str(project_root)]
+    if existing_python_path := environment.get("PYTHONPATH"):
+        python_path.append(existing_python_path)
+    environment["PYTHONPATH"] = os.pathsep.join(python_path)
+    command = (
+        "import runpy, src; "
+        "del src.__build_date__; "
+        f"runpy.run_path({str(page_path)!r}, run_name='__main__')"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=tmp_path,
+        env=environment,
         capture_output=True,
         text=True,
         timeout=30,
