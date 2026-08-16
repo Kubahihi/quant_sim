@@ -21,15 +21,43 @@ import secrets
 # starts with ``ui/pages`` (not the repository root) on its import path.  Make
 # the local packages importable before importing anything from ``src``.
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+if PROJECT_ROOT in sys.path:
+    sys.path.remove(PROJECT_ROOT)
+sys.path.insert(0, PROJECT_ROOT)
+
+# A dependency can expose a top-level package called ``src``.  Streamlit also
+# keeps imported modules alive across reruns, including during rolling Cloud
+# deployments.  Discard only non-local ``src`` modules before importing ours.
+_PROJECT_ROOT_PATH = Path(PROJECT_ROOT)
+for module_name, module_obj in list(sys.modules.items()):
+    if module_name != "src" and not module_name.startswith("src."):
+        continue
+    module_file = getattr(module_obj, "__file__", None)
+    if module_file is None:
+        sys.modules.pop(module_name, None)
+        continue
+    try:
+        Path(module_file).resolve().relative_to(_PROJECT_ROOT_PATH / "src")
+    except ValueError:
+        sys.modules.pop(module_name, None)
 
 import bcrypt
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src import __build_date__, __version__
+import src as _src
+
+# A Streamlit rerun may still hold the local package object from the preceding
+# deployment. Refresh it once when the newly added build metadata is absent.
+if not all(hasattr(_src, name) for name in ("__build_date__", "__version__")):
+    importlib.invalidate_caches()
+    _src = importlib.reload(_src)
+
+# Build metadata is informational and must never prevent the application from
+# starting if a deployment briefly contains mixed revisions.
+__build_date__ = getattr(_src, "__build_date__", "unknown")
+__version__ = getattr(_src, "__version__", "unknown")
 from src.auth import wharton_credentials as _wharton_credentials
 from src.utils.environment import is_production_environment, resolve_environment
 from ui.runtime_diagnostics import resolve_build_identity
