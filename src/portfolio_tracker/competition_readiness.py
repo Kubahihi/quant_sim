@@ -146,6 +146,16 @@ def build_competition_readiness(
             or _present(item.get("sign_offs"))
         )
     ]
+    canonical_position_reviews = [
+        review
+        for case in investment_cases
+        for review in (
+            case.get("position_reviews")
+            if isinstance(case.get("position_reviews"), Sequence)
+            else []
+        )
+        if isinstance(review, Mapping)
+    ]
     reconciliation_data = dict(reconciliation or {})
     reconciliation_clean = (
         str(reconciliation_data.get("status") or "").lower() in {"clean", "reconciled"}
@@ -174,8 +184,16 @@ def build_competition_readiness(
         and bool(rules_data.get("all_acknowledged") or rules_data.get("acknowledged_by"))
     )
     governance_checks = [
-        ("decisions", "Decision journal is populated", bool(decisions)),
-        ("reviews", "Theses or decisions have append-only reviews", bool(thesis_reviews or decision_reviews)),
+        (
+            "decisions",
+            "Canonical Investment Committee lifecycle is populated",
+            bool(investment_cases),
+        ),
+        (
+            "reviews",
+            "Theses or canonical positions have append-only reviews",
+            bool(thesis_reviews or canonical_position_reviews),
+        ),
         ("red_team", "Independent red-team challenge is recorded", bool(red_team_reviews)),
         (
             "investment_committee",

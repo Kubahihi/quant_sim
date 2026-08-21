@@ -57,7 +57,7 @@ def calculate_sortino_ratio(
 def calculate_max_drawdown(returns: pd.Series) -> float:
     """Calculate maximum drawdown"""
     cumulative = (1 + returns).cumprod()
-    running_max = cumulative.expanding().max()
+    running_max = cumulative.cummax()
     drawdown = (cumulative - running_max) / running_max
     
     return float(drawdown.min())
@@ -122,7 +122,7 @@ def calculate_parametric_cvar(
 def calculate_drawdown_series(returns: pd.Series) -> pd.Series:
     """Calculate drawdown series over time"""
     cumulative = (1 + returns).cumprod()
-    running_max = cumulative.expanding().max()
+    running_max = cumulative.cummax()
     drawdown = (cumulative - running_max) / running_max
     return drawdown
 

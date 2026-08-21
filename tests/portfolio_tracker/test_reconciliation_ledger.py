@@ -23,7 +23,12 @@ from src.portfolio_tracker.reconciliation_ledger import (
 NOW = "2026-08-15T12:00:00Z"
 
 
-def _wins_snapshot(*, observed_at: str = "2026-08-15T11:30:00Z", quantity: float = 10):
+def _wins_snapshot(
+    *,
+    observed_at: str = "2026-08-15T11:30:00Z",
+    quantity: float = 10,
+    cash_value: float = 0.0,
+):
     return create_portfolio_snapshot(
         [
             {
@@ -39,6 +44,7 @@ def _wins_snapshot(*, observed_at: str = "2026-08-15T11:30:00Z", quantity: float
         received_at=NOW,
         source_reference="WInS account export",
         expected_tickers=("AAA",),
+        cash_value=cash_value,
     )
 
 
@@ -52,6 +58,18 @@ def _tracked(*, quantity: float = 10):
             "security_type": "Equity",
         }
     ]
+
+
+def _tracked_snapshot(*, cash_value: float) -> dict:
+    return create_portfolio_snapshot(
+        _tracked(),
+        provider="Portfolio Tracker",
+        observed_at=NOW,
+        received_at=NOW,
+        source_reference="competition_positions",
+        expected_tickers=("AAA",),
+        cash_value=cash_value,
+    )
 
 
 def test_clean_reconciliation_needs_independent_signoff_before_readiness():
@@ -102,6 +120,110 @@ def test_clean_reconciliation_needs_independent_signoff_before_readiness():
     assert gate["ready"] is True
     assert gate["signed_off_by"] == "Jakub"
     json.dumps(ledger, allow_nan=False)
+
+
+def test_cash_mismatch_blocks_clean_reconciliation_even_when_positions_match():
+    wins = _wins_snapshot(cash_value=100.0)
+    tracked = _tracked_snapshot(cash_value=80.0)
+    ledger = append_reconciliation(
+        new_reconciliation_ledger(),
+        wins,
+        tracked,
+        owner="Lukas",
+        performed_at=NOW,
+        cash_tolerance=0.01,
+    )
+
+    record = latest_reconciliation(ledger)
+    comparison = record["result"]["cash_comparison"]
+    assert record["result"]["position_status"] == "reconciled"
+    assert comparison == {
+        "status": "difference",
+        "is_match": False,
+        "amount_match": False,
+        "currency_match": True,
+        "difference": pytest.approx(20.0),
+        "tolerance": pytest.approx(0.01),
+        "wins": {
+            "value_present": True,
+            "value": pytest.approx(100.0),
+            "currency": "USD",
+            "value_source": "payload.cash_value",
+            "currency_source": "payload.base_currency",
+        },
+        "tracked": {
+            "value_present": True,
+            "value": pytest.approx(80.0),
+            "currency": "USD",
+            "value_source": "payload.cash_value",
+            "currency_source": "payload.base_currency",
+        },
+        "reason": "cash_balance_mismatch",
+    }
+    assert record["base_status"] == "differences"
+    assert record["base_is_clean"] is False
+    assert [item["category"] for item in record["exceptions"]] == ["cash_mismatch"]
+
+    gate = reconciliation_readiness_gate(ledger, now=NOW)
+    assert gate["ready"] is False
+    assert "snapshot_has_differences" in gate["blockers"]
+    assert "open_exceptions" in gate["blockers"]
+
+
+def test_cash_within_tolerance_can_be_signed_and_report_ready():
+    wins = _wins_snapshot(cash_value=100.0)
+    ledger = append_reconciliation(
+        new_reconciliation_ledger(),
+        wins,
+        _tracked_snapshot(cash_value=99.995),
+        owner="Lukas",
+        performed_at=NOW,
+        cash_tolerance=0.01,
+    )
+    record = latest_reconciliation(ledger)
+
+    assert record["result"]["cash_comparison"]["status"] == "matched"
+    assert record["result"]["cash_comparison"]["difference"] == pytest.approx(0.005)
+    assert record["base_is_clean"] is True
+    assert record["exceptions"] == []
+
+    ledger = sign_off_reconciliation(
+        ledger,
+        record["reconciliation_id"],
+        decision="approved",
+        signed_off_by="Jakub",
+        signed_off_at=NOW,
+    )
+    assert reconciliation_readiness_gate(
+        ledger,
+        now=NOW,
+        expected_wins_snapshot_id=wins["snapshot_id"],
+    )["ready"] is True
+
+
+def test_materialization_does_not_backfill_cash_into_legacy_records():
+    ledger = append_reconciliation(
+        new_reconciliation_ledger(),
+        _wins_snapshot(),
+        _tracked(),
+        owner="Lukas",
+        performed_at=NOW,
+    )
+    legacy = deepcopy(ledger)
+    stored = legacy["reconciliations"][0]
+    stored["result"].pop("cash_comparison")
+    stored["result"].pop("position_status")
+    stored["result"]["summary"].pop("cash_status")
+    stored["result"]["summary"].pop("position_status")
+    stored["tolerances"].pop("cash")
+    before = deepcopy(legacy)
+
+    materialized = materialize_reconciliation(legacy, stored["reconciliation_id"])
+
+    assert legacy == before
+    assert "cash_comparison" not in materialized["result"]
+    assert "cash" not in materialized["tolerances"]
+    assert materialized["base_is_clean"] is True
 
 
 def test_dirty_snapshot_creates_owned_exception_resolution_and_signoff_audit():

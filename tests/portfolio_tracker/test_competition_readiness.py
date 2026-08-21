@@ -76,6 +76,34 @@ def test_readiness_exposes_gaps_and_generates_defensible_brief():
     assert "team must verify every claim" in brief
 
 
+def test_legacy_decisions_cannot_satisfy_canonical_governance_gates():
+    readiness = build_competition_readiness(
+        mandate=MANDATE,
+        strategy=STRATEGY,
+        theses=[THESIS],
+        decisions=[{"ticker": "ABC", "action": "Buy"}],
+        decision_reviews=[{"decision_id": 1}],
+    )
+
+    completed = {item["key"] for item in readiness["governance"]["completed"]}
+    assert "decisions" not in completed
+    assert "reviews" not in completed
+
+    canonical = build_competition_readiness(
+        mandate=MANDATE,
+        strategy=STRATEGY,
+        theses=[THESIS],
+        investment_cases=[{
+            "state": "active",
+            "position_reviews": [{"id": 9, "outcome": "confirmed"}],
+        }],
+    )
+    canonical_completed = {
+        item["key"] for item in canonical["governance"]["completed"]
+    }
+    assert {"decisions", "reviews"} <= canonical_completed
+
+
 def test_pitch_ready_is_gated_by_committee_reconciliation_and_frozen_report():
     source = {"ticker": "ABC", "title": "10-K", "primary_source": True}
     catalyst = {"ticker": "ABC", "title": "Investor day"}

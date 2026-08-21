@@ -1734,6 +1734,7 @@ def record_wins_execution(
     *,
     recorded_by: str,
     now: datetime | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """Record the actual WInS transaction linked to the approved proposal."""
 
@@ -1814,35 +1815,417 @@ def record_wins_execution(
         },
         timestamp=timestamp,
     )
-    commit_and_sync(connection)
+    if commit:
+        commit_and_sync(connection)
     record = get_investment_lifecycle(connection, identifier)
     if record is None:
         raise RuntimeError("The lifecycle could not be read after WInS execution.")
     return record
 
 
+_CANONICAL_PIPELINE_SOURCE = "portfolio_pipeline/competition"
+
+
+def _tracker_position_rows(connection: Any) -> list[dict[str, Any]]:
+    """Rebuild the exact tracker input used by the canonical reconciliation ledger."""
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, ticker, quantity, entry_price, last_price, security_type,
+                   currency, status, lifecycle_id, entry_date
+            FROM competition_positions
+            WHERE lower(COALESCE(status, 'open')) IN ('open', 'pending_reconciliation')
+            ORDER BY entry_date, id
+            """
+        ).fetchall()
+    except Exception as exc:
+        raise ValueError(
+            "The canonical tracker projection is unavailable; stage the pending position first."
+        ) from exc
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            quantity = float(row_value(row, "quantity", 2) or 0.0)
+            entry_price = float(row_value(row, "entry_price", 3) or 0.0)
+            price = float(row_value(row, "last_price", 4) or entry_price or 0.0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("The canonical tracker projection contains invalid numeric data.") from exc
+        currency = str(row_value(row, "currency", 6) or "").strip().upper() or None
+        result.append(
+            {
+                "ticker": str(row_value(row, "ticker", 1) or "").strip().upper(),
+                "quantity": quantity,
+                "current_price": price,
+                "market_value": quantity * price,
+                "total_cost": quantity * entry_price,
+                "asset_type": str(row_value(row, "security_type", 5) or "Unknown"),
+                "currency": currency,
+            }
+        )
+    return result
+
+
+def _current_tracker_cash(connection: Any) -> float:
+    """Rebuild competition cash from the complete tracker transaction history."""
+    from src.portfolio_tracker.wharton_competition import calculate_portfolio_performance
+
+    try:
+        rows = connection.execute(
+            "SELECT * FROM competition_positions ORDER BY entry_date, id"
+        ).fetchall()
+        positions = [dict(row) for row in rows]
+    except Exception as exc:
+        raise ValueError(
+            "The tracker cash balance cannot be rebuilt from competition positions."
+        ) from exc
+    performance = calculate_portfolio_performance(positions, live_prices={})
+    return float(
+        performance["cash_before_pnl"]
+        + performance["realized_pnl"]
+        + performance["open_cash_income"]
+    )
+
+
+def _pending_tracker_position(
+    connection: Any,
+    lifecycle_id: int,
+    *,
+    lifecycle: Mapping[str, Any],
+    execution: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, ticker, quantity, currency, status, lifecycle_id
+            FROM competition_positions
+            WHERE lifecycle_id = ? AND lower(COALESCE(status, '')) = 'pending_reconciliation'
+            ORDER BY id
+            """,
+            (lifecycle_id,),
+        ).fetchall()
+    except Exception as exc:
+        raise ValueError(
+            "The canonical tracker projection is unavailable; stage the pending position first."
+        ) from exc
+    if len(rows) != 1:
+        raise ValueError(
+            "Exactly one pending tracker position must be linked to this investment lifecycle."
+        )
+    row = rows[0]
+    position_id = positive_int(row_value(row, "id", 0), "Tracker position id")
+    expected_ticker = str(lifecycle.get("ticker") or "").strip().upper()
+    actual_ticker = str(row_value(row, "ticker", 1) or "").strip().upper()
+    if actual_ticker != expected_ticker:
+        raise ValueError("The pending tracker ticker does not match the investment lifecycle.")
+    try:
+        pending_quantity = float(row_value(row, "quantity", 2))
+        executed_quantity = float(execution["quantity"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The pending tracker position has no valid quantity.") from exc
+    if abs(pending_quantity - executed_quantity) > 1e-8:
+        raise ValueError("The pending tracker quantity does not match the WInS execution.")
+    pending_currency = str(row_value(row, "currency", 3) or "").strip().upper()
+    execution_currency = str(execution.get("currency") or "").strip().upper()
+    if pending_currency != execution_currency:
+        raise ValueError("The pending tracker currency does not match the WInS execution.")
+    return {
+        "position_id": position_id,
+        "ticker": actual_ticker,
+        "quantity": pending_quantity,
+        "currency": pending_currency,
+    }
+
+
+def _canonical_clean_reconciliation(
+    connection: Any,
+    lifecycle_id: int,
+    *,
+    now: datetime | None,
+    max_age_seconds: float = 86_400,
+) -> dict[str, Any]:
+    """Derive lifecycle activation exclusively from the persisted canonical pipeline."""
+
+    # Local imports keep the domain stores independently initialisable and avoid
+    # coupling module import order to the portfolio pipeline.
+    from src.data.reliability import assess_snapshot, verify_snapshot_integrity
+    from src.portfolio_tracker.operating_system_store import get_current_record
+    from src.portfolio_tracker.portfolio_pipeline import build_live_portfolio_pipeline
+    from src.portfolio_tracker.reconciliation_ledger import latest_reconciliation
+    from src.portfolio_tracker.wins_reconciliation import reconcile_wins_positions
+
+    lifecycle = _base_record(_lifecycle_row(connection, lifecycle_id))
+    execution_record = _execution_record(connection, lifecycle_id)
+    if lifecycle is None or execution_record is None:
+        raise ValueError("The lifecycle execution cannot be resolved.")
+    execution = execution_record.get("execution")
+    if not isinstance(execution, Mapping):
+        raise ValueError("The lifecycle execution is corrupt.")
+    pending = _pending_tracker_position(
+        connection,
+        lifecycle_id,
+        lifecycle=lifecycle,
+        execution=execution,
+    )
+
+    persisted = get_current_record(
+        connection,
+        "portfolio_pipeline",
+        "competition",
+    )
+    if persisted is None or persisted.get("status") != "active":
+        raise ValueError("The persisted canonical portfolio pipeline is unavailable.")
+    workspace = persisted.get("payload")
+    if not isinstance(workspace, Mapping):
+        raise ValueError("The persisted canonical portfolio pipeline is corrupt.")
+    if canonical_hash(dict(workspace)) != str(persisted.get("payload_hash") or ""):
+        raise ValueError("The persisted canonical portfolio pipeline failed its integrity check.")
+    snapshots = workspace.get("snapshots")
+    ledger = workspace.get("ledger")
+    if not isinstance(snapshots, list) or not isinstance(ledger, Mapping):
+        raise ValueError("The persisted canonical portfolio pipeline is incomplete.")
+
+    active_context = {"status": "active", "active": True}
+    pipeline = build_live_portfolio_pipeline(
+        snapshots,
+        ledger,
+        mandate=active_context,
+        rulebook=active_context,
+        expected_return_assumptions=active_context,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        min_completeness_pct=100.0,
+    )
+    gate = pipeline.get("reconciliation_gate")
+    canonical_snapshot = pipeline.get("canonical_snapshot")
+    if not isinstance(gate, Mapping) or not isinstance(canonical_snapshot, Mapping):
+        raise ValueError("The canonical WInS reconciliation is unavailable.")
+    if pipeline.get("authority") != "wins_reconciled" or gate.get("ready") is not True:
+        blockers = ", ".join(str(item) for item in gate.get("blockers", []))
+        detail = blockers or "no signed clean reconciliation"
+        raise ValueError(f"Lifecycle activation is blocked by the canonical ledger: {detail}.")
+
+    snapshot_id = str(canonical_snapshot.get("snapshot_id") or "")
+    if (
+        not snapshot_id
+        or snapshot_id != str(gate.get("wins_snapshot_id") or "")
+        or snapshot_id != str(pipeline.get("latest_wins_snapshot_id") or "")
+    ):
+        raise ValueError("Only the latest reconciled WInS snapshot can activate a lifecycle.")
+    if not verify_snapshot_integrity(canonical_snapshot):
+        raise ValueError("The canonical WInS snapshot failed its integrity check.")
+    assessment = assess_snapshot(
+        canonical_snapshot,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        min_completeness_pct=100.0,
+    )
+    if not assessment["is_fresh"]:
+        raise ValueError("The canonical WInS snapshot is stale or has an invalid timestamp.")
+    if not assessment["complete_enough"]:
+        raise ValueError("The canonical WInS snapshot is incomplete.")
+
+    current = latest_reconciliation(ledger)
+    if current is None or str(current.get("reconciliation_id") or "") != str(
+        gate.get("latest_reconciliation_id") or ""
+    ):
+        raise ValueError("The canonical reconciliation record cannot be resolved.")
+    sign_off = current.get("sign_off")
+    if not isinstance(sign_off, Mapping) or sign_off.get("decision") != "approved":
+        raise ValueError("The canonical reconciliation requires approval.")
+    if str(sign_off.get("signed_off_by") or "").strip().casefold() == str(
+        current.get("owner") or ""
+    ).strip().casefold():
+        raise ValueError("The canonical reconciliation requires an independent approval.")
+    if (
+        current.get("base_is_clean") is not True
+        or current.get("all_exceptions_closed") is not True
+        or current.get("exceptions")
+        or int(current.get("open_exception_count") or 0)
+    ):
+        raise ValueError("Only a clean reconciliation without exceptions can activate a lifecycle.")
+    reconciliation_result = current.get("result")
+    cash_comparison = (
+        reconciliation_result.get("cash_comparison")
+        if isinstance(reconciliation_result, Mapping)
+        else None
+    )
+    if not isinstance(cash_comparison, Mapping) or cash_comparison.get("status") != "matched":
+        raise ValueError(
+            "Lifecycle activation requires a new cash-aware canonical reconciliation."
+        )
+
+    tracked_snapshot_id = str(current.get("tracked_snapshot_id") or "")
+    tracked_snapshots = [
+        item
+        for item in snapshots
+        if isinstance(item, Mapping)
+        and str(item.get("snapshot_id") or "") == tracked_snapshot_id
+    ]
+    if len(tracked_snapshots) != 1:
+        raise ValueError(
+            "The exact tracker snapshot used for reconciliation is not persisted."
+        )
+    tracked_snapshot = tracked_snapshots[0]
+    if not verify_snapshot_integrity(tracked_snapshot):
+        raise ValueError("The reconciled tracker snapshot failed its integrity check.")
+    tracked_source = (
+        tracked_snapshot.get("source")
+        if isinstance(tracked_snapshot.get("source"), Mapping)
+        else {}
+    )
+    tracked_provider = str(tracked_source.get("provider") or "").strip().casefold()
+    tracked_reference = str(tracked_source.get("reference") or "").strip().casefold()
+    if "tracker" not in tracked_provider and "competition_positions" not in tracked_reference:
+        raise ValueError("The reconciled tracked snapshot is not a Portfolio Tracker snapshot.")
+    tracked_assessment = assess_snapshot(
+        tracked_snapshot,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        min_completeness_pct=100.0,
+    )
+    if not tracked_assessment["complete_enough"]:
+        raise ValueError("The reconciled tracker snapshot is incomplete.")
+    tracked_payload = tracked_snapshot.get("payload")
+    tracked_positions = (
+        tracked_payload.get("positions") if isinstance(tracked_payload, Mapping) else None
+    )
+    if not isinstance(tracked_positions, list):
+        raise ValueError("The reconciled tracker snapshot has no position list.")
+    tracker_cash = tracked_payload.get("cash_value")
+    try:
+        frozen_tracker_cash = float(tracker_cash)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The reconciled tracker snapshot has no valid cash balance.") from exc
+    tolerances = current.get("tolerances")
+    if not isinstance(tolerances, Mapping):
+        tolerances = {}
+    cash_tolerance = float(tolerances.get("cash") or tolerances.get("currency") or 0.01)
+    if abs(_current_tracker_cash(connection) - frozen_tracker_cash) > cash_tolerance:
+        raise ValueError(
+            "The current tracker cash differs from the snapshot used for reconciliation."
+        )
+    tracker_rows = _tracker_position_rows(connection)
+    lifecycle_ticker = str(lifecycle.get("ticker") or "").strip().upper()
+    tracked_ticker_positions = [
+        item
+        for item in tracked_positions
+        if isinstance(item, Mapping)
+        and str(item.get("ticker") or "").strip().upper() == lifecycle_ticker
+    ]
+    current_ticker_rows = [
+        item for item in tracker_rows if item.get("ticker") == lifecycle_ticker
+    ]
+    if len(tracked_ticker_positions) != 1 or len(current_ticker_rows) < 1:
+        raise ValueError("The reconciled tracker snapshot does not contain the lifecycle ticker.")
+    try:
+        source_lot_count = int(tracked_ticker_positions[0].get("source_lot_count"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The reconciled tracker snapshot has no valid lot membership.") from exc
+    if source_lot_count != len(current_ticker_rows):
+        raise ValueError("The reconciled tracker lot membership no longer matches the tracker.")
+    tracker_comparison = reconcile_wins_positions(
+        tracked_positions,
+        tracker_rows,
+        quantity_tolerance=float(tolerances.get("quantity") or 1e-8),
+        currency_tolerance=float(tolerances.get("currency") or 0.01),
+    )
+    if tracker_comparison.get("is_reconciled") is not True:
+        raise ValueError(
+            "The current tracker positions differ from the snapshot used for reconciliation."
+        )
+
+    ticker_value = lifecycle_ticker
+    payload = canonical_snapshot.get("payload")
+    positions = payload.get("positions") if isinstance(payload, Mapping) else None
+    if not isinstance(positions, list):
+        raise ValueError("The canonical WInS snapshot has no position list.")
+    snapshot_matches = [
+        item
+        for item in positions
+        if isinstance(item, Mapping)
+        and str(item.get("ticker") or "").strip().upper() == ticker_value
+    ]
+    matched_rows = (
+        reconciliation_result.get("matched", [])
+        if isinstance(reconciliation_result, Mapping)
+        else []
+    )
+    reconciliation_matches = [
+        item
+        for item in matched_rows
+        if isinstance(item, Mapping)
+        and str(item.get("ticker") or "").strip().upper() == ticker_value
+    ]
+    if len(snapshot_matches) != 1 or len(reconciliation_matches) != 1:
+        raise ValueError(
+            "The latest reconciliation does not contain exactly one aggregate for this ticker."
+        )
+    snapshot_position = snapshot_matches[0]
+    matched = reconciliation_matches[0]
+    wins_match = matched.get("wins") if isinstance(matched.get("wins"), Mapping) else {}
+    tracked_match = (
+        matched.get("tracked") if isinstance(matched.get("tracked"), Mapping) else {}
+    )
+    try:
+        snapshot_quantity = float(snapshot_position.get("quantity"))
+        wins_quantity = float(wins_match.get("quantity"))
+        tracked_quantity = float(tracked_match.get("quantity"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The canonical aggregate has no valid quantity.") from exc
+    if (
+        matched.get("status") != "matched"
+        or abs(snapshot_quantity - wins_quantity) > 1e-8
+        or abs(wins_quantity - tracked_quantity) > 1e-8
+    ):
+        raise ValueError("The canonical WInS and tracker aggregates do not match.")
+    snapshot_currency = str(snapshot_position.get("currency") or "").strip().upper()
+    if snapshot_currency != pending["currency"]:
+        raise ValueError("The canonical WInS currency does not match the lifecycle execution.")
+
+    return {
+        "status": "clean",
+        "wins_snapshot_id": snapshot_id,
+        "canonical_reconciliation_id": str(current["reconciliation_id"]),
+        "canonical_source": _CANONICAL_PIPELINE_SOURCE,
+        "position_id": str(pending["position_id"]),
+        "exceptions": [],
+        "_position_ticker": pending["ticker"],
+        "_position_quantity": pending["quantity"],
+        "_position_currency": pending["currency"],
+    }
+
+
 def record_wins_reconciliation(
     connection: Any,
     lifecycle_id: int,
-    reconciliation: Mapping[str, Any],
+    reconciliation: Mapping[str, Any] | None = None,
     *,
     recorded_by: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Append a reconciliation attempt; only a clean attempt activates position."""
+    """Append an exception or atomically activate from the persisted canonical ledger.
+
+    Passing no reconciliation derives the clean result, snapshot and tracker
+    position from ``portfolio_pipeline/competition``.  A supplied clean mapping
+    remains accepted for compatibility, but every canonical identifier must
+    agree with that persisted source; caller assertions alone never activate a
+    position.
+    """
 
     identifier = positive_int(lifecycle_id, "Lifecycle id")
-    reconciliation_copy, _ = json_object(reconciliation, "WInS reconciliation")
+    _ensure(connection)
+    _require_state(connection, identifier, "reconciliation")
+    supplied = reconciliation is not None
+    if reconciliation is None:
+        reconciliation_copy: dict[str, Any] = {"status": "clean"}
+    else:
+        reconciliation_copy, _ = json_object(reconciliation, "WInS reconciliation")
     status = enum(
         reconciliation_copy.get("status"),
         "Reconciliation status",
         {"clean", "open_exceptions"},
-    )
-    snapshot_id = text(
-        reconciliation_copy.get("wins_snapshot_id"),
-        "WInS snapshot id",
-        required=True,
-        limit=300,
     )
     raw_exceptions = reconciliation_copy.get("exceptions", [])
     exceptions, _ = json_array(raw_exceptions, "Reconciliation exceptions")
@@ -1850,14 +2233,72 @@ def record_wins_reconciliation(
         raise ValueError("A clean reconciliation cannot contain open exceptions.")
     if status == "open_exceptions" and not exceptions:
         raise ValueError("Open-exception reconciliation must describe at least one exception.")
-    position_id = text(
-        reconciliation_copy.get("position_id"),
-        "Position id",
-        required=status == "clean",
-        limit=300,
-    ) or None
+
+    if status == "clean":
+        derived = _canonical_clean_reconciliation(connection, identifier, now=now)
+        activation_ticker = str(derived.pop("_position_ticker"))
+        activation_quantity = float(derived.pop("_position_quantity"))
+        activation_currency = str(derived.pop("_position_currency"))
+        if supplied:
+            supplied_source = text(
+                reconciliation_copy.get("canonical_source"),
+                "Canonical source",
+                required=True,
+                limit=100,
+            )
+            supplied_reconciliation_id = text(
+                reconciliation_copy.get("canonical_reconciliation_id"),
+                "Canonical reconciliation id",
+                required=True,
+                limit=300,
+            )
+            supplied_snapshot_id = text(
+                reconciliation_copy.get("wins_snapshot_id"),
+                "WInS snapshot id",
+                required=True,
+                limit=300,
+            )
+            supplied_position_id = text(
+                reconciliation_copy.get("position_id"),
+                "Position id",
+                required=True,
+                limit=300,
+            )
+            supplied_bindings = {
+                "canonical_source": supplied_source,
+                "canonical_reconciliation_id": supplied_reconciliation_id,
+                "wins_snapshot_id": supplied_snapshot_id,
+                "position_id": supplied_position_id,
+            }
+            expected_bindings = {
+                key: str(derived[key]) for key in supplied_bindings
+            }
+            if supplied_bindings != expected_bindings:
+                raise ValueError(
+                    "Caller-supplied reconciliation bindings do not match the persisted "
+                    "canonical portfolio pipeline."
+                )
+        canonical_reconciliation = {**reconciliation_copy, **derived}
+        snapshot_id = str(derived["wins_snapshot_id"])
+        position_id = str(derived["position_id"])
+    else:
+        snapshot_id = text(
+            reconciliation_copy.get("wins_snapshot_id"),
+            "WInS snapshot id",
+            required=True,
+            limit=300,
+        )
+        position_id = None
+        canonical_reconciliation = {
+            **reconciliation_copy,
+            "status": status,
+            "wins_snapshot_id": snapshot_id,
+            "position_id": position_id,
+            "exceptions": exceptions,
+        }
     canonical_reconciliation = {
         **reconciliation_copy,
+        **canonical_reconciliation,
         "status": status,
         "wins_snapshot_id": snapshot_id,
         "position_id": position_id,
@@ -1866,65 +2307,95 @@ def record_wins_reconciliation(
     _, reconciliation_json = json_object(canonical_reconciliation, "WInS reconciliation")
     actor = text(recorded_by, "Recorded by", required=True, limit=200)
     timestamp = utc_timestamp(now)
-    _ensure(connection)
-    _require_state(connection, identifier, "reconciliation")
-    cursor = connection.execute(
-        """
-        INSERT INTO canonical_investment_reconciliations (
-            lifecycle_id, status, wins_snapshot_id, position_id,
-            reconciliation_json, recorded_by, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            identifier,
-            status,
-            snapshot_id,
-            position_id,
-            reconciliation_json,
-            actor,
-            timestamp,
-        ),
-    )
-    reconciliation_id = inserted_id(connection, cursor, "canonical_investment_reconciliations")
-    if status == "clean":
-        connection.execute(
-            "UPDATE canonical_investment_lifecycles SET current_position_id = ? WHERE id = ?",
-            (position_id, identifier),
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO canonical_investment_reconciliations (
+                lifecycle_id, status, wins_snapshot_id, position_id,
+                reconciliation_json, recorded_by, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                identifier,
+                status,
+                snapshot_id,
+                position_id,
+                reconciliation_json,
+                actor,
+                timestamp,
+            ),
         )
-        _transition(
-            connection,
-            identifier,
-            expected="reconciliation",
-            target="active",
-            event_type="wins_reconciliation_clean",
-            actor=actor,
-            payload={
-                "reconciliation_id": reconciliation_id,
-                "wins_snapshot_id": snapshot_id,
-                "position_id": position_id,
-            },
-            timestamp=timestamp,
+        reconciliation_id = inserted_id(
+            connection, cursor, "canonical_investment_reconciliations"
         )
-    else:
-        connection.execute(
-            "UPDATE canonical_investment_lifecycles SET updated_at = ? WHERE id = ?",
-            (timestamp, identifier),
-        )
-        _append_audit_event(
-            connection,
-            identifier,
-            event_type="wins_reconciliation_exceptions",
-            from_state="reconciliation",
-            to_state="reconciliation",
-            actor=actor,
-            payload={
-                "reconciliation_id": reconciliation_id,
-                "wins_snapshot_id": snapshot_id,
-                "exception_count": len(exceptions),
-            },
-            timestamp=timestamp,
-        )
-    commit_and_sync(connection)
+        if status == "clean":
+            connection.execute(
+                """
+                UPDATE competition_positions SET status = 'open'
+                WHERE id = ? AND lifecycle_id = ?
+                  AND lower(COALESCE(status, '')) = 'pending_reconciliation'
+                  AND upper(trim(ticker)) = ? AND abs(quantity - ?) <= 0.00000001
+                  AND upper(trim(currency)) = ?
+                """,
+                (
+                    positive_int(position_id, "Position id"),
+                    identifier,
+                    activation_ticker,
+                    activation_quantity,
+                    activation_currency,
+                ),
+            )
+            promoted = connection.execute(
+                "SELECT status FROM competition_positions WHERE id = ? AND lifecycle_id = ?",
+                (positive_int(position_id, "Position id"), identifier),
+            ).fetchone()
+            if promoted is None or str(row_value(promoted, "status", 0)).strip().lower() != "open":
+                raise RuntimeError("The pending tracker position could not be activated.")
+            connection.execute(
+                "UPDATE canonical_investment_lifecycles SET current_position_id = ? WHERE id = ?",
+                (position_id, identifier),
+            )
+            _transition(
+                connection,
+                identifier,
+                expected="reconciliation",
+                target="active",
+                event_type="wins_reconciliation_clean",
+                actor=actor,
+                payload={
+                    "reconciliation_id": reconciliation_id,
+                    "canonical_reconciliation_id": canonical_reconciliation[
+                        "canonical_reconciliation_id"
+                    ],
+                    "canonical_source": canonical_reconciliation["canonical_source"],
+                    "wins_snapshot_id": snapshot_id,
+                    "position_id": position_id,
+                },
+                timestamp=timestamp,
+            )
+        else:
+            connection.execute(
+                "UPDATE canonical_investment_lifecycles SET updated_at = ? WHERE id = ?",
+                (timestamp, identifier),
+            )
+            _append_audit_event(
+                connection,
+                identifier,
+                event_type="wins_reconciliation_exceptions",
+                from_state="reconciliation",
+                to_state="reconciliation",
+                actor=actor,
+                payload={
+                    "reconciliation_id": reconciliation_id,
+                    "wins_snapshot_id": snapshot_id,
+                    "exception_count": len(exceptions),
+                },
+                timestamp=timestamp,
+            )
+        commit_and_sync(connection)
+    except Exception:
+        connection.rollback()
+        raise
     record = get_investment_lifecycle(connection, identifier)
     if record is None:
         raise RuntimeError("The lifecycle could not be read after reconciliation.")

@@ -219,6 +219,7 @@ _RUNTIME_TRACE.mark("launcher")
 if app_route == "Wharton Cockpit":
     from ui.pages.wharton_dash import render_wharton_cockpit
 
+    _RUNTIME_TRACE.mark("wharton_import")
     render_wharton_cockpit()
     _render_runtime_diagnostics(route=app_route, stage="wharton_ready")
     st.stop()
@@ -378,6 +379,8 @@ from src.portfolio_tracker.manager import (
     save_portfolio,
     update_position,
 )
+
+_RUNTIME_TRACE.mark("workspace_imports")
 
 # Show user info and logout in sidebar if logged in
 with st.sidebar:

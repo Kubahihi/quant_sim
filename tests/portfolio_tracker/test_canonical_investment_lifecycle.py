@@ -36,6 +36,14 @@ from src.portfolio_tracker.investment_lifecycle_store import (
     update_committee_member_status,
     verify_lifecycle_audit_chain,
 )
+from src.portfolio_tracker.operating_system_store import save_record
+from src.portfolio_tracker.portfolio_pipeline import create_portfolio_snapshot
+from src.portfolio_tracker.reconciliation_ledger import (
+    append_reconciliation,
+    latest_reconciliation,
+    new_reconciliation_ledger,
+    sign_off_reconciliation,
+)
 from src.portfolio_tracker.security_dossier_store import (
     append_dossier_version,
     append_kpi_observation,
@@ -233,6 +241,187 @@ def _advance_to_rule_check(connection: sqlite3.Connection):
     result = close_vote_round(connection, lifecycle_id, "post", closed_by="anna", now=NOW)
     assert result["state"] == "rule_check"
     return lifecycle_id
+
+
+def _init_competition_positions(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE competition_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            security_type TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            entry_date TEXT NOT NULL,
+            last_price REAL,
+            status TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            lifecycle_id INTEGER
+        )
+        """
+    )
+
+
+def _insert_tracker_position(
+    connection: sqlite3.Connection,
+    *,
+    lifecycle_id: int | None,
+    quantity: float,
+    status: str,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO competition_positions (
+            ticker, security_type, quantity, entry_price, entry_date,
+            last_price, status, currency, lifecycle_id
+        ) VALUES ('AAPL', 'Stock', ?, 225.5, '2026-08-15', 225.5, ?, 'USD', ?)
+        """,
+        (quantity, status, lifecycle_id),
+    )
+    return int(cursor.lastrowid)
+
+
+def _tracker_reconciliation_rows(*quantities: float) -> list[dict[str, object]]:
+    return [
+        {
+            "ticker": "AAPL",
+            "quantity": quantity,
+            "current_price": 225.5,
+            "market_value": quantity * 225.5,
+            "total_cost": quantity * 225.5,
+            "asset_type": "Stock",
+            "currency": "USD",
+        }
+        for quantity in quantities
+    ]
+
+
+def _persist_clean_pipeline(
+    connection: sqlite3.Connection,
+    tracker_rows: list[dict[str, object]],
+    *,
+    wins_quantity: float,
+) -> tuple[dict[str, object], dict[str, object]]:
+    tracker_cash = 500_000.0 - sum(
+        float(row.get("total_cost") or 0.0) for row in tracker_rows
+    )
+    wins = create_portfolio_snapshot(
+        [
+            {
+                "ticker": "AAPL",
+                "quantity": wins_quantity,
+                "entry_price": 225.5,
+                "last_price": 225.5,
+                "security_type": "Stock",
+                "currency": "USD",
+            }
+        ],
+        provider="WInS",
+        observed_at=NOW + timedelta(minutes=5),
+        received_at=NOW + timedelta(minutes=6),
+        source_reference="WInS account export",
+        expected_tickers=("AAPL",),
+        cash_value=tracker_cash,
+    )
+    tracker_snapshot = create_portfolio_snapshot(
+        tracker_rows,
+        provider="Portfolio Tracker",
+        observed_at=NOW + timedelta(minutes=5),
+        received_at=NOW + timedelta(minutes=6),
+        method="cache",
+        source_reference="competition_positions",
+        expected_tickers=("AAPL",),
+        cash_value=tracker_cash,
+    )
+    ledger = append_reconciliation(
+        new_reconciliation_ledger(),
+        wins,
+        tracker_snapshot,
+        owner="operations",
+        performed_at=NOW + timedelta(minutes=7),
+    )
+    reconciliation_id = str(latest_reconciliation(ledger)["reconciliation_id"])
+    ledger = sign_off_reconciliation(
+        ledger,
+        reconciliation_id,
+        decision="approved",
+        signed_off_by="jakub",
+        signed_off_at=NOW + timedelta(minutes=8),
+    )
+    save_record(
+        connection,
+        "portfolio_pipeline",
+        "competition",
+        {"snapshots": [tracker_snapshot, wins], "ledger": ledger},
+        actor="operations",
+        status="active",
+        now=NOW + timedelta(minutes=9),
+    )
+    return wins, ledger
+
+
+def _approved_lifecycle_ready_for_execution(connection: sqlite3.Connection) -> int:
+    lifecycle_id = _advance_to_rule_check(connection)
+    record_rule_check(
+        connection,
+        lifecycle_id,
+        rulebook_version=1,
+        mandate_version=1,
+        checks=[{"rule_id": "max_position", "passed": True, "limit_pct": 10}],
+        evaluated_by="risk-owner",
+        now=NOW,
+    )
+    submit_final_approval(
+        connection,
+        lifecycle_id,
+        "anna",
+        decision="approve",
+        comment="Approved.",
+        now=NOW,
+    )
+    submit_final_approval(
+        connection,
+        lifecycle_id,
+        "jakub",
+        decision="approve",
+        comment="Independently approved.",
+        now=NOW,
+    )
+    record_position_sizing(
+        connection,
+        lifecycle_id,
+        {
+            "target_weight_pct": 7,
+            "rationale": "Within the approved rulebook limit.",
+            "starter_position": False,
+        },
+        sized_by="portfolio-owner",
+        now=NOW,
+    )
+    return lifecycle_id
+
+
+def _record_standard_execution(
+    connection: sqlite3.Connection,
+    lifecycle_id: int,
+    *,
+    commit: bool = True,
+) -> dict[str, object]:
+    return record_wins_execution(
+        connection,
+        lifecycle_id,
+        {
+            "wins_transaction_id": f"WINS-{lifecycle_id}",
+            "side": "buy",
+            "quantity": 10,
+            "average_price": 225.5,
+            "executed_at": "2026-08-15T14:30:00Z",
+            "currency": "USD",
+        },
+        recorded_by="team-leader",
+        now=NOW,
+        commit=commit,
+    )
 
 
 def test_authoritative_universe_snapshots_are_immutable_versioned_and_fail_closed():
@@ -572,21 +761,71 @@ def test_full_lifecycle_links_approval_sizing_execution_position_review_and_exit
     )
     assert exception["state"] == "reconciliation"
     assert exception["latest_reconciliation"]["status"] == "open_exceptions"
+
+    _init_competition_positions(connection)
+    tracker_position_id = _insert_tracker_position(
+        connection,
+        lifecycle_id=lifecycle_id,
+        quantity=10,
+        status="pending_reconciliation",
+    )
+    with pytest.raises(ValueError, match="persisted canonical portfolio pipeline"):
+        record_wins_reconciliation(
+            connection,
+            lifecycle_id,
+            {
+                "status": "clean",
+                "wins_snapshot_id": "FORGED-SNAPSHOT",
+                "canonical_reconciliation_id": "FORGED-RECONCILIATION",
+                "canonical_source": "portfolio_pipeline/competition",
+                "position_id": str(tracker_position_id),
+                "exceptions": [],
+            },
+            recorded_by="operations",
+            now=NOW + timedelta(minutes=10),
+        )
+    assert get_investment_lifecycle(connection, lifecycle_id)["state"] == "reconciliation"
+    assert connection.execute(
+        "SELECT status FROM competition_positions WHERE id = ?", (tracker_position_id,)
+    ).fetchone()["status"] == "pending_reconciliation"
+
+    wins, ledger = _persist_clean_pipeline(
+        connection,
+        _tracker_reconciliation_rows(10),
+        wins_quantity=10,
+    )
+    with pytest.raises(ValueError, match="bindings do not match"):
+        record_wins_reconciliation(
+            connection,
+            lifecycle_id,
+            {
+                "status": "clean",
+                "wins_snapshot_id": wins["snapshot_id"],
+                "canonical_reconciliation_id": (
+                    f"{latest_reconciliation(ledger)['reconciliation_id']}-forged"
+                ),
+                "canonical_source": "portfolio_pipeline/competition",
+                "position_id": str(tracker_position_id),
+                "exceptions": [],
+            },
+            recorded_by="operations",
+            now=NOW + timedelta(minutes=12),
+        )
     active = record_wins_reconciliation(
         connection,
         lifecycle_id,
-        {
-            "status": "clean",
-            "wins_snapshot_id": "WINS-SNAPSHOT-2",
-            "position_id": "TRACKER-AAPL-1",
-            "exceptions": [],
-        },
         recorded_by="operations",
         now=NOW + timedelta(minutes=15),
     )
     assert active["state"] == "active"
-    assert active["current_position_id"] == "TRACKER-AAPL-1"
+    assert active["current_position_id"] == str(tracker_position_id)
     assert len(active["reconciliation_history"]) == 2
+    assert active["latest_reconciliation"]["reconciliation"]["canonical_source"] == (
+        "portfolio_pipeline/competition"
+    )
+    assert connection.execute(
+        "SELECT status FROM competition_positions WHERE id = ?", (tracker_position_id,)
+    ).fetchone()["status"] == "open"
 
     reviewed = append_position_review(
         connection,
@@ -613,6 +852,57 @@ def test_full_lifecycle_links_approval_sizing_execution_position_review_and_exit
     assert exited["audit"]["valid"] is True
     assert exited["audit"]["checked_events"] > 20
     json.dumps(exited, allow_nan=False)
+
+
+def test_clean_activation_supports_existing_same_ticker_lots_without_delta_confusion():
+    connection = _connection()
+    lifecycle_id = _approved_lifecycle_ready_for_execution(connection)
+    _record_standard_execution(connection, lifecycle_id)
+    _init_competition_positions(connection)
+    existing_position_id = _insert_tracker_position(
+        connection,
+        lifecycle_id=None,
+        quantity=5,
+        status="open",
+    )
+    pending_position_id = _insert_tracker_position(
+        connection,
+        lifecycle_id=lifecycle_id,
+        quantity=10,
+        status="pending_reconciliation",
+    )
+    _persist_clean_pipeline(
+        connection,
+        _tracker_reconciliation_rows(5, 10),
+        wins_quantity=15,
+    )
+
+    active = record_wins_reconciliation(
+        connection,
+        lifecycle_id,
+        recorded_by="operations",
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert active["state"] == "active"
+    assert active["current_position_id"] == str(pending_position_id)
+    statuses = dict(
+        connection.execute("SELECT id, status FROM competition_positions ORDER BY id").fetchall()
+    )
+    assert statuses == {existing_position_id: "open", pending_position_id: "open"}
+
+
+def test_uncommitted_execution_can_be_rolled_back_before_tracker_staging():
+    connection = _connection()
+    lifecycle_id = _approved_lifecycle_ready_for_execution(connection)
+
+    executed = _record_standard_execution(connection, lifecycle_id, commit=False)
+    assert executed["state"] == "reconciliation"
+    connection.rollback()
+
+    restored = get_investment_lifecycle(connection, lifecycle_id)
+    assert restored["state"] == "wins_execution"
+    assert restored["wins_execution"] is None
 
 
 def test_rule_check_detects_superseded_universe_and_requires_named_override():
