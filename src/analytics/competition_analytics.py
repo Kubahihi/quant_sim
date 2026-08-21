@@ -92,20 +92,36 @@ def run_walk_forward_rank_backtest(
         raise ValueError("Returns and scores need at least two shared dates and one shared asset.")
     r = returns.loc[common_index, common_columns].astype(float)
     scores = point_in_time_scores.loc[common_index, common_columns].astype(float)
-    weights = pd.DataFrame(0.0, index=common_index, columns=common_columns)
-    current = pd.Series(0.0, index=common_columns)
-    turnover = pd.Series(0.0, index=common_index)
-    for position, timestamp in enumerate(common_index[:-1]):
-        if position % rebalance_every == 0:
-            available = scores.loc[timestamp].dropna().sort_values(ascending=False)
-            selected = available.head(min(top_n, len(available))).index
-            target = pd.Series(0.0, index=common_columns)
-            if len(selected):
-                target.loc[selected] = 1.0 / len(selected)
-            turnover.iloc[position + 1] = float((target - current).abs().sum())
-            current = target
-        weights.iloc[position + 1] = current
-    gross = (weights * r.fillna(0.0)).sum(axis=1)
+    n_periods, n_assets = r.shape
+    return_values = r.to_numpy(dtype=float, copy=False)
+    gross = np.zeros(n_periods, dtype=float)
+    turnover = np.zeros(n_periods, dtype=float)
+    current = np.zeros(n_assets, dtype=float)
+
+    # Only visit actual rebalance dates and broadcast each target over its
+    # holding period.  The original row loop repeated the same N-asset write
+    # on every date, which dominated larger point-in-time backtests.
+    for position in range(0, n_periods - 1, rebalance_every):
+        available = scores.iloc[position].dropna().sort_values(ascending=False)
+        selected = available.head(min(top_n, len(available))).index
+        target = np.zeros(n_assets, dtype=float)
+        if len(selected):
+            selected_positions = common_columns.get_indexer(selected)
+            target[selected_positions] = 1.0 / len(selected)
+        turnover[position + 1] = float(np.abs(target - current).sum())
+        current = target
+        holding_period_end = min(position + rebalance_every + 1, n_periods)
+        if len(selected):
+            gross[position + 1:holding_period_end] = np.nansum(
+                return_values[
+                    position + 1:holding_period_end,
+                    selected_positions,
+                ] * current[selected_positions],
+                axis=1,
+            )
+
+    # np.nansum above preserves DataFrame.sum's handling of missing returns
+    # without materializing a full date-by-asset weight matrix.
     costs = turnover * float(transaction_cost_bps) / 10_000.0
     return pd.DataFrame({
         "gross_return": gross,

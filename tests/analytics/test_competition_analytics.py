@@ -38,6 +38,83 @@ def test_walk_forward_lags_scores_and_charges_turnover():
     assert result.loc[dates[1], "transaction_cost"] > 0
 
 
+def test_walk_forward_broadcasts_weights_between_rebalances_without_lookahead():
+    dates = pd.date_range("2026-01-01", periods=7)
+    returns = pd.DataFrame({
+        "A": [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06],
+        "B": [0.0, -0.01, -0.02, -0.03, -0.04, -0.05, -0.06],
+    }, index=dates)
+    scores = pd.DataFrame({
+        "A": [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "B": [1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+    }, index=dates)
+
+    result = run_walk_forward_rank_backtest(
+        returns,
+        scores,
+        top_n=1,
+        rebalance_every=3,
+        transaction_cost_bps=0.0,
+    )
+
+    np.testing.assert_allclose(
+        result["gross_return"],
+        [0.0, 0.01, 0.02, 0.03, -0.04, -0.05, -0.06],
+    )
+    np.testing.assert_allclose(
+        result["turnover"],
+        [0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+    )
+
+
+def test_walk_forward_block_implementation_matches_row_reference():
+    rng = np.random.default_rng(818)
+    dates = pd.date_range("2025-01-01", periods=37)
+    columns = ["A", "B", "C", "D", "E"]
+    returns = pd.DataFrame(
+        rng.normal(0.0, 0.01, size=(len(dates), len(columns))),
+        index=dates,
+        columns=columns,
+    )
+    scores = pd.DataFrame(
+        rng.normal(size=(len(dates), len(columns))),
+        index=dates,
+        columns=columns,
+    )
+    scores.iloc[::5, 2] = np.nan
+
+    reference_weights = pd.DataFrame(0.0, index=dates, columns=columns)
+    reference_turnover = pd.Series(0.0, index=dates)
+    current = pd.Series(0.0, index=columns)
+    for position, timestamp in enumerate(dates[:-1]):
+        if position % 7 == 0:
+            available = scores.loc[timestamp].dropna().sort_values(ascending=False)
+            selected = available.head(3).index
+            target = pd.Series(0.0, index=columns)
+            target.loc[selected] = 1.0 / len(selected)
+            reference_turnover.iloc[position + 1] = float((target - current).abs().sum())
+            current = target
+        reference_weights.iloc[position + 1] = current
+    reference_gross = (reference_weights * returns).sum(axis=1)
+    reference_costs = reference_turnover * 12.0 / 10_000.0
+    reference = pd.DataFrame({
+        "gross_return": reference_gross,
+        "turnover": reference_turnover,
+        "transaction_cost": reference_costs,
+        "net_return": reference_gross - reference_costs,
+    })
+
+    optimized = run_walk_forward_rank_backtest(
+        returns,
+        scores,
+        top_n=3,
+        rebalance_every=7,
+        transaction_cost_bps=12.0,
+    )
+
+    pd.testing.assert_frame_equal(optimized, reference)
+
+
 def test_manifest_hashes_are_deterministic_and_sensitive():
     frame = pd.DataFrame({"B": [2.0], "A": [1.0]}, index=["x"])
     first = build_reproducibility_manifest(frame, {"window": 60}, source="unit", as_of="2026-07-31")

@@ -22,6 +22,7 @@ from src.data.reliability import (
 )
 from src.portfolio_tracker.reconciliation_ledger import (
     materialize_reconciliation,
+    migrate_reconciliation_ledger,
     reconciliation_readiness_gate,
 )
 
@@ -336,7 +337,7 @@ def _binding(
 
 def build_live_portfolio_pipeline(
     portfolio_snapshots: Sequence[Mapping[str, Any]],
-    reconciliation_ledger: Mapping[str, Any],
+    reconciliation_ledger: Mapping[str, Any] | None,
     *,
     mandate: Mapping[str, Any] | None,
     rulebook: Mapping[str, Any] | None,
@@ -347,7 +348,7 @@ def build_live_portfolio_pipeline(
 ) -> dict[str, Any]:
     """Select one canonical snapshot and create strict downstream bindings."""
     snapshots = [_json_copy(item, field="portfolio snapshot") for item in portfolio_snapshots]
-    ledger = _json_copy(reconciliation_ledger, field="reconciliation_ledger")
+    ledger = migrate_reconciliation_ledger(reconciliation_ledger)
     mandate_copy = _json_copy(mandate or {}, field="mandate")
     rulebook_copy = _json_copy(rulebook or {}, field="rulebook")
     returns_copy = _json_copy(

@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
+import re
 from typing import Any
 
 from src.data.reliability import verify_snapshot_integrity
@@ -19,6 +21,8 @@ from src.portfolio_tracker.wins_reconciliation import reconcile_wins_positions
 
 
 SCHEMA_VERSION = 1
+_UNVERSIONED_SCHEMA = 0
+_MISSING = object()
 
 
 def _json_copy(value: Any, *, field: str) -> Any:
@@ -69,19 +73,86 @@ def new_reconciliation_ledger() -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "reconciliations": [], "events": []}
 
 
-def _validated_ledger(ledger: Mapping[str, Any] | None) -> dict[str, Any]:
+def _schema_version(value: Any) -> int:
+    """Parse an on-disk schema marker without accepting lossy coercions."""
+    if value is _MISSING or value is None or value == "":
+        return _UNVERSIONED_SCHEMA
+    if isinstance(value, bool):
+        raise ValueError("ledger.schema_version must be an integer.")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        raise ValueError("ledger.schema_version must be an integer.")
+    if isinstance(value, str):
+        text = value.strip()
+        if text and text.lstrip("+-").isdigit():
+            return int(text)
+    raise ValueError("ledger.schema_version must be an integer.")
+
+
+def _migrate_unversioned_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade the pre-envelope ledger without rewriting audit records.
+
+    The first deployed pipeline stored ``reconciliations`` and ``events`` but
+    some workspaces were saved before the schema marker was added.  Both lists
+    are already in the v1 format, so the lossless migration only supplies
+    absent envelope fields and leaves every record, event, ID, and unknown
+    extension field untouched.
+    """
+    migrated = dict(ledger)
+    if "reconciliations" not in migrated:
+        migrated["reconciliations"] = []
+    if "events" not in migrated:
+        migrated["events"] = []
+    migrated["schema_version"] = 1
+    return migrated
+
+
+def migrate_reconciliation_ledger(
+    ledger: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a current, JSON-safe ledger while preserving legacy audit data.
+
+    Missing schema markers are treated as the unversioned v0 envelope.  Known
+    older versions are upgraded one step at a time.  Future versions fail
+    closed so a newer writer can never be silently downgraded.
+    """
     if ledger is None:
         return new_reconciliation_ledger()
     copied = _json_copy(ledger, field="ledger")
     if not isinstance(copied, dict):
         raise TypeError("ledger must be a mapping.")
-    if copied.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(f"ledger.schema_version must be {SCHEMA_VERSION}.")
+
+    version = _schema_version(copied.get("schema_version", _MISSING))
+    if version < _UNVERSIONED_SCHEMA:
+        raise ValueError("ledger.schema_version must not be negative.")
+    if version > SCHEMA_VERSION:
+        raise ValueError(
+            f"ledger.schema_version {version} is newer than supported version "
+            f"{SCHEMA_VERSION}."
+        )
+
+    while version < SCHEMA_VERSION:
+        if version == _UNVERSIONED_SCHEMA:
+            copied = _migrate_unversioned_ledger(copied)
+        else:  # pragma: no cover - guards future migration-table omissions.
+            raise ValueError(f"No ledger migration is registered for schema version {version}.")
+        version = _schema_version(copied.get("schema_version", _MISSING))
+
+    # Normalise integer-like legacy markers (for example ``"1"``) without
+    # altering any append-only reconciliation or event payload.
+    copied["schema_version"] = SCHEMA_VERSION
     if not isinstance(copied.get("reconciliations"), list):
         raise ValueError("ledger.reconciliations must be a list.")
     if not isinstance(copied.get("events"), list):
         raise ValueError("ledger.events must be a list.")
     return copied
+
+
+def _validated_ledger(ledger: Mapping[str, Any] | None) -> dict[str, Any]:
+    return migrate_reconciliation_ledger(ledger)
 
 
 def _snapshot_positions(snapshot: Mapping[str, Any]) -> Any:
@@ -94,6 +165,161 @@ def _snapshot_positions(snapshot: Mapping[str, Any]) -> Any:
         if isinstance(snapshot.get(field), (list, dict)):
             return snapshot[field]
     return []
+
+
+def _cash_number(value: Any) -> float | None:
+    """Parse a finite cash balance without treating booleans as numbers."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    text = str(value).strip()
+    if not text or text.casefold() in {"n/a", "na", "none", "null", "-", "--"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1]
+    text = re.sub(r"[$€£,\s]", "", text)
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if negative:
+        number = -number
+    return number if math.isfinite(number) else None
+
+
+def _snapshot_envelope(snapshot: Mapping[str, Any]) -> bool:
+    """Distinguish an auditable snapshot from a legacy position-row mapping."""
+    return any(
+        field in snapshot
+        for field in ("snapshot_id", "payload", "dataset", "integrity", "metadata", "cash_value")
+    )
+
+
+def _snapshot_cash(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract cash and denomination from current or legacy snapshot envelopes."""
+    containers: list[tuple[str, Mapping[str, Any]]] = []
+    payload = snapshot.get("payload")
+    metadata = snapshot.get("metadata")
+    if isinstance(payload, Mapping):
+        containers.append(("payload", payload))
+    if isinstance(metadata, Mapping):
+        containers.append(("metadata", metadata))
+    containers.append(("snapshot", snapshot))
+
+    raw_value: Any = _MISSING
+    value_source: str | None = None
+    for container_name, container in containers:
+        for field in ("cash_value", "cash_balance", "cash"):
+            if field in container:
+                raw_value = container[field]
+                value_source = f"{container_name}.{field}"
+                break
+        if value_source:
+            break
+
+    currency: str | None = None
+    currency_source: str | None = None
+    for container_name, container in containers:
+        for field in ("cash_currency", "base_currency", "currency"):
+            if field not in container:
+                continue
+            candidate = " ".join(str(container.get(field) or "").strip().split()).upper()
+            if candidate:
+                currency = candidate
+                currency_source = f"{container_name}.{field}"
+                break
+        if currency_source:
+            break
+
+    return {
+        "value_present": raw_value is not _MISSING,
+        "value": _cash_number(raw_value) if raw_value is not _MISSING else None,
+        "currency": currency,
+        "value_source": value_source,
+        "currency_source": currency_source,
+    }
+
+
+def _compare_snapshot_cash(
+    wins_snapshot: Mapping[str, Any],
+    tracked_snapshot: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    *,
+    tolerance: float,
+) -> dict[str, Any]:
+    """Compare cash only when the tracker input is an auditable snapshot.
+
+    Historical callers may still pass a bare list (or a single row mapping) of
+    positions. Those inputs never carried a cash balance, so they remain
+    explicitly ``not_compared`` rather than being reinterpreted as zero cash.
+    Canonical snapshot envelopes fail closed when either cash value or its
+    denomination is incomplete.
+    """
+    wins = _snapshot_cash(wins_snapshot)
+    tracker_is_snapshot = isinstance(tracked_snapshot, Mapping) and _snapshot_envelope(
+        tracked_snapshot
+    )
+    tracked = (
+        _snapshot_cash(tracked_snapshot)
+        if tracker_is_snapshot
+        else {
+            "value_present": False,
+            "value": None,
+            "currency": None,
+            "value_source": None,
+            "currency_source": None,
+        }
+    )
+    comparison: dict[str, Any] = {
+        "status": "not_compared",
+        "is_match": None,
+        "amount_match": None,
+        "currency_match": None,
+        "difference": None,
+        "tolerance": tolerance,
+        "wins": wins,
+        "tracked": tracked,
+        "reason": None,
+    }
+    if not tracker_is_snapshot:
+        comparison["reason"] = "legacy_positions_only_input"
+        return comparison
+
+    if not wins["value_present"] or not tracked["value_present"]:
+        comparison["status"] = "incomplete"
+        comparison["is_match"] = False
+        comparison["reason"] = "cash_value_missing"
+        return comparison
+    if wins["value"] is None or tracked["value"] is None:
+        comparison["status"] = "incomplete"
+        comparison["is_match"] = False
+        comparison["reason"] = "cash_value_invalid"
+        return comparison
+    if not wins["currency"] or not tracked["currency"]:
+        comparison["status"] = "incomplete"
+        comparison["is_match"] = False
+        comparison["reason"] = "cash_currency_missing"
+        return comparison
+
+    currency_match = wins["currency"] == tracked["currency"]
+    difference = (
+        float(wins["value"]) - float(tracked["value"]) if currency_match else None
+    )
+    amount_match = abs(difference) <= tolerance if difference is not None else None
+    is_match = currency_match and amount_match is True
+    comparison.update(
+        {
+            "status": "matched" if is_match else "difference",
+            "is_match": is_match,
+            "amount_match": amount_match,
+            "currency_match": currency_match,
+            "difference": difference,
+            "reason": None if is_match else "cash_balance_mismatch",
+        }
+    )
+    return comparison
 
 
 def _snapshot_identity(snapshot: Mapping[str, Any], *, prefix: str) -> str:
@@ -190,6 +416,19 @@ def _derive_exceptions(
                     opened_at=opened_at,
                 )
             )
+    cash = result.get("cash_comparison")
+    if isinstance(cash, Mapping) and cash.get("status") in {"difference", "incomplete"}:
+        status = str(cash.get("status"))
+        exceptions.append(
+            _exception(
+                reconciliation_id,
+                ticker="CASH",
+                category=("cash_mismatch" if status == "difference" else "incomplete_cash_data"),
+                details={"cash_comparison": cash},
+                owner=owner,
+                opened_at=opened_at,
+            )
+        )
     return exceptions
 
 
@@ -201,6 +440,7 @@ def create_reconciliation_record(
     performed_at: datetime | str | None = None,
     quantity_tolerance: float = 1e-8,
     currency_tolerance: float = 0.01,
+    cash_tolerance: float | None = None,
     supersedes_reconciliation_id: str | None = None,
 ) -> dict[str, Any]:
     """Reconcile one immutable WInS snapshot against one tracker snapshot."""
@@ -227,12 +467,32 @@ def create_reconciliation_record(
         raise TypeError("tracked_snapshot must be a mapping or sequence of positions.")
 
     wins_positions = _snapshot_positions(wins_snapshot)
-    result = reconcile_wins_positions(
+    position_result = reconcile_wins_positions(
         wins_positions,
         tracked_positions,
         quantity_tolerance=quantity_tolerance,
         currency_tolerance=currency_tolerance,
     )
+    cash_limit = max(
+        0.0,
+        float(currency_tolerance if cash_tolerance is None else cash_tolerance),
+    )
+    cash_comparison = _compare_snapshot_cash(
+        wins_snapshot,
+        tracked_snapshot,
+        tolerance=cash_limit,
+    )
+    result = dict(position_result)
+    result["position_status"] = position_result["status"]
+    result["cash_comparison"] = cash_comparison
+    if cash_comparison["status"] in {"difference", "incomplete"}:
+        result["status"] = "differences"
+        result["is_reconciled"] = False
+    result["summary"] = {
+        **position_result["summary"],
+        "position_status": position_result["status"],
+        "cash_status": cash_comparison["status"],
+    }
     observed_at = wins_snapshot.get("observed_at") or performed
     observed = _timestamp(observed_at, field="wins_snapshot.observed_at")
     basis = {
@@ -259,6 +519,7 @@ def create_reconciliation_record(
         "tolerances": {
             "quantity": max(0.0, float(quantity_tolerance)),
             "currency": max(0.0, float(currency_tolerance)),
+            "cash": cash_limit,
         },
         "base_status": result["status"],
         "base_is_clean": bool(result["is_reconciled"]),
@@ -276,6 +537,7 @@ def append_reconciliation(
     performed_at: datetime | str | None = None,
     quantity_tolerance: float = 1e-8,
     currency_tolerance: float = 0.01,
+    cash_tolerance: float | None = None,
 ) -> dict[str, Any]:
     """Append a reconciliation without modifying prior records or events."""
     updated = _validated_ledger(ledger)
@@ -287,6 +549,7 @@ def append_reconciliation(
         performed_at=performed_at,
         quantity_tolerance=quantity_tolerance,
         currency_tolerance=currency_tolerance,
+        cash_tolerance=cash_tolerance,
         supersedes_reconciliation_id=(
             previous.get("reconciliation_id") if isinstance(previous, Mapping) else None
         ),
@@ -672,6 +935,7 @@ __all__ = [
     "create_reconciliation_record",
     "latest_reconciliation",
     "materialize_reconciliation",
+    "migrate_reconciliation_ledger",
     "new_reconciliation_ledger",
     "reconciliation_history",
     "reconciliation_readiness_gate",

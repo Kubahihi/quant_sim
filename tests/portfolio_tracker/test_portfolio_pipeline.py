@@ -52,10 +52,20 @@ def _wins(*, observed_at: str = "2026-08-15T11:30:00Z", quantity: float = 10):
 
 
 def _approved_ledger(wins):
+    tracker = create_portfolio_snapshot(
+        _positions(),
+        provider="Portfolio Tracker",
+        observed_at=wins["observed_at"],
+        received_at=NOW,
+        source_reference="competition_positions",
+        expected_tickers=("AAA",),
+        cash_value=wins["payload"]["cash_value"],
+        base_currency=wins["payload"]["base_currency"],
+    )
     ledger = append_reconciliation(
         new_reconciliation_ledger(),
         wins,
-        _positions(),
+        tracker,
         owner="Lukas",
         performed_at=NOW,
     )
@@ -133,6 +143,45 @@ def test_one_reconciled_snapshot_feeds_every_consumer_with_strict_contexts():
     assert inputs[1]["rulebook"] == RULEBOOK
     assert wins["payload"]["fx_exposures"]["USD"] == pytest.approx(1_200)
     json.dumps(pipeline, allow_nan=False)
+
+
+def test_cash_mismatch_blocks_pipeline_when_positions_match():
+    wins = _wins()
+    tracker = create_portfolio_snapshot(
+        _positions(),
+        provider="Portfolio Tracker",
+        observed_at=wins["observed_at"],
+        received_at=NOW,
+        source_reference="competition_positions",
+        expected_tickers=("AAA",),
+        cash_value=90.0,
+    )
+    ledger = append_reconciliation(
+        new_reconciliation_ledger(),
+        wins,
+        tracker,
+        owner="Lukas",
+        performed_at=NOW,
+    )
+
+    record = latest_reconciliation(ledger)
+    assert record["result"]["position_status"] == "reconciled"
+    assert record["result"]["cash_comparison"]["status"] == "difference"
+    assert record["base_is_clean"] is False
+
+    pipeline = build_live_portfolio_pipeline(
+        [wins],
+        ledger,
+        mandate=MANDATE,
+        rulebook=RULEBOOK,
+        expected_return_assumptions=RETURNS,
+        now=NOW,
+    )
+
+    assert pipeline["status"] == "degraded"
+    assert pipeline["reconciliation_gate"]["ready"] is False
+    assert "snapshot_has_differences" in pipeline["reconciliation_gate"]["blockers"]
+    assert pipeline["consumer_bindings"]["reporting"]["allowed"] is False
 
 
 def test_new_dirty_wins_snapshot_keeps_analysis_on_lkg_but_blocks_reporting():

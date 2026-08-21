@@ -454,18 +454,7 @@ def _committee_roster(team_members: Sequence[Any]) -> tuple[list[dict[str, Any]]
     return roster, identities, captains
 
 
-def _activate_reconciled_tracker_position(
-    connection: Any,
-    lifecycle: Mapping[str, Any],
-    reconciliation: Mapping[str, Any],
-    *,
-    actor: str,
-) -> dict[str, Any]:
-    """Create the tracker position and activate the lifecycle in one database commit."""
-    from src.portfolio_tracker.investment_lifecycle_store import record_wins_reconciliation
-    from src.portfolio_tracker.security_dossier_store import get_dossier_version
-
-    lifecycle_id = int(lifecycle["id"])
+def _lifecycle_execution(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
     execution_record = lifecycle.get("wins_execution") or {}
     execution = dict(execution_record.get("execution") or {})
     if not execution:
@@ -473,6 +462,63 @@ def _activate_reconciled_tracker_position(
     currency = str(execution.get("currency") or "").strip().upper()
     if not currency:
         raise ValueError("Execution currency is required; the tracker will not assume USD.")
+    execution["currency"] = currency
+    return execution
+
+
+def _tracker_projection_rows(connection: Any, lifecycle_id: int) -> list[Any]:
+    return connection.execute(
+        """
+        SELECT id, ticker, quantity, entry_price, currency, status
+        FROM competition_positions
+        WHERE lifecycle_id = ?
+        ORDER BY id
+        """,
+        (int(lifecycle_id),),
+    ).fetchall()
+
+
+def _validate_tracker_projection(
+    row: Any,
+    lifecycle: Mapping[str, Any],
+    execution: Mapping[str, Any],
+) -> None:
+    ticker = str(lifecycle.get("ticker") or "").strip().upper()
+    currency = str(execution.get("currency") or "").strip().upper()
+    if str(row[1] or "").strip().upper() != ticker:
+        raise ValueError("The staged tracker ticker does not match the investment lifecycle.")
+    if abs(float(row[2]) - float(execution["quantity"])) > 1e-8:
+        raise ValueError("The staged tracker quantity does not match the WInS execution.")
+    if abs(float(row[3]) - float(execution["average_price"])) > 0.01:
+        raise ValueError("The staged tracker entry price does not match the WInS execution.")
+    if str(row[4] or "").strip().upper() != currency:
+        raise ValueError("The staged tracker currency does not match the WInS execution.")
+
+
+def _stage_pending_tracker_position(
+    connection: Any,
+    lifecycle: Mapping[str, Any],
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    """Idempotently stage an executed trade for full-portfolio reconciliation."""
+    from src.portfolio_tracker.security_dossier_store import get_dossier_version
+
+    lifecycle_id = int(lifecycle["id"])
+    execution = _lifecycle_execution(lifecycle)
+    if str(execution.get("side") or "buy").strip().lower() != "buy":
+        raise ValueError("Pending tracker staging supports buy executions; exits use the lifecycle exit flow.")
+    existing = _tracker_projection_rows(connection, lifecycle_id)
+    if len(existing) > 1:
+        raise ValueError("More than one tracker projection exists for this lifecycle.")
+    if existing:
+        row = existing[0]
+        _validate_tracker_projection(row, lifecycle, execution)
+        status = str(row[5] or "").strip().lower()
+        if status not in {"pending_reconciliation", "open"}:
+            raise ValueError(f"The existing tracker projection has unexpected status {status!r}.")
+        return {"id": int(row[0]), "status": status, "created": False}
+
     dossier = get_dossier_version(
         connection, int(lifecycle["dossier_id"]), int(lifecycle["dossier_version"])
     )
@@ -483,53 +529,92 @@ def _activate_reconciled_tracker_position(
         or lifecycle.get("proposal", {}).get("security_type")
         or "Other"
     )
-    existing = connection.execute(
-        "SELECT id FROM competition_positions WHERE lifecycle_id = ? AND status = 'open' LIMIT 1",
-        (lifecycle_id,),
-    ).fetchone()
-    if existing is None:
-        executed_at = str(execution["executed_at"])
-        cursor = connection.execute(
-            """
-            INSERT INTO competition_positions (
-                ticker, security_type, quantity, entry_price, entry_date,
-                opened_by, opened_at, last_price, notes, status, currency,
-                lifecycle_id, competition_eligibility_status,
-                eligibility_source, eligibility_checked_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'Eligible', ?, ?)
-            """,
+    timestamp = datetime.now(timezone.utc).isoformat()
+    executed_at = str(execution["executed_at"])
+    cursor = connection.execute(
+        """
+        INSERT INTO competition_positions (
+            ticker, security_type, quantity, entry_price, entry_date,
+            opened_by, opened_at, last_price, notes, status, currency,
+            lifecycle_id, competition_eligibility_status,
+            eligibility_source, eligibility_checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_reconciliation', ?, ?,
+                  'Verified eligible', ?, ?)
+        """,
+        (
+            str(lifecycle["ticker"]), security_type, float(execution["quantity"]),
+            float(execution["average_price"]), executed_at[:10], actor, timestamp,
+            float(execution["average_price"]),
             (
-                str(lifecycle["ticker"]), security_type, float(execution["quantity"]),
-                float(execution["average_price"]), executed_at[:10], actor,
-                datetime.now(timezone.utc).isoformat(), float(execution["average_price"]),
-                f"Canonical lifecycle #{lifecycle_id}; WInS {execution['wins_transaction_id']}",
-                currency, lifecycle_id,
-                f"Authoritative universe snapshot {lifecycle['universe_snapshot_id']}",
-                datetime.now(timezone.utc).isoformat(),
+                f"Pending canonical reconciliation; lifecycle #{lifecycle_id}; "
+                f"WInS {execution['wins_transaction_id']}"
             ),
+            str(execution["currency"]), lifecycle_id,
+            f"Authoritative universe snapshot {lifecycle['universe_snapshot_id']}",
+            timestamp,
+        ),
+    )
+    inserted = getattr(cursor, "lastrowid", None)
+    if inserted is None:
+        inserted_row = connection.execute(
+            "SELECT id FROM competition_positions WHERE lifecycle_id = ? ORDER BY id DESC LIMIT 1",
+            (lifecycle_id,),
+        ).fetchone()
+        if inserted_row is None:
+            raise RuntimeError("The pending tracker projection could not be read after insertion.")
+        inserted = inserted_row[0]
+    connection.commit()
+    sync = getattr(connection, "sync", None)
+    if callable(sync):
+        sync()
+    return {"id": int(inserted), "status": "pending_reconciliation", "created": True}
+
+
+def _record_wins_execution_and_stage_tracker_position(
+    connection: Any,
+    lifecycle_id: int,
+    execution: Mapping[str, Any],
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    """Record an execution, then create its idempotent pending tracker projection."""
+    from src.portfolio_tracker.investment_lifecycle_store import record_wins_execution
+
+    if str(execution.get("side") or "").strip().lower() != "buy":
+        raise ValueError(
+            "The staged Investment Committee execution path accepts only buy executions."
         )
-        inserted = getattr(cursor, "lastrowid", None)
-        if inserted is None:
-            inserted_row = connection.execute(
-                "SELECT id FROM competition_positions WHERE lifecycle_id = ? ORDER BY id DESC LIMIT 1",
-                (lifecycle_id,),
-            ).fetchone()
-            if inserted_row is None:
-                raise RuntimeError("The canonical tracker position could not be read after insertion.")
-            inserted = inserted_row[0]
-        tracker_position_id = int(inserted)
-    else:
-        tracker_position_id = int(existing[0])
     try:
-        return record_wins_reconciliation(
+        lifecycle = record_wins_execution(
             connection,
             lifecycle_id,
-            {**dict(reconciliation), "position_id": str(tracker_position_id)},
+            execution,
             recorded_by=actor,
+            commit=False,
         )
+        _stage_pending_tracker_position(connection, lifecycle, actor=actor)
+        return lifecycle
     except Exception:
         connection.rollback()
         raise
+
+
+def _activate_reconciled_tracker_position(
+    connection: Any,
+    lifecycle: Mapping[str, Any],
+    *,
+    actor: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Delegate atomic activation to the canonical lifecycle domain guard."""
+    from src.portfolio_tracker.investment_lifecycle_store import record_wins_reconciliation
+
+    return record_wins_reconciliation(
+        connection,
+        int(lifecycle["id"]),
+        recorded_by=actor,
+        now=now,
+    )
 
 
 def render_investment_committee(
@@ -556,8 +641,6 @@ def render_investment_committee(
         record_position_exit,
         record_position_sizing,
         record_rule_check,
-        record_wins_execution,
-        record_wins_reconciliation,
         submit_committee_vote,
         submit_final_approval,
         update_committee_member_status,
@@ -966,7 +1049,8 @@ def render_investment_committee(
                     transaction_id = e1.text_input("WInS transaction ID")
                     quantity = e2.number_input("Executed quantity", min_value=0.00000001, value=1.0)
                     average_price = e3.number_input("Average execution price", min_value=0.00000001, value=1.0)
-                    side = st.selectbox("Side", ["buy", "sell"])
+                    side = "buy"
+                    st.caption("Execution side: BUY · locked to the approved proposal.")
                     currency = st.text_input("Execution currency (required)", placeholder="USD").upper()
                     executed_at = st.text_input(
                         "Executed at (ISO timestamp)", value=datetime.now(timezone.utc).isoformat()
@@ -975,52 +1059,85 @@ def render_investment_committee(
                         "Record actual WInS execution", type="primary", use_container_width=True
                     )
                 if execution_clicked:
+                    def execute_and_stage() -> Any:
+                        with get_connection() as connection:
+                            return _record_wins_execution_and_stage_tracker_position(
+                                connection,
+                                lifecycle_id,
+                                {
+                                    "wins_transaction_id": transaction_id,
+                                    "side": side,
+                                    "quantity": quantity,
+                                    "average_price": average_price,
+                                    "executed_at": executed_at,
+                                    "currency": currency,
+                                },
+                                actor=actor,
+                            )
+
                     _error_or_rerun(
-                        lambda: _call_db(
-                            get_connection, record_wins_execution, lifecycle_id,
-                            {
-                                "wins_transaction_id": transaction_id,
-                                "side": side, "quantity": quantity,
-                                "average_price": average_price,
-                                "executed_at": executed_at, "currency": currency,
-                            },
-                            recorded_by=actor,
-                        ),
-                        "WInS execution linked to the approved case.",
+                        execute_and_stage,
+                        "WInS execution linked and its pending tracker projection staged.",
                     )
 
             if state == "reconciliation":
-                with st.form(f"ios_lifecycle_reconciliation_{lifecycle_id}"):
-                    rec_status = st.selectbox("Reconciliation result", ["clean", "open_exceptions"])
-                    wins_snapshot_id = st.text_input("WInS snapshot ID")
-                    exception_json = st.text_area(
-                        "Exceptions (JSON list)", value="[]", disabled=rec_status == "clean"
+                st.info(
+                    "Lifecycle activation is derived from the latest fresh, integrity-valid, independently "
+                    "approved full-portfolio reconciliation. Status and snapshot IDs cannot be entered manually."
+                )
+                with get_connection() as connection:
+                    staged_rows = _tracker_projection_rows(connection, lifecycle_id)
+                pending_staged = (
+                    len(staged_rows) == 1
+                    and str(staged_rows[0][5] or "").strip().lower() == "pending_reconciliation"
+                )
+                if pending_staged:
+                    st.success("Pending tracker projection is staged for canonical reconciliation.")
+                else:
+                    st.warning(
+                        "This execution has no pending tracker projection. Stage it before importing the next "
+                        "full WInS snapshot."
                     )
-                    reconcile_clicked = st.form_submit_button(
-                        "Append reconciliation", type="primary", use_container_width=True
-                    )
-                if reconcile_clicked:
-                    def reconcile() -> Any:
-                        try:
-                            exceptions = json.loads(exception_json or "[]")
-                        except json.JSONDecodeError as exc:
-                            raise ValueError("Exceptions must be a valid JSON list.") from exc
-                        payload = {
-                            "status": rec_status,
-                            "wins_snapshot_id": wins_snapshot_id,
-                            "exceptions": exceptions,
-                        }
+                    if st.button(
+                        "Stage pending tracker projection",
+                        key=f"ios_stage_pending_{lifecycle_id}",
+                        use_container_width=True,
+                    ):
+                        _error_or_rerun(
+                            lambda: _call_db(
+                                get_connection,
+                                _stage_pending_tracker_position,
+                                lifecycle,
+                                actor=actor,
+                            ),
+                            "Pending tracker projection staged.",
+                        )
+
+                st.caption(
+                    "Import and independently approve the full account snapshot in Live Portfolio & Data "
+                    "Reliability, then return here to activate this lifecycle."
+                )
+                if st.button(
+                    "Activate from latest signed canonical reconciliation",
+                    type="primary",
+                    disabled=not pending_staged,
+                    key=f"ios_activate_canonical_{lifecycle_id}",
+                    use_container_width=True,
+                ):
+                    def activate_from_pipeline() -> Any:
                         with get_connection() as connection:
-                            if rec_status == "clean":
-                                return _activate_reconciled_tracker_position(
-                                    connection, lifecycle, payload, actor=actor
-                                )
-                            return record_wins_reconciliation(
-                                connection, lifecycle_id, payload, recorded_by=actor
+                            current = get_investment_lifecycle(connection, lifecycle_id)
+                            if current is None:
+                                raise ValueError("The investment lifecycle no longer exists.")
+                            return _activate_reconciled_tracker_position(
+                                connection,
+                                current,
+                                actor=actor,
                             )
+
                     _error_or_rerun(
-                        reconcile,
-                        "Reconciliation appended. A clean result creates the one canonical tracker position.",
+                        activate_from_pipeline,
+                        "Signed canonical reconciliation linked; the tracker projection is now active.",
                     )
 
             if state == "active":
@@ -1111,7 +1228,10 @@ def render_investment_committee(
 def _tracker_snapshot_rows(positions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for raw in positions:
-        if str(raw.get("status") or "open").lower() != "open":
+        if str(raw.get("status") or "open").lower() not in {
+            "open",
+            "pending_reconciliation",
+        }:
             continue
         quantity = float(raw.get("quantity") or 0.0)
         price = float(raw.get("last_price") or raw.get("entry_price") or 0.0)
@@ -1125,6 +1245,26 @@ def _tracker_snapshot_rows(positions: Sequence[Mapping[str, Any]]) -> list[dict[
             "currency": str(raw.get("currency") or "").strip().upper() or None,
         })
     return rows
+
+
+def _tracker_cash_value(
+    positions: Sequence[Mapping[str, Any]],
+    *,
+    initial_capital: float = 500_000.0,
+) -> float:
+    """Derive competition cash after open costs, realised P/L, and cash income."""
+    from src.portfolio_tracker.wharton_competition import calculate_portfolio_performance
+
+    performance = calculate_portfolio_performance(
+        positions,
+        live_prices={},
+        initial_capital=initial_capital,
+    )
+    return float(
+        performance["cash_before_pnl"]
+        + performance["realized_pnl"]
+        + performance["open_cash_income"]
+    )
 
 
 def _save_pipeline_workspace(
@@ -1197,6 +1337,7 @@ def render_live_portfolio_pipeline(
         assign_exception,
         latest_reconciliation,
         materialize_reconciliation,
+        migrate_reconciliation_ledger,
         new_reconciliation_ledger,
         reconciliation_history,
         resolve_exception,
@@ -1217,6 +1358,17 @@ def render_live_portfolio_pipeline(
     )
     for key, value in default.items():
         workspace.setdefault(key, value)
+    migrated_ledger = migrate_reconciliation_ledger(workspace.get("ledger"))
+    ledger_was_migrated = migrated_ledger != workspace.get("ledger")
+    if ledger_was_migrated:
+        workspace = {**workspace, "ledger": migrated_ledger}
+        _save_pipeline_workspace(
+            get_connection,
+            workspace,
+            actor=f"{actor}:automatic-ledger-migration",
+            expected_version=version,
+        )
+        version += 1
 
     mandate_record = strategy_data.get("mandate_record") or {}
     strategy_record = strategy_data.get("strategy_record") or {}
@@ -1236,6 +1388,10 @@ def render_live_portfolio_pipeline(
         "A single reconciled WInS snapshot feeds Tracker, Quant, Risk, Factors, Scenarios, FX, and Reporting. "
         "Every consumer displays the same snapshot ID, timestamp, source, completeness, and freshness."
     )
+    if ledger_was_migrated:
+        st.success(
+            "Legacy reconciliation history was migrated losslessly and saved as schema v1."
+        )
     top = st.columns(4)
     top[0].metric("Pipeline", pipeline["status"].title())
     top[1].metric("Authority", pipeline["authority"].replace("_", " ").title())
@@ -1283,7 +1439,7 @@ def render_live_portfolio_pipeline(
                 tracker_snapshot = create_portfolio_snapshot(
                     tracked_rows, provider="Portfolio Tracker", observed_at=datetime.now(timezone.utc),
                     method="cache", source_reference="competition_positions",
-                    imported_by=actor, cash_value=0.0,
+                    imported_by=actor, cash_value=_tracker_cash_value(tracker_positions),
                 )
                 updated = dict(workspace)
                 updated["snapshots"] = [*workspace["snapshots"], tracker_snapshot, wins_snapshot]

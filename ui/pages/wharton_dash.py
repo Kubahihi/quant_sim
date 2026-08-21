@@ -41,12 +41,31 @@ for module_name, module_obj in list(sys.modules.items()):
     except ValueError:
         sys.modules.pop(module_name, None)
 
-import bcrypt
-import numpy as np
-import pandas as pd
 import streamlit as st
 
 import src as _src
+
+
+class _LazyModule:
+    """Load a heavy dependency only when the authenticated cockpit uses it."""
+
+    __slots__ = ("_global_name", "_module_name")
+
+    def __init__(self, module_name: str, global_name: str) -> None:
+        self._module_name = module_name
+        self._global_name = global_name
+
+    def __getattr__(self, name: str) -> Any:
+        module = importlib.import_module(self._module_name)
+        # Replace the proxy after the first access so numerical hot paths pay
+        # no repeated proxy overhead.
+        globals()[self._global_name] = module
+        return getattr(module, name)
+
+
+bcrypt = _LazyModule("bcrypt", "bcrypt")
+np = _LazyModule("numpy", "np")
+pd = _LazyModule("pandas", "pd")
 
 # A Streamlit rerun may still hold the local package object from the preceding
 # deployment. Refresh it once when the newly added build metadata is absent.
@@ -326,8 +345,131 @@ def get_connection() -> sqlite3.Connection:
     return get_db_connection(DB_PATH)
 
 
+def _ensure_canonical_position_uniqueness(conn: sqlite3.Connection) -> list[Any]:
+    """Enforce one tracker projection per lifecycle without deleting legacy data."""
+    # The triggers are safe to install even when an older database already
+    # contains duplicates. They serialize with SQLite/libSQL writes and stop
+    # any additional duplicate projection from being created.
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS competition_positions_lifecycle_insert_guard
+        BEFORE INSERT ON competition_positions
+        WHEN NEW.lifecycle_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM competition_positions
+              WHERE lifecycle_id = NEW.lifecycle_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'one tracker projection per lifecycle');
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS competition_positions_lifecycle_update_guard
+        BEFORE UPDATE OF lifecycle_id ON competition_positions
+        WHEN NEW.lifecycle_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM competition_positions
+              WHERE lifecycle_id = NEW.lifecycle_id AND id <> OLD.id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'one tracker projection per lifecycle');
+        END
+    """)
+    duplicate_rows = conn.execute("""
+        SELECT lifecycle_id
+        FROM competition_positions
+        WHERE lifecycle_id IS NOT NULL
+        GROUP BY lifecycle_id
+        HAVING COUNT(*) > 1
+        ORDER BY lifecycle_id
+    """).fetchall()
+    duplicate_ids = [row["lifecycle_id"] for row in duplicate_rows]
+    if duplicate_ids:
+        LOGGER.error(
+            "Canonical tracker projection uniqueness index deferred; existing duplicate "
+            "lifecycle IDs require audit: %s",
+            duplicate_ids,
+        )
+        return duplicate_ids
+
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_competition_positions_lifecycle_id
+        ON competition_positions(lifecycle_id)
+        WHERE lifecycle_id IS NOT NULL
+    """)
+    return []
+
+
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _bcrypt_password_matches(password: str, stored_hash: str) -> bool:
+    if not stored_hash:
+        return False
+    try:
+        return bool(
+            bcrypt.checkpw(
+                password.encode("utf-8"),
+                stored_hash.encode("utf-8"),
+            )
+        )
+    except ValueError:
+        # Replace malformed or unsupported legacy hashes during initialization.
+        return False
+
+
+def _synchronize_seeded_users(
+    conn: sqlite3.Connection,
+    seeded_passwords: Mapping[str, str],
+) -> None:
+    """Upsert fixed team accounts with one bcrypt check per distinct password."""
+    existing_users = {
+        str(row["username"]): str(row["password_hash"] or "")
+        for row in conn.execute(
+            "SELECT username, password_hash FROM wharton_users"
+        ).fetchall()
+    }
+    verified_hash_by_password: dict[str, str] = {}
+
+    for user in DEFAULT_USERS:
+        username = str(user["username"])
+        password = str(seeded_passwords[username])
+        password_hash = verified_hash_by_password.get(password)
+        if password_hash is None:
+            stored_hash = existing_users.get(username, "")
+            if _bcrypt_password_matches(password, stored_hash):
+                password_hash = stored_hash
+            else:
+                password_hash = bcrypt.hashpw(
+                    password.encode("utf-8"),
+                    bcrypt.gensalt(),
+                ).decode("utf-8")
+            verified_hash_by_password[password] = password_hash
+
+        if username in existing_users:
+            conn.execute(
+                "UPDATE wharton_users "
+                "SET password_hash = ?, role = ?, primary_module = ? "
+                "WHERE username = ?",
+                (
+                    password_hash,
+                    user["role"],
+                    user["primary_module"],
+                    username,
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO wharton_users "
+                "(username, password_hash, role, primary_module) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    username,
+                    password_hash,
+                    user["role"],
+                    user["primary_module"],
+                ),
+            )
 
 
 def _initialize_database() -> None:
@@ -584,6 +726,7 @@ def _initialize_database() -> None:
         ]:
             if col not in position_cols:
                 conn.execute(f"ALTER TABLE competition_positions ADD COLUMN {col} {definition}")
+        _ensure_canonical_position_uniqueness(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
@@ -669,38 +812,7 @@ def _initialize_database() -> None:
             "DELETE FROM wharton_users WHERE username = ?",
             [(username,) for username in sorted(LEGACY_USERS)],
         )
-        existing_users = {
-            str(row["username"]): str(row["password_hash"] or "")
-            for row in conn.execute("SELECT username, password_hash FROM wharton_users").fetchall()
-        }
-        for user in DEFAULT_USERS:
-            user_pass = seeded_passwords[user["username"]]
-
-            if existing_users.get(user["username"]):
-                stored_hash = existing_users[user["username"]]
-                if stored_hash and bcrypt.checkpw(user_pass.encode("utf-8"), stored_hash.encode("utf-8")):
-                    conn.execute(
-                        "UPDATE wharton_users SET role = ?, primary_module = ? WHERE username = ?",
-                        (user["role"], user["primary_module"], user["username"]),
-                    )
-                    continue
-                # Password changed, update it
-                password_hash = bcrypt.hashpw(
-                    user_pass.encode("utf-8"), bcrypt.gensalt()
-                ).decode("utf-8")
-                conn.execute(
-                    "UPDATE wharton_users SET password_hash = ?, role = ?, primary_module = ? WHERE username = ?",
-                    (password_hash, user["role"], user["primary_module"], user["username"])
-                )
-            else:
-                password_hash = bcrypt.hashpw(
-                    user_pass.encode("utf-8"), bcrypt.gensalt()
-                ).decode("utf-8")
-
-                conn.execute(
-                    "INSERT INTO wharton_users (username, password_hash, role, primary_module) VALUES (?, ?, ?, ?)",
-                    (user["username"], password_hash, user["role"], user["primary_module"]),
-                )
+        _synchronize_seeded_users(conn, seeded_passwords)
 
 
         # Seed mindmap
@@ -7067,7 +7179,7 @@ def _render_strategy_alignment(data: dict[str, Any]) -> None:
 
     mandate = _strategy_payload(data.get("mandate_record"))
     strategy = _strategy_payload(data.get("strategy_record"))
-    positions = _fetch_competition_positions()
+    positions = _settled_competition_positions(_fetch_competition_positions())
     open_tickers = [str(row.get("ticker") or "").upper() for row in positions if str(row.get("status") or "open") == "open"]
     performance = calculate_portfolio_performance(positions, _competition_live_prices(open_tickers))
     thesis_by_ticker = {
@@ -7191,7 +7303,7 @@ def _render_pretrade_lab(data: dict[str, Any]) -> None:
 
     mandate = _strategy_payload(data.get("mandate_record"))
     strategy = _strategy_payload(data.get("strategy_record"))
-    positions = _fetch_competition_positions()
+    positions = _settled_competition_positions(_fetch_competition_positions())
     open_tickers = [
         str(row.get("ticker") or "").upper()
         for row in positions
@@ -7651,8 +7763,8 @@ def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> N
 
 
 def _render_decision_log(
-    profile: dict[str, str | int],
-    result: dict,
+    _profile: dict[str, str | int],
+    _result: dict,
     goal_names: list[str] | None = None,
 ) -> None:
     import json
@@ -7664,131 +7776,49 @@ def _render_decision_log(
         "Risk": ["Beta", "Debt/Equity", "52W High", "52W Low"],
         "Analyst": ["Analyst Target", "Upside to Target"],
     }
-    st.markdown("### Investment Decision Log")
-    st.caption("Chronological record of strategy decisions, including the price captured at each decision. Every team edit is marked in the price chart with that member's colour.")
+    st.markdown("### Decision Journal")
+    st.caption(
+        "Trade decisions are a read-only projection of the canonical Investment Committee lifecycle. "
+        "Historical legacy records are preserved below for audit, but this screen cannot create or edit decisions."
+    )
 
-    # ── Form to log a new decision ────────────────────────────────────────────
-    with st.expander("Log New Decision", expanded=False):
-        with st.form("add_decision_form", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                ticker = st.text_input("Ticker(s)", placeholder="e.g. MSFT or MSFT, AAPL")
-            with c2:
-                action = st.selectbox("Action", ["Buy", "Sell", "Hold", "Rebalance", "Other"])
-
-            c3, c4 = st.columns(2)
-            with c3:
-                if goal_names:
-                    st.caption("Goals come from the active Client Mandate in Strategy Lab.")
-                else:
-                    st.caption("Default analytical buckets are shown until the Client Mandate is saved.")
-                tags = st.multiselect("Client Goals Addressed", available_goals)
-            with c4:
-                fetch_fundamentals = st.checkbox("Fetch live fundamentals from Yahoo Finance", value=True)
-
-            thesis = st.text_area("Investment Thesis / Rationale", height=120,
-                                  placeholder="Why are we making this decision? What is the expected outcome?")
-            st.markdown("##### Testable expectation")
-            e1, e2, e3, e4 = st.columns(4)
-            with e1:
-                horizon_days = st.number_input("Review horizon (days)", 1, 3650, 365, 30)
-            with e2:
-                decision_benchmark = st.text_input("Decision benchmark", value="SPY").strip().upper()
-            with e3:
-                expected_return_min = st.number_input("Expected return floor (%)", -100.0, 1000.0, -10.0, 1.0)
-            with e4:
-                expected_return_max = st.number_input("Expected return ceiling (%)", -100.0, 1000.0, 20.0, 1.0)
-            e5, e6 = st.columns(2)
-            with e5:
-                decision_confidence = st.slider("Decision confidence", 1, 5, 3)
-                planned_weight = st.number_input("Planned portfolio weight (%)", 0.0, 100.0, 0.0, 1.0)
-            with e6:
-                target_condition = st.text_area(
-                    "Observable success condition",
-                    placeholder="What must become true for the thesis to be supported?",
-                    height=85,
-                )
-            invalidation_condition = st.text_area(
-                "Observable invalidation condition",
-                placeholder="What evidence would prove the decision thesis wrong?",
-                height=75,
-            )
-            st.caption(
-                "The range and confidence are team-authored expectations for later review, not an app forecast."
-            )
-
-            if st.form_submit_button("Log Decision", type="primary"):
-                if not ticker or not thesis:
-                    st.warning("Ticker and Thesis are required.")
-                elif expected_return_min > expected_return_max:
-                    st.warning("Expected return floor cannot exceed the ceiling.")
-                else:
-                    snap: dict[str, Any] = {}
-                    decision_timestamp = _now_iso()
-
-                    # Portfolio-level context from Quant Engine
-                    if result and "metrics" in result:
-                        m = result["metrics"]
-                        portfolio_snap: dict[str, Any] = {
-                            "Sharpe Ratio": m.get("sharpe_ratio"),
-                            "Ann. Return": m.get("annualized_return"),
-                            "Volatility": m.get("volatility"),
-                            "Max Drawdown": m.get("max_drawdown"),
-                        }
-                        # Compute CVaR-95 directly from portfolio returns
-                        port_rets = result.get("portfolio_returns")
-                        if port_rets is not None and hasattr(port_rets, "__len__") and len(port_rets) >= 30:
-                            try:
-                                from src.analytics.risk_metrics import calculate_cvar
-                                cvar_95 = calculate_cvar(pd.Series(port_rets).dropna(), confidence_level=0.95)
-                                portfolio_snap["CVaR-95 (daily)"] = float(cvar_95)
-                            except Exception:
-                                pass
-                        # Cast all values to plain Python float to avoid json.dumps
-                        # failing on numpy.float64 / numpy.float32 scalars.
-                        snap["_portfolio"] = {
-                            k: (float(v) if v is not None else None)
-                            for k, v in portfolio_snap.items()
-                        }
-
-                    # Per-ticker fundamentals
-                    if fetch_fundamentals:
-                        tickers_list = [t.strip().upper() for t in ticker.replace(",", " ").split() if t.strip()]
-                        with st.spinner(f"Fetching fundamentals for {', '.join(tickers_list)}…"):
-                            snap["_fundamentals"] = {}
-                            for t in tickers_list:
-                                snap["_fundamentals"][t] = _fetch_ticker_fundamentals(t)
-                    snap["_metadata"] = {
-                        "captured_at": decision_timestamp,
-                        "fundamentals_source": "Yahoo Finance" if fetch_fundamentals else None,
-                    }
-
-                    snap_json = json.dumps(snap)
-                    tags_str = ",".join(tags)
-                    with get_connection() as conn:
-                        conn.execute(
-                            """
-                            INSERT INTO decision_log (
-                                ticker, action, date, thesis, client_goal_tags, team_member,
-                                quant_snapshot_json, updated_at, updated_by, horizon_days,
-                                benchmark_ticker, expected_return_min, expected_return_max,
-                                decision_confidence, target_condition, invalidation_condition,
-                                planned_weight
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                ticker.upper(), action, decision_timestamp, thesis, tags_str,
-                                str(profile["username"]), snap_json, None, None, int(horizon_days),
-                                decision_benchmark or None, float(expected_return_min) / 100.0,
-                                float(expected_return_max) / 100.0, int(decision_confidence),
-                                target_condition.strip(), invalidation_condition.strip(),
-                                float(planned_weight) / 100.0,
-                            ),
-                        )
-                        conn.commit()
-                        if hasattr(conn, 'sync'): conn.sync()
-                    st.success(f"Decision logged with {len(snap.get('_fundamentals', {}))} ticker(s) snapshotted.")
-                    st.rerun()
+    with get_connection() as conn:
+        lifecycle_rows = conn.execute(
+            """
+            SELECT id, ticker, dossier_id, dossier_version, universe_snapshot_id,
+                   state, proposal_json, current_position_id, created_by,
+                   created_at, updated_at
+            FROM canonical_investment_lifecycles
+            ORDER BY updated_at DESC, id DESC
+            """
+        ).fetchall()
+    if lifecycle_rows:
+        st.markdown("#### Canonical IC decision projection")
+        projected_rows: list[dict[str, Any]] = []
+        for lifecycle_row in lifecycle_rows:
+            try:
+                proposal = json.loads(str(lifecycle_row["proposal_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                proposal = {}
+            projected_rows.append({
+                "Investment ID": int(lifecycle_row["id"]),
+                "Ticker": str(lifecycle_row["ticker"]),
+                "Action": str(proposal.get("action") or "—").upper(),
+                "State": str(lifecycle_row["state"]).replace("_", " ").title(),
+                "Requested weight": (
+                    f"{float(proposal['proposed_weight_pct']):.2f}%"
+                    if proposal.get("proposed_weight_pct") is not None else "—"
+                ),
+                "Client goal": proposal.get("client_goal") or "—",
+                "Dossier": f"#{lifecycle_row['dossier_id']} v{lifecycle_row['dossier_version']}",
+                "Universe": f"#{lifecycle_row['universe_snapshot_id']}",
+                "Position ID": lifecycle_row["current_position_id"] or "—",
+                "Created by": lifecycle_row["created_by"],
+                "Updated": lifecycle_row["updated_at"],
+            })
+        st.dataframe(pd.DataFrame(projected_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No canonical Investment Committee decision exists yet.")
 
     # ── Load log ──────────────────────────────────────────────────────────────
     with get_connection() as conn:
@@ -7796,11 +7826,11 @@ def _render_decision_log(
         edit_rows = conn.execute("SELECT * FROM decision_edit_log ORDER BY id ASC").fetchall()
 
     if not rows:
-        st.info("No decisions logged yet. Use the form above to log your first investment decision.")
+        st.info("No legacy decision records exist.")
         return
 
     # -- Decision timeline table
-    st.markdown('#### Decision Timeline')
+    st.markdown('#### Legacy records — read-only')
     df_data = []
     for r in rows:
         snap = {}
@@ -7838,7 +7868,15 @@ def _render_decision_log(
 
     # -- Price at each decision, with a persistent colour for each team editor
     st.markdown('#### Price at Decision & Team Edit History')
-    st.caption('The curve shows the latest six months of daily prices. Circles mark the price captured at each decision; diamonds show subsequent edits in the editor’s colour.')
+    load_legacy_price_history = st.checkbox(
+        "Load external price history for the legacy archive",
+        value=False,
+        help="Off by default so opening Decision Journal never waits for Yahoo data.",
+    )
+    st.caption(
+        "Archived decision points render immediately. Enable external history only when the six-month "
+        "comparison is actually needed."
+    )
     try:
         import plotly.graph_objects as go
 
@@ -7881,7 +7919,11 @@ def _render_decision_log(
         chart_count = 0
         for tkr, points in price_points.items():
             fig = go.Figure()
-            history = _fetch_six_month_price_history(tkr)
+            history = (
+                _fetch_six_month_price_history(tkr)
+                if load_legacy_price_history
+                else []
+            )
             if history:
                 period_start = history[0][0]
                 points = [point for point in points if point['date'][:10] >= period_start]
@@ -7971,7 +8013,7 @@ def _render_decision_log(
             )
             thesis_style = "color:#6b21a8;background:#faf5ff;padding:0.75rem;border-radius:4px;" if was_edited_by_teammate else ""
             st.markdown(
-                f"<p><strong>Thesis:</strong></p><div style='{thesis_style}'>{escape(str(r['thesis']))}</div>",
+                f"<p><strong>Journal content:</strong></p><div style='{thesis_style}'>{escape(str(r['thesis']))}</div>",
                 unsafe_allow_html=True,
             )
             expectation_cols = st.columns(4)
@@ -7990,47 +8032,10 @@ def _render_decision_log(
                 st.markdown(f"**Success condition:** {escape(str(r['target_condition']))}")
             if r['invalidation_condition']:
                 st.markdown(f"**Invalidation condition:** {escape(str(r['invalidation_condition']))}")
-            st.caption("Original expectation fields are locked; later evaluation is appended in Review & Learning.")
-            # This is intentionally a container rather than a nested expander:
-            # Streamlit does not support expanders inside expanders.
-            with st.container():
-                st.markdown("**Edit this decision**")
-                allowed_actions = ["Buy", "Sell", "Hold", "Rebalance", "Other"]
-                current_action = str(r['action'])
-                action_index = allowed_actions.index(current_action) if current_action in allowed_actions else len(allowed_actions) - 1
-                current_tags = [tag for tag in str(r['client_goal_tags'] or '').split(',') if tag]
-                with st.form(f"edit_decision_{r['id']}"):
-                    edit_ticker = st.text_input("Ticker(s)", value=str(r['ticker']), key=f"decision_ticker_{r['id']}")
-                    edit_action = st.selectbox("Action", allowed_actions, index=action_index, key=f"decision_action_{r['id']}")
-                    edit_tags = st.multiselect(
-                        "Client Goals Addressed",
-                        ["Growth", "Income", "Risk Tolerance", "Community/Impact"],
-                        default=[tag for tag in current_tags if tag in {"Growth", "Income", "Risk Tolerance", "Community/Impact"}],
-                        key=f"decision_tags_{r['id']}",
-                    )
-                    edit_thesis = st.text_area("Investment Thesis / Rationale", value=str(r['thesis']), height=150, key=f"decision_thesis_{r['id']}")
-                    if st.form_submit_button("Save team edit", type="primary"):
-                        if not edit_ticker.strip() or not edit_thesis.strip():
-                            st.warning("Ticker and Thesis are required.")
-                        else:
-                            edited_at = _now_iso()
-                            with get_connection() as conn:
-                                conn.execute(
-                                    "UPDATE decision_log SET ticker = ?, action = ?, thesis = ?, client_goal_tags = ?, updated_at = ?, updated_by = ? WHERE id = ?",
-                                    (
-                                        edit_ticker.strip().upper(), edit_action, edit_thesis.strip(), ",".join(edit_tags),
-                                        edited_at, str(profile["username"]), r['id'],
-                                    ),
-                                )
-                                conn.execute(
-                                    "INSERT INTO decision_edit_log (decision_id, ticker, edited_at, edited_by) VALUES (?, ?, ?, ?)",
-                                    (r['id'], edit_ticker.strip().upper(), edited_at, str(profile["username"])),
-                                )
-                                conn.commit()
-                                if hasattr(conn, 'sync'):
-                                    conn.sync()
-                            st.success("Decision updated. Its edit marker now appears in the price chart using this team member's colour.")
-                            st.rerun()
+            st.caption(
+                "Read-only archive. Trade records and their original expectation fields cannot be "
+                "created or edited here; use the canonical Investment Committee lifecycle."
+            )
             if funds:
                 for tkr, mets in funds.items():
                     st.markdown(f'**{tkr} — Fundamentals at Decision Date**')
@@ -8134,6 +8139,60 @@ def _fetch_competition_positions() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _require_legacy_position_mutation(
+    conn: sqlite3.Connection,
+    position_id: int,
+) -> None:
+    """Fail closed when a Tracker mutation targets a canonical projection."""
+    row = conn.execute(
+        "SELECT lifecycle_id FROM competition_positions WHERE id = ?",
+        (int(position_id),),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"Position #{position_id} no longer exists.")
+    lifecycle_id = row["lifecycle_id"]
+    if lifecycle_id is not None:
+        raise PermissionError(
+            f"Position #{position_id} is owned by lifecycle #{lifecycle_id}; "
+            "change it through Investment Committee."
+        )
+
+
+def _competition_position_status_label(position: Mapping[str, Any]) -> str:
+    status = str(position.get("status") or "open").strip().lower()
+    return {
+        "open": "Open",
+        "closed": "Closed",
+        "pending_reconciliation": "Pending WInS reconciliation",
+    }.get(status, status.replace("_", " ").title())
+
+
+def _duplicate_canonical_projection_ids(
+    positions: list[dict[str, Any]],
+) -> list[Any]:
+    counts: dict[Any, int] = {}
+    for position in positions:
+        lifecycle_id = position.get("lifecycle_id")
+        if lifecycle_id is not None:
+            counts[lifecycle_id] = counts.get(lifecycle_id, 0) + 1
+    return [
+        lifecycle_id
+        for lifecycle_id, count in sorted(counts.items(), key=lambda item: str(item[0]))
+        if count > 1
+    ]
+
+
+def _settled_competition_positions(
+    positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Exclude pending projections until canonical WInS sign-off activates them."""
+    return [
+        row
+        for row in positions
+        if str(row.get("status") or "open").lower() != "pending_reconciliation"
+    ]
+
+
 def _render_competition_rules(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import COMPETITION_URL, OFFICIAL_RULES_URL, evaluate_compliance
 
@@ -8202,7 +8261,10 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
         st.success(f"Compliance declaration updated by {profile['username']}.")
         current = payload
 
-    checks = evaluate_compliance(current, _fetch_competition_positions())
+    checks = evaluate_compliance(
+        current,
+        _settled_competition_positions(_fetch_competition_positions()),
+    )
     passed = sum(item["status"] == "pass" for item in checks)
     failed = sum(item["status"] == "fail" for item in checks)
     pending = sum(item["status"] == "pending" for item in checks)
@@ -8238,145 +8300,6 @@ def _competition_live_prices(tickers: list[str]) -> dict[str, float]:
         return result
     except Exception:
         return {}
-
-
-def _render_wins_reconciliation(
-    positions: list[dict[str, Any]],
-    live_prices: dict[str, float],
-) -> None:
-    """Compare a user-supplied WInS snapshot without mutating tracked positions."""
-    from src.portfolio_tracker.wins_reconciliation import (
-        normalize_wins_rows,
-        reconcile_wins_positions,
-    )
-    from src.portfolio_tracker.bond_analytics import position_cost_usd, value_position
-
-    with st.expander("WInS Reconciliation", expanded=False):
-        st.caption(
-            "Upload a WInS positions snapshot to verify that the analytical tracker matches the "
-            "competition account. The file is analysed in memory and never changes either system."
-        )
-        uploaded = st.file_uploader(
-            "WInS positions snapshot",
-            type=["csv", "xlsx", "xls"],
-            key="wins_reconciliation_upload",
-            help=(
-                "Common headers such as Ticker/Symbol, Quantity/Shares, Cost Basis, Current Price, "
-                "Market Value and Security Type are detected automatically."
-            ),
-        )
-        if uploaded is None:
-            st.info("Upload a CSV or Excel export to run the reconciliation check.")
-            return
-
-        try:
-            if str(uploaded.name).lower().endswith((".xlsx", ".xls")):
-                uploaded_rows = pd.read_excel(uploaded).to_dict(orient="records")
-            else:
-                uploaded_rows = pd.read_csv(uploaded, sep=None, engine="python").to_dict(orient="records")
-        except Exception as exc:
-            st.error(f"The uploaded snapshot could not be read ({type(exc).__name__}).")
-            return
-
-        normalized = normalize_wins_rows(uploaded_rows)
-        if uploaded_rows and not normalized:
-            st.error(
-                "No ticker column was recognised. Include a column named Ticker, Symbol, "
-                "Ticker Symbol or Security Symbol."
-            )
-            return
-
-        tracked_snapshot: list[dict[str, Any]] = []
-        for position in positions:
-            row = dict(position)
-            ticker = str(row.get("ticker") or "").upper()
-            if str(row.get("status") or "open").lower() == "open":
-                market_price = live_prices.get(ticker)
-                if market_price is None:
-                    market_price = row.get("last_price")
-                if market_price in (None, "", 0, 0.0):
-                    market_price = row.get("entry_price")
-                row["current_price"] = market_price
-                row["total_cost"] = position_cost_usd(row)
-                row["current_value"] = value_position(row, market_price)["current_value"]
-            tracked_snapshot.append(row)
-
-        result = reconcile_wins_positions(uploaded_rows, tracked_snapshot)
-        summary = result["summary"]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Two-way Coverage", f"{summary['two_way_coverage_pct']:.1f}%")
-        m2.metric("Exact Matches", int(summary["exact_matches"]))
-        m3.metric("Value Differences", int(summary["mismatched_positions"]))
-        m4.metric(
-            "Missing / Extra",
-            f"{int(summary['missing_positions'])} / {int(summary['extra_positions'])}",
-        )
-
-        status = str(result.get("status") or "no_data")
-        if status == "reconciled":
-            st.success("The WInS snapshot and all tracked open positions reconcile within tolerance.")
-        elif status == "partial":
-            st.warning(
-                "All comparable values agree, but at least one required value is missing on one side."
-            )
-        elif status == "differences":
-            st.error(
-                "The snapshot does not fully reconcile. Review the position-level differences below."
-            )
-        else:
-            st.info("Neither source contains an open position to compare.")
-
-        comparison_rows: list[dict[str, Any]] = []
-        for item in result["matched"]:
-            wins = item["wins"]
-            tracked = item["tracked"]
-            comparison_rows.append({
-                "Ticker": item["ticker"],
-                "Result": str(item["status"]).replace("_", " ").title(),
-                "WInS Quantity": wins.get("quantity"),
-                "Tracker Quantity": tracked.get("quantity"),
-                "Quantity Difference": item.get("quantity_difference"),
-                "WInS Cost": wins.get("total_cost"),
-                "Tracker Cost": tracked.get("total_cost"),
-                "Cost Difference": item.get("cost_difference"),
-                "WInS Value": wins.get("current_value"),
-                "Tracker Value": tracked.get("current_value"),
-                "Value Difference": item.get("value_difference"),
-            })
-        for bucket, label in (("missing", "Missing in WInS"), ("extra", "Extra in WInS")):
-            for item in result[bucket]:
-                is_extra = bucket == "extra"
-                comparison_rows.append({
-                    "Ticker": item["ticker"],
-                    "Result": label,
-                    "WInS Quantity": item.get("quantity") if is_extra else None,
-                    "Tracker Quantity": None if is_extra else item.get("quantity"),
-                    "Quantity Difference": item.get("quantity_difference"),
-                    "WInS Cost": item.get("total_cost") if is_extra else None,
-                    "Tracker Cost": None if is_extra else item.get("total_cost"),
-                    "Cost Difference": item.get("cost_difference"),
-                    "WInS Value": item.get("current_value") if is_extra else None,
-                    "Tracker Value": None if is_extra else item.get("current_value"),
-                    "Value Difference": item.get("value_difference"),
-                })
-        if comparison_rows:
-            st.dataframe(
-                pd.DataFrame(comparison_rows),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "WInS Cost": st.column_config.NumberColumn(format="$%.2f"),
-                    "Tracker Cost": st.column_config.NumberColumn(format="$%.2f"),
-                    "Cost Difference": st.column_config.NumberColumn(format="$%.2f"),
-                    "WInS Value": st.column_config.NumberColumn(format="$%.2f"),
-                    "Tracker Value": st.column_config.NumberColumn(format="$%.2f"),
-                    "Value Difference": st.column_config.NumberColumn(format="$%.2f"),
-                },
-            )
-        st.caption(
-            "Differences use WInS minus tracker. Exact matches use a quantity tolerance of 1e-8 "
-            "and a USD tolerance of $0.01."
-        )
 
 
 def _render_live_competition_analytics(
@@ -9908,7 +9831,7 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
                 st.warning("Sensitivity results are deterministic analytical estimates, not price forecasts or investment advice.")
 
     with portfolio_tab:
-        positions = _fetch_competition_positions()
+        positions = _settled_competition_positions(_fetch_competition_positions())
         bond_positions = [
             row for row in positions
             if str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
@@ -9954,173 +9877,57 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     )
     with st.expander("Legacy position form (read-only migration reference)", expanded=False):
         st.caption(
-            "This retired form is retained temporarily so historical bond fields can be inspected. "
-            "Use Security Dossiers for thesis data and Investment Committee for every new position."
+            "The retired editor has no input controls or server-side write path. Historical records "
+            "remain readable below; use Security Dossiers and Investment Committee for new positions."
         )
-        with st.form("competition_add_position", clear_on_submit=True):
-            p1, p2, p3 = st.columns(3)
-            with p1:
-                ticker = st.text_input("Ticker / internal identifier", placeholder="e.g. MSFT or bond code")
-                security_type = st.selectbox("Type", ["Stock", "ETF", "Bond", "Commodity", "Other"])
-            with p2:
-                quantity = st.number_input("Quantity", min_value=0.0, value=0.0, step=1.0)
-                entry_price = st.number_input(
-                    "Entry price", min_value=0.0, value=0.0, step=0.01,
-                    help="USD per unit for stocks/ETFs; clean quote per 100 of par for an individual bond.",
-                )
-            with p3:
-                entry_date = st.date_input("Opening Date", value=date.today())
-                manual_price = st.number_input(
-                    "Current price (optional)", min_value=0.0, value=0.0, step=0.01,
-                    help="For an individual bond, enter the current clean quote per 100 of par.",
-                )
-            st.markdown("##### Fixed-income details")
-            st.caption("These fields are used only when Type is Bond. Select Bond ETF for an exchange-traded fund.")
-            b1, b2, b3, b4 = st.columns(4)
-            with b1:
-                bond_instrument_type = st.selectbox("Bond instrument", ["Individual bond", "Bond ETF"])
-                bond_category = st.selectbox("Bond category", ["Corporate", "Government", "Municipal", "Sovereign", "Other"])
-                isin = st.text_input("ISIN (individual bond)").strip().upper()
-                issuer = st.text_input("Issuer")
-            with b2:
-                currency = st.text_input("Currency", value="USD").strip().upper()
-                face_value = st.number_input("Face value per bond", min_value=0.0, value=1000.0, step=100.0)
-                coupon_rate_pct = st.number_input("Annual coupon (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.01)
-                coupon_frequency = st.selectbox("Coupon payments per year", [1, 2, 4, 12], index=1)
-            with b3:
-                maturity_date = st.date_input("Maturity date", value=date.today() + timedelta(days=365 * 5))
-                next_coupon_date = st.date_input("Next coupon date", value=date.today() + timedelta(days=182))
-                entry_accrued_interest = st.number_input("Entry accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
-                accrued_interest = st.number_input("Current accrued interest / 100", min_value=0.0, value=0.0, step=0.01)
-            with b4:
-                entry_fx_rate = st.number_input("Entry FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f")
-                current_fx_rate = st.number_input("Current FX to USD", min_value=0.000001, value=1.0, step=0.01, format="%.6f")
-                coupon_income = st.number_input("Coupons received (USD)", min_value=0.0, value=0.0, step=1.0)
-                credit_rating = st.text_input("Credit rating", placeholder="e.g. A-")
-            r1, r2, r3 = st.columns(3)
-            with r1:
-                ytm_pct = st.number_input("YTM override (%)", value=0.0, step=0.01, help="Leave at zero to calculate it from price and cash flows.")
-            with r2:
-                modified_duration = st.number_input("Modified duration override", min_value=0.0, value=0.0, step=0.1)
-            with r3:
-                convexity = st.number_input("Convexity override", min_value=0.0, value=0.0, step=0.1)
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                seniority = st.text_input("Seniority", placeholder="e.g. Senior unsecured")
-            with m2:
-                valuation_source = st.text_input("Valuation source", placeholder="e.g. WInS statement")
-            with m3:
-                source_url = st.text_input("Source URL / reference")
-            q1, q2, q3, q4 = st.columns(4)
-            with q1:
-                callable_bond = st.checkbox("Callable individual bond", key="portfolio_bond_callable")
-                call_date = st.date_input("First call date", value=date.today() + timedelta(days=365 * 2), key="portfolio_bond_call_date")
-                call_price = st.number_input("Call price / 100", min_value=0.01, value=100.0, step=0.01, key="portfolio_bond_call_price")
-            with q2:
-                benchmark_name = st.text_input("Yield benchmark", placeholder="e.g. 5Y U.S. Treasury", key="portfolio_bond_benchmark")
-                benchmark_yield_pct = st.number_input("Benchmark yield (%)", value=0.0, step=0.01, key="portfolio_bond_benchmark_yield")
-            with q3:
-                income_yield_pct = st.number_input("ETF income yield (%)", min_value=0.0, value=0.0, step=0.01, key="portfolio_bond_income_yield")
-                default_probability_pct = st.number_input("Annual default probability (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.05, key="portfolio_bond_pd")
-            with q4:
-                recovery_rate_pct = st.number_input("Recovery rate (%)", min_value=0.0, max_value=100.0, value=40.0, step=1.0, key="portfolio_bond_recovery")
-            e1, e2, e3 = st.columns(3)
-            with e1:
-                competition_eligibility_status = st.selectbox(
-                    "Current WInS eligibility",
-                    ["Pending verification", "Verified eligible", "Verified ineligible"],
-                    key="portfolio_bond_eligibility",
-                    help="Verify against the current official rules or WInS security list before trading.",
-                )
-            with e2:
-                eligibility_source = st.text_input(
-                    "Eligibility source", placeholder="Official rule or WInS list reference",
-                    key="portfolio_bond_eligibility_source",
-                )
-            with e3:
-                eligibility_checked_at = st.date_input(
-                    "Eligibility checked on", value=date.today(), key="portfolio_bond_eligibility_date",
-                )
-            notes = st.text_area("Legacy migration notes", height=80)
-            add_position = st.form_submit_button(
-                "Direct position entry disabled",
-                use_container_width=True,
-                disabled=True,
-            )
-        if add_position:
-            individual_bond = security_type == "Bond" and bond_instrument_type == "Individual bond"
-            clean_ticker = ticker.strip().upper() or (isin if individual_bond else "")
-            if not clean_ticker or quantity <= 0 or entry_price <= 0:
-                st.error("Ticker, quantity, and entry price are required and must be positive.")
-            elif individual_bond and (not isin or face_value <= 0 or maturity_date <= entry_date):
-                st.error("An individual bond requires an ISIN, positive face value, and maturity after the opening date.")
-            elif individual_bond and manual_price > 0 and not valuation_source.strip():
-                st.error("Identify the valuation source when entering a current bond price.")
-            elif individual_bond and callable_bond and not (entry_date < call_date < maturity_date):
-                st.error("The first call date must be after opening and before maturity.")
-            elif security_type == "Bond" and competition_eligibility_status != "Pending verification" and not eligibility_source.strip():
-                st.error("A verified eligibility status requires an official rule or WInS list reference.")
-            else:
-                values = {
-                    "ticker": clean_ticker, "security_type": security_type,
-                    "quantity": float(quantity), "entry_price": float(entry_price),
-                    "entry_date": entry_date.isoformat(), "opened_by": str(profile["username"]),
-                    "opened_at": _now_iso(), "last_price": float(manual_price) if manual_price > 0 else None,
-                    "notes": notes.strip(), "status": "open",
-                    "bond_instrument_type": "individual" if individual_bond else "etf" if security_type == "Bond" else "",
-                    "bond_category": bond_category if security_type == "Bond" else "",
-                    "isin": isin if individual_bond else "", "issuer": issuer.strip() if security_type == "Bond" else "",
-                    "currency": currency or "USD", "face_value": float(face_value) if individual_bond else None,
-                    "coupon_rate": float(coupon_rate_pct) / 100.0 if individual_bond else None,
-                    "maturity_date": maturity_date.isoformat() if individual_bond else None,
-                    "coupon_frequency": int(coupon_frequency) if individual_bond else None,
-                    "next_coupon_date": next_coupon_date.isoformat() if individual_bond else None,
-                    "entry_accrued_interest": float(entry_accrued_interest) if individual_bond else 0.0,
-                    "accrued_interest": float(accrued_interest) if individual_bond else 0.0,
-                    "entry_fx_rate_to_usd": float(entry_fx_rate) if individual_bond else 1.0,
-                    "fx_rate_to_usd": float(current_fx_rate) if individual_bond else 1.0,
-                    "coupon_income": float(coupon_income) if individual_bond else 0.0,
-                    "yield_to_maturity": float(ytm_pct) / 100.0 if ytm_pct else None,
-                    "modified_duration": float(modified_duration) if modified_duration else None,
-                    "convexity": float(convexity) if convexity else None,
-                    "credit_rating": credit_rating.strip() if security_type == "Bond" else "",
-                    "seniority": seniority.strip() if individual_bond else "",
-                    "valuation_source": valuation_source.strip() if security_type == "Bond" else "",
-                    "source_url": source_url.strip() if security_type == "Bond" else "",
-                    "price_observed_at": date.today().isoformat() if security_type == "Bond" and manual_price > 0 else None,
-                    "callable": int(individual_bond and callable_bond),
-                    "call_date": call_date.isoformat() if individual_bond and callable_bond else None,
-                    "call_price": float(call_price) if individual_bond and callable_bond else None,
-                    "benchmark_name": benchmark_name.strip() if security_type == "Bond" else "",
-                    "benchmark_yield": float(benchmark_yield_pct) / 100.0 if security_type == "Bond" and benchmark_yield_pct else None,
-                    "income_yield": float(income_yield_pct) / 100.0 if security_type == "Bond" and income_yield_pct else None,
-                    "default_probability": float(default_probability_pct) / 100.0 if security_type == "Bond" else None,
-                    "recovery_rate": float(recovery_rate_pct) / 100.0 if security_type == "Bond" else None,
-                    "competition_eligibility_status": competition_eligibility_status if security_type == "Bond" else "",
-                    "eligibility_source": eligibility_source.strip() if security_type == "Bond" else "",
-                    "eligibility_checked_at": eligibility_checked_at.isoformat() if security_type == "Bond" and competition_eligibility_status != "Pending verification" else None,
-                }
-                columns = list(values)
-                with get_connection() as conn:
-                    conn.execute(
-                        f"INSERT INTO competition_positions ({', '.join(columns)}) VALUES ({', '.join(['?'] * len(columns))})",
-                        tuple(values[column] for column in columns),
-                    )
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                st.success(f"Position {clean_ticker} was opened by {profile['username']}.")
-                st.rerun()
+        st.markdown(
+            "**Archived field groups:** identity and execution · fixed-income contract terms · "
+            "valuation inputs · eligibility evidence · lifecycle ownership."
+        )
 
     positions = _fetch_competition_positions()
-    open_tickers = [str(row["ticker"]).upper() for row in positions if row["status"] == "open"]
+    duplicate_lifecycle_ids = _duplicate_canonical_projection_ids(positions)
+    if duplicate_lifecycle_ids:
+        st.error(
+            "Canonical tracker integrity blocker: more than one projection exists for lifecycle "
+            f"ID(s) {', '.join(str(item) for item in duplicate_lifecycle_ids)}. New duplicates are "
+            "blocked; audit the preserved records before relying on portfolio totals."
+        )
+    pending_reconciliations = [
+        row
+        for row in positions
+        if str(row.get("status") or "").lower() == "pending_reconciliation"
+    ]
+    settled_positions = _settled_competition_positions(positions)
+    if pending_reconciliations:
+        st.warning(
+            f"{len(pending_reconciliations)} executed position(s) are pending canonical WInS "
+            "reconciliation and are excluded from live portfolio value and P/L until approval."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Status": _competition_position_status_label(row),
+                        "Ticker": row.get("ticker") or "—",
+                        "Quantity": row.get("quantity"),
+                        "Currency": row.get("currency") or "USD",
+                        "Lifecycle ID": row.get("lifecycle_id") or "—",
+                        "Executed by": row.get("opened_by") or "—",
+                    }
+                    for row in pending_reconciliations
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
     market_tickers = [
         str(row["ticker"]).upper()
         for row in positions
         if row["status"] == "open" and not is_individual_bond(row)
     ]
     live_prices = _competition_live_prices(market_tickers)
-    performance = calculate_portfolio_performance(positions, live_prices)
+    performance = calculate_portfolio_performance(settled_positions, live_prices)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Portfolio Value", f"${performance['equity']:,.2f}")
     m2.metric("Total Return Since Inception", f"{performance['total_return_pct']:+.2f}%", f"${performance['total_pnl']:+,.2f}")
@@ -10130,7 +9937,10 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         f"Initial capital: ${INITIAL_CAPITAL_USD:,.0f} · Uninvested cash before P/L: "
         f"${performance['cash_before_pnl']:,.2f} · Live prices: {len(live_prices)}/{len(set(market_tickers))} market tickers."
     )
-    _render_wins_reconciliation(positions, live_prices)
+    st.info(
+        "Authoritative WInS import, reconciliation history, exceptions, and independent sign-off "
+        "are available only in Risk & Quant → Live Portfolio & Data Reliability."
+    )
     if not performance["positions"]:
         st.info("No positions have been entered yet.")
         return
@@ -10144,7 +9954,7 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         for item in thesis_records if item.get("ticker")
     }
     st.dataframe(pd.DataFrame([{
-        "Status": "Open" if row["status"] == "open" else "Closed", "Ticker": row["ticker"],
+        "Status": _competition_position_status_label(row), "Ticker": row["ticker"],
         "Type": row["security_type"], "Bond Instrument": row.get("bond_instrument_type") or "—",
         "WInS Eligibility": row.get("competition_eligibility_status") or "—",
         "ISIN": row.get("isin") or "—", "Currency": row.get("currency") or "USD",
@@ -10161,8 +9971,8 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
         "Next Review": thesis_by_ticker.get(str(row["ticker"]).upper(), {}).get("next_review_at") or "Not scheduled",
     } for row in performance["positions"]]), use_container_width=True, hide_index=True)
 
-    _render_fixed_income_dashboard(positions, performance["positions"])
-    _render_live_competition_analytics(positions, live_prices)
+    _render_fixed_income_dashboard(settled_positions, performance["positions"])
+    _render_live_competition_analytics(settled_positions, live_prices)
 
     st.markdown("#### Manage Open Positions")
     for row in performance["positions"]:
@@ -10170,8 +9980,14 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
             continue
         individual_bond = is_individual_bond(row)
         bond_security = str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
+        canonical_position = row.get("lifecycle_id") is not None
         with st.expander(f"{row['ticker']} · {row['return_pct']:+.2f}% · opened by {row['opened_by']}"):
             st.write(row.get("notes") or "No notes.")
+            if canonical_position:
+                st.info(
+                    f"Lifecycle #{row['lifecycle_id']} owns this projection. Valuation changes and exits "
+                    "must be recorded through the canonical workflow."
+                )
             update_col, close_col = st.columns(2)
             with update_col:
                 with st.form(f"competition_update_price_{row['id']}"):
@@ -10259,41 +10075,50 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                             "Eligibility checked on", value=saved_eligibility_date,
                             key=f"competition_eligibility_date_{row['id']}",
                         )
-                    if st.form_submit_button("Save Valuation Inputs", use_container_width=True):
-                        with get_connection() as conn:
-                            if bond_security:
-                                conn.execute(
-                                    "UPDATE competition_positions SET last_price = ?, accrued_interest = ?, "
-                                    "fx_rate_to_usd = ?, coupon_income = ?, yield_to_maturity = ?, modified_duration = ?, "
-                                    "valuation_source = ?, source_url = ?, price_observed_at = ?, benchmark_name = ?, "
-                                    "benchmark_yield = ?, income_yield = ?, default_probability = ?, recovery_rate = ?, "
-                                    "competition_eligibility_status = ?, eligibility_source = ?, eligibility_checked_at = ? WHERE id = ?",
-                                    (
-                                        float(new_price), float(new_accrued), float(new_fx),
-                                        float(new_coupon_income), float(new_ytm) / 100.0 if new_ytm else None,
-                                        float(new_duration) if new_duration else None, new_source.strip(),
-                                        new_source_url.strip(), date.today().isoformat(), new_benchmark.strip(),
-                                        float(new_benchmark_yield) / 100.0 if new_benchmark_yield else None,
-                                        float(new_income_yield) / 100.0 if new_income_yield else None,
-                                        float(new_pd) / 100.0, float(new_recovery) / 100.0,
-                                        new_eligibility if new_eligibility == "Pending verification" or new_eligibility_source.strip() else "Pending verification",
-                                        new_eligibility_source.strip(),
-                                        new_eligibility_date.isoformat() if new_eligibility != "Pending verification" and new_eligibility_source.strip() else None,
-                                        int(row["id"]),
-                                    ),
-                                )
-                            else:
-                                conn.execute("UPDATE competition_positions SET last_price = ? WHERE id = ?", (float(new_price), int(row["id"])))
-                            conn.commit()
-                            if hasattr(conn, "sync"):
-                                conn.sync()
-                        st.rerun()
+                    if st.form_submit_button(
+                        "Save Valuation Inputs",
+                        use_container_width=True,
+                        disabled=canonical_position,
+                    ):
+                        try:
+                            with get_connection() as conn:
+                                _require_legacy_position_mutation(conn, int(row["id"]))
+                                if bond_security:
+                                    conn.execute(
+                                        "UPDATE competition_positions SET last_price = ?, accrued_interest = ?, "
+                                        "fx_rate_to_usd = ?, coupon_income = ?, yield_to_maturity = ?, modified_duration = ?, "
+                                        "valuation_source = ?, source_url = ?, price_observed_at = ?, benchmark_name = ?, "
+                                        "benchmark_yield = ?, income_yield = ?, default_probability = ?, recovery_rate = ?, "
+                                        "competition_eligibility_status = ?, eligibility_source = ?, eligibility_checked_at = ? "
+                                        "WHERE id = ? AND lifecycle_id IS NULL",
+                                        (
+                                            float(new_price), float(new_accrued), float(new_fx),
+                                            float(new_coupon_income), float(new_ytm) / 100.0 if new_ytm else None,
+                                            float(new_duration) if new_duration else None, new_source.strip(),
+                                            new_source_url.strip(), date.today().isoformat(), new_benchmark.strip(),
+                                            float(new_benchmark_yield) / 100.0 if new_benchmark_yield else None,
+                                            float(new_income_yield) / 100.0 if new_income_yield else None,
+                                            float(new_pd) / 100.0, float(new_recovery) / 100.0,
+                                            new_eligibility if new_eligibility == "Pending verification" or new_eligibility_source.strip() else "Pending verification",
+                                            new_eligibility_source.strip(),
+                                            new_eligibility_date.isoformat() if new_eligibility != "Pending verification" and new_eligibility_source.strip() else None,
+                                            int(row["id"]),
+                                        ),
+                                    )
+                                else:
+                                    conn.execute(
+                                        "UPDATE competition_positions SET last_price = ? "
+                                        "WHERE id = ? AND lifecycle_id IS NULL",
+                                        (float(new_price), int(row["id"])),
+                                    )
+                                conn.commit()
+                                if hasattr(conn, "sync"):
+                                    conn.sync()
+                        except (LookupError, PermissionError) as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
             with close_col:
-                canonical_position = bool(row.get("lifecycle_id"))
-                if canonical_position:
-                    st.info(
-                        f"Lifecycle #{row['lifecycle_id']} owns this position. Record its exit in Investment Committee."
-                    )
                 with st.form(f"competition_close_{row['id']}"):
                     exit_price = st.number_input("Exit Price", min_value=0.01, value=max(float(row["current_price"]), 0.01), step=0.01, key=f"competition_exit_price_{row['id']}")
                     exit_date = st.date_input("Closing Date", value=date.today(), key=f"competition_exit_date_{row['id']}")
@@ -10314,37 +10139,59 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
                         use_container_width=True,
                         disabled=canonical_position,
                     ):
-                        with get_connection() as conn:
-                            if individual_bond:
-                                conn.execute(
-                                    "UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, "
-                                    "closed_by = ?, exit_accrued_interest = ?, exit_fx_rate_to_usd = ? WHERE id = ?",
-                                    (
-                                        float(exit_price), exit_date.isoformat(), str(profile["username"]),
-                                        float(exit_accrued), float(exit_fx), int(row["id"]),
-                                    ),
-                                )
-                            else:
-                                conn.execute("UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, closed_by = ? WHERE id = ?", (float(exit_price), exit_date.isoformat(), str(profile["username"]), int(row["id"])))
-                            conn.commit()
-                            if hasattr(conn, "sync"):
-                                conn.sync()
-                        st.rerun()
+                        try:
+                            with get_connection() as conn:
+                                _require_legacy_position_mutation(conn, int(row["id"]))
+                                if individual_bond:
+                                    conn.execute(
+                                        "UPDATE competition_positions SET status = 'closed', exit_price = ?, exit_date = ?, "
+                                        "closed_by = ?, exit_accrued_interest = ?, exit_fx_rate_to_usd = ? "
+                                        "WHERE id = ? AND lifecycle_id IS NULL",
+                                        (
+                                            float(exit_price), exit_date.isoformat(), str(profile["username"]),
+                                            float(exit_accrued), float(exit_fx), int(row["id"]),
+                                        ),
+                                    )
+                                else:
+                                    conn.execute(
+                                        "UPDATE competition_positions SET status = 'closed', exit_price = ?, "
+                                        "exit_date = ?, closed_by = ? WHERE id = ? AND lifecycle_id IS NULL",
+                                        (
+                                            float(exit_price), exit_date.isoformat(),
+                                            str(profile["username"]), int(row["id"]),
+                                        ),
+                                    )
+                                conn.commit()
+                                if hasattr(conn, "sync"):
+                                    conn.sync()
+                        except (LookupError, PermissionError) as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
             if st.button(
                 "Delete Incorrectly Entered Position",
                 key=f"competition_delete_{row['id']}",
-                disabled=bool(row.get("lifecycle_id")),
+                disabled=canonical_position,
                 help=(
                     "Canonical lifecycle positions cannot be deleted from the projection."
-                    if row.get("lifecycle_id") else None
+                    if canonical_position else None
                 ),
             ):
-                with get_connection() as conn:
-                    conn.execute("DELETE FROM competition_positions WHERE id = ?", (int(row["id"]),))
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                st.rerun()
+                try:
+                    with get_connection() as conn:
+                        _require_legacy_position_mutation(conn, int(row["id"]))
+                        conn.execute(
+                            "DELETE FROM competition_positions "
+                            "WHERE id = ? AND lifecycle_id IS NULL",
+                            (int(row["id"]),),
+                        )
+                        conn.commit()
+                        if hasattr(conn, "sync"):
+                            conn.sync()
+                except (LookupError, PermissionError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -12131,7 +11978,6 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
     )
     from src.portfolio_tracker.governance_store import (
         list_catalyst_events,
-        list_decision_reviews,
         list_research_sources,
         list_thesis_reviews,
     )
@@ -12148,10 +11994,8 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
         sources = list_research_sources(conn)
         catalysts = list_catalyst_events(conn)
         thesis_reviews = list_thesis_reviews(conn)
-        decision_reviews = list_decision_reviews(conn)
         red_team_reviews = list_red_team_reviews(conn)
         ai_usage = list_ai_usage(conn)
-        decisions = [dict(row) for row in conn.execute("SELECT * FROM decision_log ORDER BY id DESC").fetchall()]
         investment_cases = list_investment_lifecycles(conn)
         qa_rounds = [item["payload"] for item in list_current_records(conn, "qa_round")]
         latest_reconciliation_record = get_current_record(conn, "workspace", "latest_reconciliation")
@@ -12164,9 +12008,7 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
         theses=data.get("theses", []),
         sources=sources,
         catalysts=catalysts,
-        decisions=decisions,
         thesis_reviews=thesis_reviews,
-        decision_reviews=decision_reviews,
         red_team_reviews=red_team_reviews,
         ai_usage=ai_usage,
         investment_cases=investment_cases,

@@ -364,7 +364,11 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     panel_selector.set_value("Portfolio Tracker").run(timeout=60)
     assert any("Portfolio Tracker" in item.value for item in at.markdown)
     assert not any("Company Analysis" in item.value for item in at.markdown)
-    assert any(item.label == "WInS positions snapshot" for item in at.file_uploader)
+    assert not any(item.label == "WInS positions snapshot" for item in at.file_uploader)
+    assert any(
+        "Live Portfolio & Data Reliability" in str(item.value)
+        for item in at.info
+    )
 
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
     area_selector.set_value("Research").run(timeout=60)
@@ -416,6 +420,9 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     panel_selector.set_value("Live Portfolio & Data Reliability").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Live Portfolio & Data Reliability" in item.value for item in at.markdown)
+    assert [item.label for item in at.file_uploader].count(
+        "WInS positions CSV or Excel"
+    ) == 1
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     panel_selector.set_value("Currency Risk & Hedging").run(timeout=60)
     assert len(at.exception) == 0

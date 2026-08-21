@@ -510,6 +510,25 @@ def test_init_db_syncs_seeded_users_to_current_password(monkeypatch, tmp_path):
         ), f"Hash {h!r} still matches old password — password was NOT re-synced"
 
 
+def test_init_db_checks_shared_password_hash_only_once(monkeypatch, tmp_path):
+    _configure_temp_wharton(monkeypatch, tmp_path, password="shared-team-password")
+    wharton_dash.init_db()
+
+    original_checkpw = bcrypt.checkpw
+    password_checks = 0
+
+    def counted_checkpw(password: bytes, password_hash: bytes) -> bool:
+        nonlocal password_checks
+        password_checks += 1
+        return original_checkpw(password, password_hash)
+
+    monkeypatch.setattr(wharton_dash.bcrypt, "checkpw", counted_checkpw)
+
+    wharton_dash.init_db()
+
+    assert password_checks == 1
+
+
 def test_production_initialization_accepts_shared_legacy_password(monkeypatch, tmp_path):
     db_path = tmp_path / "data" / "wharton.db"
     upload_dir = tmp_path / "data" / "wharton_uploads"
