@@ -1,6 +1,6 @@
 # Client Behavioral Profile
 
-The **Strategy & Decisions -> Behavioral Profile** tab documents how a client
+The **Client & Policy -> Mandate & Strategy -> Behavioral Profile** tab documents how a client
 is likely to make investment decisions under uncertainty and converts the
 assessment into explicit governance rules. The profile is versioned inside the
 shared Client Mandate.

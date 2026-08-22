@@ -556,14 +556,24 @@ class TestStorageConfig:
     def test_is_production_mode(self):
         """Test production mode detection."""
         config = StorageConfig()
-        
-        # Without STREAMLIT_SERVER_PORT
-        with patch.dict(os.environ, {}, clear=True):
-            assert config.is_production_mode() is False
-        
-        # With STREAMLIT_SERVER_PORT
-        with patch.dict(os.environ, {'STREAMLIT_SERVER_PORT': '8501'}):
-            assert config.is_production_mode() is True
+
+        # Isolate the fallback heuristic from any developer-local Streamlit
+        # secrets. Explicit QUANT_SIM_ENV values are covered below.
+        with patch(
+            'src.utils.environment._streamlit_environment',
+            return_value=None,
+        ):
+            # Without STREAMLIT_SERVER_PORT
+            with patch.dict(os.environ, {}, clear=True):
+                assert config.is_production_mode() is False
+
+            # With STREAMLIT_SERVER_PORT
+            with patch.dict(
+                os.environ,
+                {'STREAMLIT_SERVER_PORT': '8501'},
+                clear=True,
+            ):
+                assert config.is_production_mode() is True
 
         # An explicit local environment always wins over the heuristic.
         with patch.dict(
@@ -599,7 +609,11 @@ class TestStorageConfig:
             # Missing other required fields
         }
         
-        with patch.dict(os.environ, {'STREAMLIT_SERVER_PORT': '8501'}):
+        with patch.dict(
+            os.environ,
+            {'QUANT_SIM_ENV': 'production', 'STREAMLIT_SERVER_PORT': '8501'},
+            clear=True,
+        ):
             with pytest.raises(ProductionConfigError) as excinfo:
                 config.create_backend()
             

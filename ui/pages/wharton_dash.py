@@ -149,72 +149,36 @@ BOND_ANALYSIS_KEY = "wharton_bond_analysis_v1"
 COMMODITY_ANALYSIS_KEY = "wharton_commodity_analysis_v1"
 CURRENCY_RISK_KEY = "wharton_currency_risk_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
-HIDDEN_COCKPIT_TABS = {"Mind Map", "War Room", "File Vault"}
-
 COCKPIT_AREAS = {
-    "Home": (
-        "Overview & Tasks", "Competition Readiness", "Report Evidence Studio",
-        "Assignment & Rules", "Official Rules Watch",
-    ),
-    "Portfolio": (
-        "Strategy & Decisions", "Security Dossiers", "Investment Committee",
-        "Portfolio Tracker",
-    ),
-    "Research": ("Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"),
-    "Risk & Quant": (
-        "Live Portfolio & Data Reliability",
-        "Quant Engine",
-        "Risk Cockpit",
-        "Currency Risk & Hedging",
-        "Factor Exposure",
-        "Regime Detection",
-    ),
-    "Scenarios": (
-        "Scenario Playground",
-        "Efficient Frontier",
-        "Monte Carlo",
-        "Advanced Monte Carlo",
-        "Advanced Analytics",
-    ),
-    "Teamspace": ("Q&A Rehearsal", "Mind Map", "Sub-Projects", "War Room", "File Vault"),
+    "Home": ("Overview & Tasks", "Competition Readiness"),
+    "Client & Policy": ("Mandate & Strategy",),
+    "Research": ("Research Workspace", "Security Dossiers"),
+    "Decisions": ("Investment Committee",),
+    "Portfolio": ("Portfolio Overview", "WInS & Reconciliation", "Risk & Scenarios"),
+    "Deliverables": ("Report & Pitch", "Rules & Compliance"),
 }
 
 COCKPIT_AREA_DESCRIPTIONS = {
-    "Home": "Daily priorities, responsibilities, rules, and readiness checks.",
-    "Portfolio": "Turn the mandate into positions, decisions, and monitored theses.",
-    "Research": "Move from company evidence and screening to an investable shortlist.",
-    "Risk & Quant": "Run the analytical engine and inspect portfolio risk, factors, and regimes.",
-    "Scenarios": "Explore shocks, portfolio construction, and probabilistic outcomes.",
-    "Teamspace": "Coordinate projects and shared working material.",
+    "Home": "See the next action and close the most important competition gaps.",
+    "Client & Policy": "Translate the client case into goals, guardrails, and a repeatable strategy.",
+    "Research": "Build evidence before a security reaches the committee.",
+    "Decisions": "Challenge, vote, approve, and size each investment exactly once.",
+    "Portfolio": "Reconcile execution, monitor outcomes, and inspect risk against the mandate.",
+    "Deliverables": "Turn governed evidence and decisions into the report and final pitch.",
 }
 
 COCKPIT_PANEL_DESCRIPTIONS = {
-    "Overview & Tasks": "Start here for the team's current workload and immediate priorities.",
+    "Overview & Tasks": "Start here for one clear next action, ownership, blockers, and deadlines.",
     "Competition Readiness": "Close strategy, evidence, governance, report, and pitch gaps before submission.",
-    "Report Evidence Studio": "Build frozen mid-project and final reports from linked claims, sources, figures, decisions, and one reconciled snapshot.",
-    "Assignment & Rules": "Keep competition requirements and team readiness in one place.",
-    "Official Rules Watch": "Hash official publications, inspect changes, and collect team acknowledgements.",
-    "Strategy & Decisions": "Document the mandate, strategy, theses, catalysts, and decisions.",
-    "Security Dossiers": "Maintain one canonical thesis and KPI monitor per security.",
-    "Investment Committee": "Run locked pre-votes, discussion, post-votes, rule checks, approvals, sizing, and execution.",
-    "Portfolio Tracker": "Track positions, performance, ownership, and reconciliation.",
-    "Company Analysis": "Review company evidence, regions, financials, management, moat, and valuation.",
-    "Bond Analysis": "Value a bond or bond ETF and inspect yield, cash flows, duration, and rate sensitivity.",
-    "Commodity Analysis": "Compare commodity proxies, inspect diversification, and stress a proposed position.",
-    "Stock Screener": "Filter and rank the investable universe before deeper research.",
-    "Quant Engine": "Configure and run the shared analytical pipeline.",
-    "Live Portfolio & Data Reliability": "Bind every analytical consumer to the latest reconciled WInS snapshot and inspect data health.",
-    "Risk Cockpit": "Inspect portfolio-level risk signals and concentrations.",
-    "Currency Risk & Hedging": "Measure FX exposure, stress exchange rates, and optimize hedge ratios after costs.",
-    "Factor Exposure": "Understand systematic drivers behind portfolio behavior.",
-    "Regime Detection": "Review the current market-state classification and evidence.",
-    "Scenario Playground": "Apply explicit shocks and compare portfolio responses.",
-    "Efficient Frontier": "Compare the current portfolio with optimized alternatives.",
-    "Monte Carlo": "Review baseline probabilistic portfolio paths and tail outcomes.",
-    "Advanced Monte Carlo": "Add jumps and richer distribution assumptions.",
-    "Advanced Analytics": "Open specialist diagnostics after the core review.",
-    "Sub-Projects": "Organize focused workstreams and their supporting material.",
-    "Q&A Rehearsal": "Run timed evidence-linked mock rounds and track member performance.",
+    "Mandate & Strategy": "Maintain the client mandate, behavioral guardrails, strategy rulebook, and alignment in one place.",
+    "Research Workspace": "Move from screening to equity, fixed-income, or real-asset research without duplicating dossiers.",
+    "Security Dossiers": "Maintain the single canonical investment case and monitoring record per security; no voting happens here.",
+    "Investment Committee": "The only investment-voting workflow: independent view, challenge, final decision, authorization, and sizing.",
+    "Portfolio Overview": "Read the reconciled portfolio, performance, ownership, goal alignment, and review queue.",
+    "WInS & Reconciliation": "Import the official WInS snapshot, resolve exceptions, and complete independent sign-off.",
+    "Risk & Scenarios": "Use one focused workspace for risk, benchmark, factors, FX, scenarios, simulation, and advanced diagnostics.",
+    "Report & Pitch": "Build the evidence-linked report and rehearse the final defense from the same governed record.",
+    "Rules & Compliance": "Keep the assignment checklist, official rule changes, acknowledgements, and submission evidence together.",
 }
 
 TASK_PRIORITIES = ["Critical", "High", "Medium", "Low"]
@@ -229,7 +193,7 @@ QUANT_MODULES = [
     "Mandate-Aware Optimizer",
     "Benchmark Analytics",
     "Cost-Aware Rebalance",
-    "Performance Attribution",
+    "Historical Contribution & Risk Budget",
     "Simulation",
     "Methodology & Validation",
     "Models & Signals",
@@ -238,6 +202,7 @@ QUANT_MODULES = [
     "Backtest",
     "Run History",
 ]
+QUANT_INPUT_MODES = ("Standalone sandbox", "Competition portfolio")
 QUANT_OPERATOR_USERS = {"Jakub"}
 DEFAULT_QUANT_TICKERS = ["ASML", "NVDA", "MSFT", "LLY", "JPM"]
 _SIMULATION_DISPLAY_PERCENTILES = (5, 10, 25, 50, 75, 90, 95)
@@ -2741,6 +2706,32 @@ def _load_canonical_quant_input() -> dict[str, Any]:
     }
 
 
+def _resolve_quant_run_source(
+    input_mode: str,
+    canonical_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep exploratory Quant runs independent from competition governance."""
+    if input_mode == "Standalone sandbox":
+        return {
+            "competition_mode": False,
+            "allowed": True,
+            "blockers": [],
+            "portfolio_snapshot_id": None,
+            "portfolio_as_of": None,
+            "portfolio_source": None,
+        }
+    if input_mode != "Competition portfolio":
+        raise ValueError(f"Unknown Quant input mode: {input_mode}")
+    return {
+        "competition_mode": True,
+        "allowed": bool(canonical_input.get("allowed")),
+        "blockers": list(canonical_input.get("blockers") or []),
+        "portfolio_snapshot_id": canonical_input.get("portfolio_snapshot_id"),
+        "portfolio_as_of": canonical_input.get("portfolio_as_of"),
+        "portfolio_source": canonical_input.get("portfolio_source"),
+    }
+
+
 def _render_quant_configuration() -> None:
     default_end = datetime.now().date()
     default_start = date(2014, 1, 1)
@@ -2764,39 +2755,88 @@ def _render_quant_configuration() -> None:
     canonical_assumptions = quant_input.get("expected_return_assumptions") or {}
     canonical_views = canonical_assumptions.get("values") or {}
 
+    input_mode = st.radio(
+        "Quant input source",
+        QUANT_INPUT_MODES,
+        horizontal=True,
+        key="wharton_quant_input_mode",
+        help=(
+            "Standalone sandbox accepts a manual universe and does not require a saved mandate, dossier, "
+            "committee decision, or WInS snapshot. Competition portfolio preserves the governed pipeline."
+        ),
+    )
+    run_source = _resolve_quant_run_source(input_mode, quant_input)
+    competition_mode = bool(run_source["competition_mode"])
+    mode_key = "competition" if competition_mode else "standalone"
+
+    if competition_mode and run_source["allowed"]:
+        source = run_source.get("portfolio_source") or {}
+        st.success(
+            f"Canonical competition input: {run_source['portfolio_snapshot_id']} · "
+            f"as of {run_source['portfolio_as_of']} · source {source.get('provider', 'unknown')}."
+        )
+    elif competition_mode:
+        st.error(
+            "Competition Quant is blocked until the live portfolio pipeline is complete: "
+            + ", ".join(run_source["blockers"])
+        )
+    else:
+        st.info(
+            "Standalone sandbox is ready now. Enter tickers and optional weights below; competition "
+            "approvals and WInS reconciliation are not required for this exploratory run."
+        )
+
     with st.expander(" Quant Run Configuration", expanded=QUANT_RESULT_KEY not in st.session_state):
-        if quant_input["allowed"]:
-            st.success(
-                f"Canonical competition input: {quant_input['portfolio_snapshot_id']} · "
-                f"as of {quant_input['portfolio_as_of']} · source {quant_input['portfolio_source'].get('provider', 'unknown')}."
-            )
-        else:
-            st.error(
-                "Competition Quant is blocked until the live portfolio pipeline is complete: "
-                + ", ".join(quant_input["blockers"])
-            )
         with st.form("wharton_quant_config_form"):
             col_in, col_risk = st.columns([1, 1], gap="large")
             with col_in:
+                default_tickers = (
+                    canonical_tickers if competition_mode else DEFAULT_QUANT_TICKERS
+                )
+                default_weights = (
+                    sleeve_weights
+                    if competition_mode
+                    else [1.0 / len(default_tickers)] * len(default_tickers)
+                )
                 tickers_text = st.text_area(
-                    "Market Tickers",
-                    value="\n".join(canonical_tickers),
+                    "Canonical market tickers" if competition_mode else "Market tickers",
+                    value="\n".join(default_tickers),
                     height=145,
-                    help="Read-only securities from the canonical reconciled WInS snapshot.",
-                    disabled=True,
+                    help=(
+                        "Read-only securities from the canonical reconciled WInS snapshot."
+                        if competition_mode
+                        else "One ticker per line or comma-separated. This universe is used only for the sandbox run."
+                    ),
+                    disabled=competition_mode,
+                    key=f"wharton_quant_tickers_{mode_key}",
                 )
                 weights_text = st.text_area(
-                    "Canonical invested-sleeve weights",
-                    value="\n".join(f"{weight:.10f}" for weight in sleeve_weights),
+                    (
+                        "Canonical invested-sleeve weights"
+                        if competition_mode
+                        else "Portfolio weights"
+                    ),
+                    value="\n".join(f"{weight:.10f}" for weight in default_weights),
                     height=115,
-                    help="Derived from WInS market values; cash remains explicit in the snapshot.",
-                    disabled=True,
+                    help=(
+                        "Derived from WInS market values; cash remains explicit in the snapshot."
+                        if competition_mode
+                        else "One decimal or percentage per ticker. Leave empty for equal weights."
+                    ),
+                    disabled=competition_mode,
+                    key=f"wharton_quant_weights_{mode_key}",
                 )
                 benchmark_ticker = st.text_input("Benchmark Ticker", value="SPY").strip().upper()
                 current_value = st.number_input(
                     "Portfolio Value ($)", min_value=1_000.0,
-                    value=max(1_000.0, canonical_value), step=5_000.0,
-                    disabled=True,
+                    value=(
+                        max(1_000.0, canonical_value)
+                        if competition_mode
+                        else 100_000.0
+                    ),
+                    step=5_000.0,
+                    disabled=competition_mode,
+                    key=f"wharton_quant_value_{mode_key}",
                 )
             with col_risk:
                 start_date = st.date_input("Start Date", value=default_start)
@@ -2836,9 +2876,13 @@ def _render_quant_configuration() -> None:
                 )
                 apply_strategy_rulebook = st.checkbox(
                     "Apply active Client Mandate / Strategy Rulebook",
-                    value=True,
-                    disabled=True,
-                    help="Uses saved exclusions, approval, sector, cash, beta, position and turnover rules.",
+                    value=competition_mode,
+                    disabled=competition_mode,
+                    help=(
+                        "Required in competition mode. In the standalone sandbox it is optional and can be "
+                        "enabled after an active rulebook has been saved."
+                    ),
+                    key=f"wharton_quant_apply_rulebook_{mode_key}",
                 )
                 return_model_labels = {
                     "Conservative historical estimate": "shrunk_historical",
@@ -2847,8 +2891,9 @@ def _render_quant_configuration() -> None:
                 return_model_label = st.selectbox(
                     "Expected-return estimate",
                     list(return_model_labels),
-                    index=1 if canonical_views else 0,
-                    disabled=True,
+                    index=1 if competition_mode and canonical_views else 0,
+                    disabled=competition_mode,
+                    key=f"wharton_quant_return_model_{mode_key}",
                     help=(
                         "Black-Litterman uses the entered current weights as its neutral reference; "
                         "they are not claimed to be market-cap weights."
@@ -2862,7 +2907,11 @@ def _render_quant_configuration() -> None:
                     ),
                     placeholder="MSFT=10, NVDA=12",
                     help="Expected annual returns in percent. Leave empty for equilibrium returns only.",
-                    disabled=return_model_labels[return_model_label] != "black_litterman",
+                    disabled=(
+                        competition_mode
+                        or return_model_labels[return_model_label] != "black_litterman"
+                    ),
+                    key=f"wharton_quant_bl_views_{mode_key}",
                 )
                 black_litterman_confidence = st.slider(
                     "View confidence",
@@ -2870,7 +2919,11 @@ def _render_quant_configuration() -> None:
                     1.00,
                     0.60,
                     0.05,
-                    disabled=return_model_labels[return_model_label] != "black_litterman",
+                    disabled=(
+                        competition_mode
+                        or return_model_labels[return_model_label] != "black_litterman"
+                    ),
+                    key=f"wharton_quant_bl_confidence_{mode_key}",
                 )
                 simulation_days = st.slider("Simulation Horizon (days)", 30, 1260, 252, 30)
                 n_simulations = st.slider("Simulation Count", 200, 15000, 10000, 100)
@@ -2942,13 +2995,23 @@ def _render_quant_configuration() -> None:
                         "Membership is lagged by one trading observation and forward-filled only; "
                         "future membership is never back-filled."
                     )
-            st.markdown("#### Individual bonds from canonical portfolio")
-            st.caption(
-                "Competition-mode bond inputs come from the Security Dossier and reconciled WInS snapshot. "
-                "This legacy duplicate editor is read-only."
+            st.markdown(
+                "#### Individual bonds from canonical portfolio"
+                if competition_mode
+                else "#### Individual bonds (optional)"
             )
+            if competition_mode:
+                st.caption(
+                    "Competition-mode bond inputs come from the Security Dossier and reconciled WInS snapshot. "
+                    "This legacy duplicate editor is read-only."
+                )
+            else:
+                st.caption(
+                    "Optional sandbox-only bond assumptions. They do not create a Security Dossier, position, "
+                    "or competition approval record."
+                )
             manual_bond_rows = st.data_editor(
-                pd.DataFrame([] if canonical_tickers else [{
+                pd.DataFrame([] if competition_mode and canonical_tickers else [{
                     "Identifier": "",
                     "Weight %": 10.0,
                     "Clean Price": 100.0,
@@ -2973,8 +3036,8 @@ def _render_quant_configuration() -> None:
                 num_rows="dynamic",
                 hide_index=True,
                 use_container_width=True,
-                disabled=True,
-                key="wharton_quant_manual_bonds",
+                disabled=competition_mode,
+                key=f"wharton_quant_manual_bonds_{mode_key}",
                 column_config={
                     "Maturity": st.column_config.DateColumn("Maturity", format="YYYY-MM-DD"),
                     "Weight %": st.column_config.NumberColumn("Weight %", min_value=0.0, max_value=100.0, format="%.2f"),
@@ -2985,16 +3048,23 @@ def _render_quant_configuration() -> None:
                 },
             )
             run_clicked = st.form_submit_button(
-                " Run Full Quant Engine",
+                (
+                    "Run Competition Quant Engine"
+                    if competition_mode
+                    else "Run Standalone Quant Engine"
+                ),
                 type="primary",
-                disabled=not quant_input["allowed"],
+                disabled=not run_source["allowed"],
             )
 
     if run_clicked:
         st.session_state.pop(QUANT_ERROR_KEY, None)
         try:
-            if not quant_input["allowed"]:
-                raise ValueError("Canonical competition portfolio is not ready: " + ", ".join(quant_input["blockers"]))
+            if not run_source["allowed"]:
+                raise ValueError(
+                    "Canonical competition portfolio is not ready: "
+                    + ", ".join(run_source["blockers"])
+                )
             if start_date >= end_date: raise ValueError("Start Date must be before End Date.")
             from src.portfolio_tracker.manual_bond_quant import parse_manual_bond_rows
 
@@ -3020,19 +3090,25 @@ def _render_quant_configuration() -> None:
                 ].parse_point_in_time_membership(
                     pd.read_csv(BytesIO(universe_membership_file.getvalue()))
                 )
-            strategy_data = _load_strategy_workspace_data()
-            from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
-
-            raw_strategy = _strategy_payload(strategy_data.get("strategy_record"))
-            if not raw_strategy:
-                raise ValueError(
-                    "No active Strategy Rulebook is saved. Configure one in Strategy & Decisions first."
+            if apply_strategy_rulebook:
+                strategy_data = _load_strategy_workspace_data()
+                from src.portfolio_tracker.strategy_alignment import (
+                    normalize_strategy_rulebook,
                 )
-            strategy_rulebook = normalize_strategy_rulebook(
-                raw_strategy,
-                _strategy_payload(strategy_data.get("mandate_record")),
-            )
-            optimizer_asset_metadata = _build_optimizer_asset_metadata(strategy_data)
+
+                raw_strategy = _strategy_payload(strategy_data.get("strategy_record"))
+                if not raw_strategy:
+                    raise ValueError(
+                        "No active Strategy Rulebook is saved. Either turn off the rulebook in Standalone "
+                        "sandbox or configure one in Client & Policy → Mandate & Strategy."
+                    )
+                strategy_rulebook = normalize_strategy_rulebook(
+                    raw_strategy,
+                    _strategy_payload(strategy_data.get("mandate_record")),
+                )
+                optimizer_asset_metadata = _build_optimizer_asset_metadata(
+                    strategy_data
+                )
             with st.spinner("Fetching data and running full quant stack..."):
                 st.session_state[QUANT_RESULT_KEY] = _compute_quant_run(
                     tickers=tickers, weights=weights, benchmark_ticker=benchmark_ticker,
@@ -3067,9 +3143,9 @@ def _render_quant_configuration() -> None:
                     short_term_tax_rate=float(short_term_tax_rate_pct) / 100.0,
                     long_term_tax_rate=float(long_term_tax_rate_pct) / 100.0,
                     universe_membership=universe_membership,
-                    portfolio_snapshot_id=quant_input["portfolio_snapshot_id"],
-                    portfolio_snapshot_as_of=quant_input["portfolio_as_of"],
-                    portfolio_snapshot_source=quant_input["portfolio_source"],
+                    portfolio_snapshot_id=run_source["portfolio_snapshot_id"],
+                    portfolio_snapshot_as_of=run_source["portfolio_as_of"],
+                    portfolio_snapshot_source=run_source["portfolio_source"],
                 )
             st.success("Quant engine run complete.")
             st.rerun()
@@ -3481,7 +3557,11 @@ def _render_cost_aware_rebalance(result: dict, advanced: bool) -> None:
 def _render_performance_attribution(result: dict, advanced: bool) -> None:
     rc = result["return_contribution"].copy()
     rk = result["risk_contribution"].copy()
-    st.markdown("### Performance Attribution")
+    st.markdown("### Historical Contribution & Risk Budget")
+    st.caption(
+        "A current-weight historical diagnostic. This is not ledger P/L, Brinson active attribution, "
+        "or decision alpha; those require reconciled holdings and benchmark data."
+    )
     st.markdown("#### Return Contribution")
     if rc.empty: st.info("Unavailable.")
     else:
@@ -5483,7 +5563,7 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
     st.markdown("### Custom Quant Sandbox")
     st.caption(
         "Runs a manually configured universe through analytics, optimization, simulation, models, signals, news, "
-        "backtests, and history. Live competition-portfolio analytics are kept separately in Portfolio Tracker."
+        "backtests, and history. Reconciled competition outcomes stay in Portfolio → Portfolio Overview."
     )
 
     _render_quant_configuration()
@@ -5603,7 +5683,7 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
             _render_mandate_aware_optimizer(result, advanced)
         elif selected == "Cost-Aware Rebalance":
             _render_cost_aware_rebalance(result, advanced)
-        elif selected == "Performance Attribution":
+        elif selected == "Historical Contribution & Risk Budget":
             _render_performance_attribution(result, advanced)
         elif selected == "Simulation":
             _render_simulation(result, advanced)
@@ -5628,19 +5708,66 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
         open_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE COALESCE(is_done, 0) = 0").fetchone()[0])
         done_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE COALESCE(is_done, 0) = 1").fetchone()[0])
         critical_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE priority='Critical' AND COALESCE(is_done,0)=0").fetchone()[0])
-        chat_count = int(conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0])
-        files_count = int(conn.execute("SELECT COUNT(*) FROM files").fetchone()[0])
-        node_count = int(conn.execute("SELECT COUNT(*) FROM mindmap_nodes").fetchone()[0])
-        subproject_count = int(conn.execute("SELECT COUNT(*) FROM subprojects").fetchone()[0])
+        overdue_tasks = int(conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE COALESCE(is_done, 0) = 0 "
+            "AND COALESCE(due_date, '') <> '' AND due_date < ?",
+            (date.today().isoformat(),),
+        ).fetchone()[0])
+        committee_cases = int(conn.execute(
+            "SELECT COUNT(*) FROM canonical_investment_lifecycles "
+            "WHERE state NOT IN ('active', 'rejected', 'closed')"
+        ).fetchone()[0])
+        reconciliation_cases = int(conn.execute(
+            "SELECT COUNT(*) FROM canonical_investment_lifecycles WHERE state = 'reconciliation'"
+        ).fetchone()[0])
+        next_task = conn.execute(
+            "SELECT id, priority, task_text, assignee, due_date, client_goal, dossier_id, decision_id "
+            "FROM tasks WHERE COALESCE(is_done, 0) = 0 "
+            "ORDER BY CASE WHEN lower(COALESCE(assignee, '')) = lower(?) THEN 0 ELSE 1 END, "
+            "CASE priority WHEN 'Critical' THEN 0 WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END, "
+            "CASE WHEN COALESCE(due_date, '') = '' THEN 1 ELSE 0 END, due_date, id LIMIT 1",
+            (str(profile["username"]),),
+        ).fetchone()
 
-    r = st.columns(7)
+    r = st.columns(6)
     r[0].metric("Open Tasks", open_tasks)
-    r[1].metric("Done ✓", done_tasks)
-    r[2].metric(" Critical", critical_tasks)
-    r[3].metric("Chat Msgs", chat_count)
-    r[4].metric("Vault Files", files_count)
-    r[5].metric("Map Nodes", node_count)
-    r[6].metric("Sub-Projects", subproject_count)
+    r[1].metric("Critical", critical_tasks)
+    r[2].metric("Overdue", overdue_tasks)
+    r[3].metric("Committee Queue", committee_cases)
+    r[4].metric("Reconciliation", reconciliation_cases)
+    r[5].metric("Completed", done_tasks)
+
+    st.markdown("#### Next action")
+    if next_task is not None:
+        next_values = list(next_task)
+        task_id, priority, task_text, assignee, due_date, client_goal, dossier_id, decision_id = next_values
+        context = [
+            value
+            for value in (
+                f"Goal: {client_goal}" if client_goal else "",
+                f"Dossier: {dossier_id}" if dossier_id else "",
+                f"Decision: {decision_id}" if decision_id else "",
+            )
+            if value
+        ]
+        st.markdown(
+            (
+                '<div class="wharton-panel">'
+                f'<div class="wharton-section-kicker">{escape(str(priority))} · Task #{int(task_id)}</div>'
+                f'<strong>{escape(str(task_text))}</strong>'
+                f'<span>Owner: {escape(str(assignee or "Unassigned"))} · '
+                f'Due: {escape(str(due_date or "No deadline"))}'
+                f'{" · " + escape(" · ".join(context)) if context else ""}</span>'
+                '</div>'
+            ),
+            unsafe_allow_html=True,
+        )
+    elif reconciliation_cases:
+        st.warning("No task is assigned. The current next action is to resolve the open WInS reconciliation.")
+    elif committee_cases:
+        st.warning("No task is assigned. The current next action is to advance the oldest Committee case.")
+    else:
+        st.success("No open blocker is recorded. Create the next evidence, portfolio, or pitch task below.")
 
     st.markdown(f"""
         <div class="wharton-panel">
@@ -5828,10 +5955,12 @@ def _strategy_rows(value: Any, key_label: str) -> list[dict[str, Any]]:
 
 
 def _load_strategy_workspace_data() -> dict[str, Any]:
+    from src.portfolio_tracker.canonical_compat import (
+        list_canonical_first_approved_securities,
+        list_canonical_first_holding_theses,
+    )
     from src.portfolio_tracker.strategy_store import (
         get_active_strategy_version,
-        list_approved_securities,
-        list_holding_theses,
         list_strategy_versions,
         load_client_mandate,
     )
@@ -5841,8 +5970,8 @@ def _load_strategy_workspace_data() -> dict[str, Any]:
             "mandate_record": load_client_mandate(conn),
             "strategy_record": get_active_strategy_version(conn),
             "strategy_versions": list_strategy_versions(conn),
-            "theses": list_holding_theses(conn),
-            "approved_securities": list_approved_securities(conn),
+            "theses": list_canonical_first_holding_theses(conn),
+            "approved_securities": list_canonical_first_approved_securities(conn),
         }
 
 
@@ -5863,23 +5992,31 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
     goal_frame = pd.DataFrame([
         {
             "Goal": str(item.get("name") or ""),
-            "Target %": float(item.get("target_weight") or 0.0) * 100.0,
+            "Capital allocation %": float(item.get("target_weight") or 0.0) * 100.0,
+            "Target amount": float(item.get("target_wealth") or item.get("target_amount") or 0.0),
+            "Years": int(round(_finite_form_number(item.get("horizon_years"), 0.0))),
+            "Annual net cash flow": float(item.get("annual_net_cashflow") or 0.0),
+            "Target basis": "Real" if str(item.get("wealth_basis") or "nominal").lower() == "real" else "Nominal",
+            "Inflation %": float(item.get("inflation_rate") or 0.0) * 100.0,
             "Priority (1–5)": int(round(_finite_form_number(item.get("priority"), 3.0))),
-            "Horizon": str(item.get("horizon") or "Long term"),
             "Description / success condition": str(item.get("description") or ""),
         }
         for item in current_goals if isinstance(item, dict)
     ])
     if goal_frame.empty:
         goal_frame = pd.DataFrame([
-            {"Goal": "", "Target %": 0.0, "Priority (1–5)": 5, "Horizon": "Long term", "Description / success condition": ""},
-            {"Goal": "", "Target %": 0.0, "Priority (1–5)": 3, "Horizon": "Short term", "Description / success condition": ""},
+            {
+                "Goal": "", "Capital allocation %": 0.0, "Target amount": 0.0, "Years": 10,
+                "Annual net cash flow": 0.0, "Target basis": "Nominal", "Inflation %": 0.0,
+                "Priority (1–5)": 5, "Description / success condition": "",
+            },
         ])
 
     provenance_fields = [
         "Risk tolerance", "Risk capacity", "Maximum drawdown", "Drawdown response",
         "Financial picture", "Policy benchmark", "Primary horizon", "Liquidity need",
-        "Base currency", "Values and exclusions", "Goal buckets", "Mandate summary",
+        "Base currency", "Current investable capital", "Values and exclusions",
+        "Goal funding inputs", "Mandate summary",
     ]
     saved_provenance = (
         current.get("field_provenance")
@@ -5923,6 +6060,13 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 value=float(current.get("liquidity_need_pct") or 0.0) * 100.0, step=1.0,
             )
             base_currency = st.text_input("Base currency", value=str(current.get("base_currency") or "USD"))
+            investable_capital = st.number_input(
+                "Current investable capital",
+                min_value=0.0,
+                value=float(current.get("investable_capital") or 0.0),
+                step=10_000.0,
+                help="Current capital available across the goal buckets, before future contributions or withdrawals.",
+            )
         policy1, policy2, policy3 = st.columns(3)
         with policy1:
             capacity_options = ["Not specified", "Low", "Moderate", "High"]
@@ -5988,9 +6132,13 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
             mandate_required_tags = st.text_input(
                 "Required holding tags",
                 value=", ".join(current_constraints.get("required_tags", [])),
-                help="For example impact, climate, income. Add matching tags in Thesis Monitor.",
+                help="For example impact, climate, income. Add matching tags in the canonical Security Dossier.",
             )
         st.markdown("##### Goal and capital buckets")
+        st.caption(
+            "Add a target amount, numeric horizon, and annual net cash flow to activate goal-funding probability. "
+            "Use positive cash flow for contributions and negative cash flow for withdrawals."
+        )
         edited_goals = st.data_editor(
             goal_frame,
             num_rows="dynamic",
@@ -5998,9 +6146,15 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
             use_container_width=True,
             key="strategy_client_goal_editor",
             column_config={
-                "Target %": st.column_config.NumberColumn("Target %", min_value=0.0, max_value=100.0, format="%.1f"),
+                "Capital allocation %": st.column_config.NumberColumn(
+                    "Capital allocation %", min_value=0.0, max_value=100.0, format="%.1f"
+                ),
+                "Target amount": st.column_config.NumberColumn("Target amount", min_value=0.0, format="%.0f"),
+                "Years": st.column_config.NumberColumn("Years", min_value=0, max_value=100, step=1),
+                "Annual net cash flow": st.column_config.NumberColumn("Annual net cash flow", format="%.0f"),
+                "Target basis": st.column_config.SelectboxColumn("Target basis", options=["Nominal", "Real"]),
+                "Inflation %": st.column_config.NumberColumn("Inflation %", min_value=-99.0, max_value=100.0, format="%.1f"),
                 "Priority (1–5)": st.column_config.NumberColumn("Priority (1–5)", min_value=1, max_value=5, step=1),
-                "Horizon": st.column_config.SelectboxColumn("Horizon", options=["Short term", "Medium term", "Long term"]),
             },
         )
         st.markdown("##### Field-level provenance")
@@ -6035,9 +6189,13 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 continue
             goals.append({
                 "name": name,
-                "target_weight": _finite_form_number(row.get("Target %"), 0.0) / 100.0,
+                "target_weight": _finite_form_number(row.get("Capital allocation %"), 0.0) / 100.0,
+                "target_wealth": max(0.0, _finite_form_number(row.get("Target amount"), 0.0)),
+                "horizon_years": max(0, int(round(_finite_form_number(row.get("Years"), 0.0)))),
+                "annual_net_cashflow": _finite_form_number(row.get("Annual net cash flow"), 0.0),
+                "wealth_basis": "real" if str(row.get("Target basis") or "Nominal").lower() == "real" else "nominal",
+                "inflation_rate": max(-0.99, _finite_form_number(row.get("Inflation %"), 0.0) / 100.0),
                 "priority": min(5, max(1, int(round(_finite_form_number(row.get("Priority (1–5)"), 3.0))))),
-                "horizon": str(row.get("Horizon") or "Long term"),
                 "description": str(row.get("Description / success condition") or "").strip(),
             })
         total_target = sum(float(item["target_weight"]) for item in goals)
@@ -6074,6 +6232,7 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "policy_benchmark": policy_benchmark.strip(),
                 "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
                 "horizon_years": float(horizon_years),
+                "investable_capital": float(investable_capital),
                 "liquidity_need_pct": float(liquidity_need_pct) / 100.0,
                 "base_currency": base_currency.strip().upper() or "USD",
                 "mandate_summary": mandate_summary.strip(),
@@ -6094,6 +6253,7 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "total_financial_picture": total_financial_picture.strip(),
                 "policy_benchmark": policy_benchmark.strip(),
                 "policy_benchmark_rationale": policy_benchmark_rationale.strip(),
+                "investable_capital": float(investable_capital),
                 "mandate_summary": mandate_summary.strip(),
                 "values_constraints_text": values_constraints.strip(),
                 "behavioral_profile": current.get("behavioral_profile", {}),
@@ -6105,11 +6265,12 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
             st.rerun()
 
     if current:
-        summary_cols = st.columns(4)
+        summary_cols = st.columns(5)
         summary_cols[0].metric("Goal buckets", len(current_goals))
         summary_cols[1].metric("Risk tolerance", str(current.get("risk_tolerance") or "Not specified"))
         summary_cols[2].metric("Horizon", f"{float(current.get('horizon_years') or 0):g} years")
-        summary_cols[3].metric("Liquidity need", f"{float(current.get('liquidity_need_pct') or 0):.1%}")
+        summary_cols[3].metric("Investable capital", f"${float(current.get('investable_capital') or 0):,.0f}")
+        summary_cols[4].metric("Liquidity need", f"{float(current.get('liquidity_need_pct') or 0):.1%}")
 
 
 def _render_client_behavioral_profile(
@@ -6428,7 +6589,10 @@ def _render_client_behavioral_profile(
 
 def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any]) -> None:
     from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
-    from src.portfolio_tracker.strategy_store import append_strategy_version
+    from src.portfolio_tracker.strategy_store import (
+        append_strategy_version,
+        delete_strategy_version,
+    )
 
     record = data.get("strategy_record")
     current = _strategy_payload(record)
@@ -6706,9 +6870,46 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             ])
             st.dataframe(before_after, use_container_width=True, hide_index=True)
         st.caption(
-            "Earlier versions are immutable and cannot be reactivated in place. "
-            "To restore a rule, save it as a new governed version with a reason and impact analysis."
+            "Saved versions cannot be edited or reactivated in place. To restore a rule, save it as a new "
+            "governed version with a reason and impact analysis. Inactive versions can be permanently deleted below."
         )
+        inactive_versions = [
+            item for item in versions
+            if not bool(item.get("is_active") or item.get("active"))
+        ]
+        if inactive_versions:
+            st.markdown("##### Delete an old strategy version")
+            delete_options = {
+                int(item.get("version") or item.get("version_number") or item.get("id")): item
+                for item in inactive_versions
+            }
+            delete_version = st.selectbox(
+                "Inactive version to delete",
+                list(delete_options),
+                format_func=lambda value: (
+                    f"Version {value} — "
+                    f"{_strategy_payload(delete_options[value]).get('name') or 'Unnamed strategy'}"
+                ),
+                key="strategy_version_delete_selector",
+            )
+            confirm_strategy_delete = st.checkbox(
+                f"I understand that version {delete_version} will be permanently deleted.",
+                key=f"confirm_strategy_version_delete_{delete_version}",
+            )
+            if st.button(
+                "Delete Selected Strategy Version",
+                disabled=not confirm_strategy_delete,
+                key="delete_strategy_version_button",
+            ):
+                with get_connection() as conn:
+                    deleted = delete_strategy_version(conn, int(delete_version))
+                if deleted:
+                    st.success(f"Strategy version {delete_version} was deleted.")
+                    st.rerun()
+                else:
+                    st.warning("That strategy version no longer exists.")
+        else:
+            st.caption("There are no inactive strategy versions to delete.")
 
 
 def _render_approved_universe(profile: dict[str, str | int], data: dict[str, Any]) -> None:
@@ -7475,8 +7676,9 @@ def _render_review_learning(profile: dict[str, str | int], data: dict[str, Any])
 
     st.markdown("#### Review & Learning")
     st.caption(
-        "Review records are append-only. Process outcome and market outcome stay separate to reduce hindsight and "
-        "outcome bias; a profitable decision can still have a poor process, and vice versa."
+        "Review records cannot be edited. Deleting a legacy decision also removes its linked decision reviews. "
+        "Process outcome and market outcome stay separate to reduce hindsight and outcome bias; a profitable "
+        "decision can still have a poor process, and vice versa."
     )
     thesis_tab, decision_tab, learning_tab = st.tabs([
         "Thesis Reviews", "Decision Reviews", "Learning Diagnostics",
@@ -7725,20 +7927,14 @@ def _render_review_learning(profile: dict[str, str | int], data: dict[str, Any])
 
 
 def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> None:
-    st.markdown("### Strategy Lab")
+    st.markdown("### Mandate & Strategy")
     st.caption(
-        "Client mandate, repeatable investment rules, portfolio alignment, thesis lifecycle, and approved-universe control. "
-        "This is an analytical workspace; it does not generate competition submissions."
+        "One client-policy workspace for goals, behavioral guardrails, repeatable investment rules, and portfolio alignment. "
+        "Security-level research belongs in the canonical dossier; investment decisions belong in the Committee."
     )
     data = _load_strategy_workspace_data()
-    mandate = _strategy_payload(data.get("mandate_record"))
-    goal_names = [
-        str(item.get("name")) for item in mandate.get("goals", [])
-        if isinstance(item, dict) and item.get("name")
-    ]
-    mandate_tab, behavior_tab, rulebook_tab, alignment_tab, pretrade_tab, thesis_tab, catalysts_tab, universe_tab, decisions_tab, review_tab = st.tabs([
-        "Client Mandate", "Behavioral Profile", "Strategy Rulebook", "Alignment & Drift", "Pre-Trade Lab",
-        "Thesis Monitor", "Catalyst Calendar", "Approved Universe", "Decision Journal", "Review & Learning",
+    mandate_tab, behavior_tab, rulebook_tab, alignment_tab = st.tabs([
+        "Client Mandate", "Behavioral Profile", "Strategy Rulebook", "Alignment & Drift",
     ])
     with mandate_tab:
         _render_client_mandate(profile, data.get("mandate_record"))
@@ -7748,18 +7944,6 @@ def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> N
         _render_strategy_rulebook(profile, data)
     with alignment_tab:
         _render_strategy_alignment(data)
-    with pretrade_tab:
-        _render_pretrade_lab(data)
-    with thesis_tab:
-        _render_thesis_monitor(profile, data)
-    with catalysts_tab:
-        _render_catalyst_calendar(profile, data)
-    with universe_tab:
-        _render_approved_universe(profile, data)
-    with decisions_tab:
-        _render_decision_log(profile, result, goal_names=goal_names or None)
-    with review_tab:
-        _render_review_learning(profile, data)
 
 
 def _render_decision_log(
@@ -7768,6 +7952,8 @@ def _render_decision_log(
     goal_names: list[str] | None = None,
 ) -> None:
     import json
+    from src.portfolio_tracker.legacy_decision_store import delete_legacy_decision
+
     available_goals = goal_names or ["Growth", "Income", "Risk Tolerance", "Community/Impact"]
     metric_groups = {
         "Valuation": ["Trailing P/E", "Forward P/E", "PEG Ratio", "EV/EBITDA", "EV/Revenue"],
@@ -7779,7 +7965,8 @@ def _render_decision_log(
     st.markdown("### Decision Journal")
     st.caption(
         "Trade decisions are a read-only projection of the canonical Investment Committee lifecycle. "
-        "Historical legacy records are preserved below for audit, but this screen cannot create or edit decisions."
+        "This screen cannot create or edit decisions. Historical legacy records can be permanently deleted below; "
+        "canonical Investment Committee decisions remain protected."
     )
 
     with get_connection() as conn:
@@ -7865,6 +8052,38 @@ def _render_decision_log(
         row_dict['Thesis (preview)'] = preview + ('…' if len(str(r['thesis'])) > 80 else '')
         df_data.append(row_dict)
     st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+
+    st.markdown("##### Delete an old legacy decision record")
+    delete_options = {
+        int(row["id"]): row
+        for row in rows
+    }
+    delete_decision_id = st.selectbox(
+        "Legacy record to delete",
+        list(delete_options),
+        format_func=lambda value: (
+            f"#{value} — {str(delete_options[value]['date'])[:10]} · "
+            f"{delete_options[value]['action']} {delete_options[value]['ticker']}"
+        ),
+        key="legacy_decision_delete_selector",
+    )
+    confirm_decision_delete = st.checkbox(
+        "I understand that this legacy decision, its edit history, and its decision reviews "
+        "will be permanently deleted.",
+        key=f"confirm_legacy_decision_delete_{delete_decision_id}",
+    )
+    if st.button(
+        "Delete Selected Legacy Decision",
+        disabled=not confirm_decision_delete,
+        key="delete_legacy_decision_button",
+    ):
+        with get_connection() as conn:
+            deleted = delete_legacy_decision(conn, int(delete_decision_id))
+        if deleted:
+            st.success(f"Legacy decision #{delete_decision_id} was deleted.")
+            st.rerun()
+        else:
+            st.warning("That legacy decision no longer exists.")
 
     # -- Price at each decision, with a persistent colour for each team editor
     st.markdown('#### Price at Decision & Team Edit History')
@@ -8196,7 +8415,7 @@ def _settled_competition_positions(
 def _render_competition_rules(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.wharton_competition import COMPETITION_URL, OFFICIAL_RULES_URL, evaluate_compliance
 
-    st.markdown("### Assignment & Rules — Wharton 2026–2027")
+    st.markdown("### Assignment Checklist — Wharton 2026–2027")
     st.caption("The compliance check uses only currently published official rules and gives the exact reason for every failed check.")
     source_col, overview_col = st.columns(2)
     source_col.link_button("Official 2026–2027 Rules", OFFICIAL_RULES_URL, use_container_width=True)
@@ -8308,8 +8527,8 @@ def _render_live_competition_analytics(
 ) -> None:
     from src.portfolio_tracker.live_analytics import build_live_competition_analytics
     from src.portfolio_tracker.bond_analytics import is_individual_bond
+    from src.portfolio_tracker.canonical_compat import list_canonical_first_holding_theses
     from src.portfolio_tracker.research_health import assess_research_health
-    from src.portfolio_tracker.strategy_store import list_holding_theses
 
     open_tickers = list(dict.fromkeys(
         str(row.get("ticker") or "").upper()
@@ -8352,7 +8571,7 @@ def _render_live_competition_analytics(
                 if benchmark and benchmark in prices.columns else pd.Series(dtype=float)
             )
             with get_connection() as conn:
-                thesis_records = list_holding_theses(conn)
+                thesis_records = list_canonical_first_holding_theses(conn)
                 try:
                     from src.portfolio_tracker.governance_store import (
                         list_catalyst_events,
@@ -9837,7 +10056,7 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
             if str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
         ]
         if not bond_positions:
-            st.info("No saved bond or bond-ETF positions are available. Add one in Portfolio Tracker.")
+            st.info("No reconciled bond or bond-ETF positions are available. Add one through the Committee and WInS workflow.")
         else:
             market_tickers = [
                 str(row.get("ticker") or "").upper()
@@ -9865,11 +10084,168 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
                 st.caption("Carry-after-loss and carry-per-duration are transparent comparison aids, not buy/sell scores.")
 
 
-def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
+def _annual_goal_return_history(returns: Any) -> pd.DataFrame:
+    """Compound sufficiently complete calendar years for goal bootstrapping."""
+    frame = pd.DataFrame(returns).copy()
+    if frame.empty:
+        return pd.DataFrame()
+    frame = frame.apply(pd.to_numeric, errors="coerce")
+    parsed_index = pd.to_datetime(frame.index, errors="coerce")
+    valid_index = ~pd.isna(parsed_index)
+    frame = frame.loc[valid_index]
+    frame.index = pd.DatetimeIndex(parsed_index[valid_index])
+    frame = frame.sort_index().dropna(how="any")
+    if frame.empty:
+        return pd.DataFrame()
+    grouped = frame.groupby(frame.index.year)
+    observations = grouped.count().min(axis=1)
+    compounded = grouped.apply(lambda group: (1.0 + group).prod() - 1.0)
+    return compounded.loc[observations >= 126].dropna(how="any")
+
+
+def _goal_candidate_weights(result: Mapping[str, Any], columns: list[str]) -> dict[str, np.ndarray]:
+    """Align useful portfolio candidates to one asset order for paired comparison."""
+    candidates: dict[str, np.ndarray] = {}
+
+    def add_candidate(label: str, payload: Any, *, fallback_symbols: list[str] | None = None) -> None:
+        if not isinstance(payload, Mapping):
+            return
+        raw_weights = np.asarray(payload.get("weights", []), dtype=float)
+        symbols = [str(item) for item in (payload.get("symbols") or fallback_symbols or [])]
+        if raw_weights.ndim != 1 or len(raw_weights) != len(symbols) or not symbols:
+            return
+        if len(symbols) != len(columns) or set(symbols) != set(columns):
+            return
+        aligned = pd.Series(raw_weights, index=symbols, dtype=float).reindex(columns)
+        if aligned.isna().any() or not np.isfinite(aligned.to_numpy()).all():
+            return
+        values = aligned.to_numpy(dtype=float)
+        total = float(values.sum())
+        if total > 0.0:
+            candidates[label] = values / total
+
+    current_weights = np.asarray(result.get("weights", []), dtype=float)
+    current_symbols = [str(item) for item in result.get("tickers", columns)]
+    if len(current_weights) == len(current_symbols):
+        add_candidate("Current strategy", {"weights": current_weights, "symbols": current_symbols})
+    add_candidate("Max Sharpe", result.get("max_sharpe"), fallback_symbols=columns)
+    add_candidate("Min Variance", result.get("min_variance"), fallback_symbols=columns)
+    mandate_aware = result.get("mandate_aware")
+    if isinstance(mandate_aware, Mapping) and mandate_aware.get("success"):
+        objective = str(mandate_aware.get("objective") or "Mandate-aware").replace("_", " ").title()
+        add_candidate(f"Mandate-aware · {objective}", mandate_aware)
+    return candidates
+
+
+def _render_goal_funding_outlook(result: Mapping[str, Any], current_portfolio_value: float) -> None:
+    """Answer whether each configured client goal is funded under common shocks."""
+    from src.portfolio_tracker.strategy_store import load_client_mandate
+    from src.simulation.goal_funding import GoalFundingConfig, compare_portfolios_from_asset_returns
+
+    with get_connection() as conn:
+        mandate_record = load_client_mandate(conn)
+    mandate = _strategy_payload(mandate_record)
+    configured_goals = [
+        item for item in mandate.get("goals", [])
+        if isinstance(item, Mapping)
+        and float(item.get("target_wealth") or 0.0) > 0.0
+        and int(item.get("horizon_years") or 0) > 0
+    ]
+
+    st.markdown("#### Client Goal Outlook")
+    if not configured_goals:
+        st.info(
+            "Add a target amount, horizon, and cash-flow plan in Client & Policy → Mandate & Strategy "
+            "to calculate goal-funding probability."
+        )
+        return
+    if not result or not isinstance(result.get("returns"), (pd.DataFrame, pd.Series, Mapping)):
+        st.info(
+            "Run the Quant Engine with the portfolio candidates you want to compare. Goal probability will then "
+            "appear here; it is intentionally not inferred from a Sharpe ratio."
+        )
+        return
+
+    annual_returns = _annual_goal_return_history(result.get("returns"))
+    if len(annual_returns) < 2:
+        st.warning(
+            "Goal funding needs at least two sufficiently complete calendar years of aligned asset returns. "
+            "Extend the Quant Engine lookback before relying on this output."
+        )
+        return
+    candidates = _goal_candidate_weights(result, [str(column) for column in annual_returns.columns])
+    if not candidates:
+        st.warning("No portfolio candidate could be aligned to the return history used for this goal analysis.")
+        return
+
+    configured_capital = float(mandate.get("investable_capital") or 0.0)
+    capital_base = configured_capital if configured_capital > 0.0 else float(current_portfolio_value)
+    goal_labels = [str(item.get("name") or f"Goal {index + 1}") for index, item in enumerate(configured_goals)]
+    selected_goal_label = st.selectbox("Client goal", goal_labels, key="portfolio_goal_funding_selector")
+    goal = configured_goals[goal_labels.index(selected_goal_label)]
+    target_weight = float(goal.get("target_weight") or 0.0)
+    try:
+        config = GoalFundingConfig(
+            target_wealth=float(goal["target_wealth"]),
+            horizon_years=int(goal["horizon_years"]),
+            initial_capital=capital_base * target_weight,
+            annual_net_cashflow=float(goal.get("annual_net_cashflow") or 0.0),
+            inflation_rate=float(goal.get("inflation_rate") or 0.0),
+            wealth_basis=("real" if str(goal.get("wealth_basis") or "nominal").lower() == "real" else "nominal"),
+        )
+        projections = compare_portfolios_from_asset_returns(
+            config,
+            annual_returns.to_numpy(dtype=float),
+            candidates,
+            n_scenarios=10_000,
+            random_seed=2027,
+        )
+    except (TypeError, ValueError) as exc:
+        st.warning(f"The selected goal cannot be evaluated yet: {exc}")
+        return
+
+    rows: list[dict[str, Any]] = []
+    for portfolio_name, projection in projections.items():
+        metrics = projection.metrics
+        low, high = metrics.goal_achievement_confidence_interval
+        rows.append({
+            "Portfolio": portfolio_name,
+            "P(goal achieved)": metrics.probability_goal_achieved,
+            "95% scenario CI": f"{low:.1%}–{high:.1%}",
+            "Expected terminal wealth": metrics.expected_terminal_wealth,
+            "Median terminal wealth": metrics.median_terminal_wealth,
+            "10th percentile": metrics.percentile_10_terminal_wealth,
+            "Expected shortfall vs goal": metrics.expected_shortfall_vs_goal,
+            "Shortfall probability": metrics.shortfall_probability,
+        })
+    st.dataframe(
+        pd.DataFrame(rows).style.format({
+            "P(goal achieved)": "{:.1%}",
+            "Expected terminal wealth": "${:,.0f}",
+            "Median terminal wealth": "${:,.0f}",
+            "10th percentile": "${:,.0f}",
+            "Expected shortfall vs goal": "${:,.0f}",
+            "Shortfall probability": "{:.1%}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        f"Goal: ${config.target_wealth:,.0f} in {config.horizon_years} years · starting goal capital: "
+        f"${config.initial_capital:,.0f} ({target_weight:.1%} of ${capital_base:,.0f}) · annual net cash flow: "
+        f"${config.annual_net_cashflow:,.0f} · {config.wealth_basis} basis. Historical calendar-year rows are "
+        "bootstrapped 10,000 times; every portfolio uses the same sampled shocks. This is a planning range, not a forecast."
+    )
+
+
+def _render_competition_portfolio(
+    profile: dict[str, str | int],
+    result: Mapping[str, Any] | None = None,
+) -> None:
     from src.portfolio_tracker.wharton_competition import INITIAL_CAPITAL_USD, calculate_portfolio_performance
     from src.portfolio_tracker.bond_analytics import is_individual_bond
 
-    st.markdown("### Portfolio Tracker — Wharton 2026–2027")
+    st.markdown("### Portfolio Overview — Wharton 2026–2027")
     st.caption("Returns are measured from USD 500,000. Every position records its creator, dates, entry price, and performance.")
     st.info(
         "New positions are created only by Investment Committee → WInS execution → clean reconciliation. "
@@ -9939,16 +10315,17 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     )
     st.info(
         "Authoritative WInS import, reconciliation history, exceptions, and independent sign-off "
-        "are available only in Risk & Quant → Live Portfolio & Data Reliability."
+        "are available only in Portfolio → WInS & Reconciliation."
     )
+    _render_goal_funding_outlook(result or {}, float(performance["equity"]))
     if not performance["positions"]:
         st.info("No positions have been entered yet.")
         return
 
-    from src.portfolio_tracker.strategy_store import list_holding_theses
+    from src.portfolio_tracker.canonical_compat import list_canonical_first_holding_theses
 
     with get_connection() as conn:
-        thesis_records = list_holding_theses(conn)
+        thesis_records = list_canonical_first_holding_theses(conn)
     thesis_by_ticker = {
         str(item.get("ticker") or "").upper(): item
         for item in thesis_records if item.get("ticker")
@@ -9974,10 +10351,17 @@ def _render_competition_portfolio(profile: dict[str, str | int]) -> None:
     _render_fixed_income_dashboard(settled_positions, performance["positions"])
     _render_live_competition_analytics(settled_positions, live_prices)
 
-    st.markdown("#### Manage Open Positions")
-    for row in performance["positions"]:
-        if row["status"] != "open":
-            continue
+    legacy_open_positions = [
+        row for row in performance["positions"]
+        if row["status"] == "open" and row.get("lifecycle_id") is None
+    ]
+    if legacy_open_positions:
+        st.markdown("#### Legacy Position Maintenance")
+        st.caption(
+            "Only pre-lifecycle records appear here. Canonical positions are monitored and exited through the "
+            "Investment Committee lifecycle, so the portfolio no longer exposes a second editor for them."
+        )
+    for row in legacy_open_positions:
         individual_bond = is_individual_bond(row)
         bond_security = str(row.get("security_type") or "").strip().casefold() in {"bond", "bonds", "fixed income"}
         canonical_position = row.get("lifecycle_id") is not None
@@ -11417,7 +11801,7 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
 
     results = st.session_state.get(COMPANY_ANALYSIS_KEY, {})
     if not isinstance(results, dict) or not results:
-        st.info("Enter tickers and run the analysis. Tickers from Portfolio Tracker are prefilled automatically.")
+        st.info("Enter tickers and run the analysis. Tickers from Portfolio Overview are prefilled automatically.")
         return
 
     valid_results = {ticker: data for ticker, data in results.items() if isinstance(data, dict) and not data.get("error")}
@@ -12068,7 +12452,7 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
                 column_config={"Readiness": st.column_config.ProgressColumn("Readiness", min_value=0.0, max_value=1.0, format="percent")},
             )
         else:
-            st.info("Create at least one holding thesis in Strategy & Decisions to start dossier scoring.")
+            st.info("Create at least one canonical Security Dossier to start dossier scoring.")
 
     with audit_tab:
         st.markdown("#### Independent red-team review")
@@ -12165,9 +12549,21 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
     with quant_tab:
         st.markdown("#### Quantitative evidence standard")
         st.caption("The analytics library now includes auditable building blocks; each report run still needs frozen inputs and assumptions.")
+        report_payload = (report_record or {}).get("payload", {})
+        report_snapshot = report_payload.get("portfolio_snapshot", {}) if isinstance(report_payload, Mapping) else {}
+        attribution_ready = bool(
+            isinstance(report_payload, Mapping)
+            and report_payload.get("performance_attribution")
+            and isinstance(report_snapshot, Mapping)
+            and report_snapshot.get("reconciled")
+        )
         quant_rows = [
             {"Gate": "Policy benchmark", "Standard": "Explicit components and normalized weights", "Status": "Available"},
-            {"Gate": "Performance attribution", "Standard": "Brinson allocation, selection, interaction with reconciliation", "Status": "Available"},
+            {
+                "Gate": "Performance attribution",
+                "Standard": "Calculated Brinson allocation, selection, interaction on a reconciled snapshot",
+                "Status": "Attached & reconciled" if attribution_ready else "Engine ready · inputs missing",
+            },
             {"Gate": "Out-of-sample process", "Standard": "Point-in-time scores are lagged before returns; costs charged on turnover", "Status": "Available"},
             {"Gate": "Reproducibility", "Standard": "SHA-256 data snapshot and frozen configuration manifest", "Status": "Available"},
             {"Gate": "Statistical claims", "Standard": "Confidence intervals, untouched holdout, multiple-testing control", "Status": "Required per research run"},
@@ -12179,12 +12575,14 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
 def _render_ios_security_dossiers(profile: Mapping[str, Any]) -> None:
     from ui.investment_os import render_security_dossiers
 
+    st.caption("Workflow 2/5 · Research evidence → canonical dossier freeze. Investment voting happens only in the next stage.")
     render_security_dossiers(profile, get_connection, DEFAULT_USERS)
 
 
 def _render_ios_live_pipeline(profile: Mapping[str, Any]) -> None:
     from ui.investment_os import render_live_portfolio_pipeline
 
+    st.caption("Workflow 4/5 · Official WInS execution → reconciliation → independently signed portfolio snapshot.")
     render_live_portfolio_pipeline(
         profile,
         get_connection,
@@ -12197,6 +12595,7 @@ def _render_ios_live_pipeline(profile: Mapping[str, Any]) -> None:
 def _render_ios_investment_committee(profile: Mapping[str, Any]) -> None:
     from ui.investment_os import render_investment_committee
 
+    st.caption("Workflow 3/5 · This is the sole investment-voting and authorization workflow.")
     render_investment_committee(
         profile,
         get_connection,
@@ -12228,6 +12627,119 @@ def _render_ios_rules(profile: Mapping[str, Any]) -> None:
     render_official_rules_watch(profile, get_connection, DEFAULT_USERS)
 
 
+def _render_research_workspace(profile: Mapping[str, Any]) -> None:
+    """Expose one lazy research surface instead of four competing top-level pages."""
+    st.markdown("### Research Workspace")
+    st.caption(
+        "Screen first, investigate second, then capture the investable case once in Security Dossiers. "
+        "Choosing a view below does not create a second thesis or approval record."
+    )
+    research_view = st.radio(
+        "Research view",
+        ["Stock Screener", "Company Analysis", "Fixed Income", "Real Assets"],
+        horizontal=True,
+        key="wharton_research_workspace_view",
+    )
+    if research_view == "Stock Screener":
+        _render_stock_screener()
+    elif research_view == "Company Analysis":
+        _render_company_analysis(profile)
+    elif research_view == "Fixed Income":
+        _render_bond_analysis(profile)
+    else:
+        _render_commodity_analysis(profile)
+
+
+def _render_risk_scenarios_workspace(profile: Mapping[str, Any], result: dict[str, Any]) -> None:
+    """Keep specialist analytics available without making each model a navigation destination."""
+    st.markdown("### Risk & Scenarios")
+    st.caption(
+        "Start with portfolio risk and benchmark diagnostics. Open specialist or experimental models only when "
+        "they answer a specific investment question."
+    )
+    analytics_view = st.radio(
+        "Analytics view",
+        ["Portfolio Risk", "Quant Engine", "FX & Hedging", "Factor Exposure", "Scenarios", "Advanced Lab"],
+        horizontal=True,
+        key="wharton_risk_scenarios_view",
+    )
+
+    def render_with_quant_context(renderer, *, require_simulation: bool = False) -> None:
+        if require_simulation and result and not _simulations_ready(result):
+            with st.spinner("Running the full seeded simulation set..."):
+                _run_quant_simulations(result)
+                st.session_state[QUANT_RESULT_KEY] = result
+        _render_custom_quant_context(result)
+        renderer(result)
+
+    if analytics_view == "Portfolio Risk":
+        render_with_quant_context(_render_risk_cockpit)
+    elif analytics_view == "Quant Engine":
+        _render_quant_engine(profile)
+    elif analytics_view == "FX & Hedging":
+        _render_currency_risk(profile)
+    elif analytics_view == "Factor Exposure":
+        render_with_quant_context(_render_factor_exposure)
+    elif analytics_view == "Scenarios":
+        render_with_quant_context(_render_scenario_playground)
+    else:
+        advanced_view = st.selectbox(
+            "Advanced tool",
+            [
+                "Pre-Trade Sandbox",
+                "Efficient Frontier",
+                "Monte Carlo Diagnostics",
+                "Jump Monte Carlo (Experimental)",
+                "Regime Detection (Experimental)",
+                "Specialist Analytics (Experimental)",
+            ],
+            key="wharton_advanced_lab_view",
+            help="These tools support a decision; they are not separate sources of truth or approval gates.",
+        )
+        if advanced_view == "Pre-Trade Sandbox":
+            st.info("Sandbox only. The Committee owns the final locked rule check and any documented override.")
+            _render_pretrade_lab(_load_strategy_workspace_data())
+        elif advanced_view == "Efficient Frontier":
+            render_with_quant_context(_render_efficient_frontier)
+        elif advanced_view == "Monte Carlo Diagnostics":
+            render_with_quant_context(_render_monte_carlo, require_simulation=True)
+        elif advanced_view == "Jump Monte Carlo (Experimental)":
+            render_with_quant_context(_render_advanced_monte_carlo, require_simulation=True)
+        elif advanced_view == "Regime Detection (Experimental)":
+            render_with_quant_context(_render_regime_detection)
+        else:
+            render_with_quant_context(_render_advanced_analytics)
+
+
+def _render_report_pitch_workspace(profile: Mapping[str, Any]) -> None:
+    st.caption("Workflow 5/5 · Reuse governed evidence and reconciled results in both the report and oral defense.")
+    deliverable_view = st.radio(
+        "Deliverable view",
+        ["Report Evidence Studio", "Q&A Rehearsal"],
+        horizontal=True,
+        key="wharton_report_pitch_view",
+    )
+    if deliverable_view == "Report Evidence Studio":
+        _render_ios_report_studio(profile)
+    else:
+        _render_ios_qa(profile)
+
+
+def _render_rules_compliance_workspace(profile: Mapping[str, Any]) -> None:
+    st.markdown("### Rules & Compliance")
+    st.caption("One home for requirements, source changes, acknowledgements, and submission readiness.")
+    rules_view = st.radio(
+        "Compliance view",
+        ["Assignment Checklist", "Official Rules Watch"],
+        horizontal=True,
+        key="wharton_rules_compliance_view",
+    )
+    if rules_view == "Assignment Checklist":
+        _render_competition_rules(profile)
+    else:
+        _render_ios_rules(profile)
+
+
 def render_wharton_cockpit() -> None:
     _inject_cockpit_styles()
 
@@ -12245,57 +12757,23 @@ def render_wharton_cockpit() -> None:
     # Fetch result from state if available.
     result = st.session_state.get(QUANT_RESULT_KEY, {})
 
-    def _with_quant_context(renderer, *, require_simulation: bool = False):
-        def _render() -> None:
-            if require_simulation and result and not _simulations_ready(result):
-                with st.spinner("Running the full seeded simulation set..."):
-                    _run_quant_simulations(result)
-                    st.session_state[QUANT_RESULT_KEY] = result
-            _render_custom_quant_context(result)
-            renderer(result)
-
-        return _render
-
     tab_renderers = [
         ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
         ("Competition Readiness", lambda: _render_competition_readiness(profile)),
-        ("Report Evidence Studio", lambda: _render_ios_report_studio(profile)),
-        ("Assignment & Rules", lambda: _render_competition_rules(profile)),
-        ("Official Rules Watch", lambda: _render_ios_rules(profile)),
-        ("Strategy & Decisions", lambda: _render_strategy_workspace(profile, result)),
+        ("Mandate & Strategy", lambda: _render_strategy_workspace(profile, result)),
+        ("Research Workspace", lambda: _render_research_workspace(profile)),
         ("Security Dossiers", lambda: _render_ios_security_dossiers(profile)),
         ("Investment Committee", lambda: _render_ios_investment_committee(profile)),
-        ("Portfolio Tracker", lambda: _render_competition_portfolio(profile)),
-        ("Company Analysis", lambda: _render_company_analysis(profile)),
-        ("Bond Analysis", lambda: _render_bond_analysis(profile)),
-        ("Commodity Analysis", lambda: _render_commodity_analysis(profile)),
-        ("Stock Screener", _render_stock_screener),
-        ("Live Portfolio & Data Reliability", lambda: _render_ios_live_pipeline(profile)),
-        ("Quant Engine", lambda: _render_quant_engine(profile)),
-        ("Risk Cockpit", _with_quant_context(_render_risk_cockpit)),
-        ("Currency Risk & Hedging", lambda: _render_currency_risk(profile)),
-        ("Factor Exposure", _with_quant_context(_render_factor_exposure)),
-        ("Regime Detection", _with_quant_context(_render_regime_detection)),
-        ("Scenario Playground", _with_quant_context(_render_scenario_playground)),
-        ("Efficient Frontier", _with_quant_context(_render_efficient_frontier)),
-        ("Monte Carlo", _with_quant_context(_render_monte_carlo, require_simulation=True)),
-        ("Advanced Monte Carlo", _with_quant_context(_render_advanced_monte_carlo, require_simulation=True)),
-        ("Advanced Analytics", _with_quant_context(_render_advanced_analytics)),
-        ("Q&A Rehearsal", lambda: _render_ios_qa(profile)),
-        ("Mind Map", _render_mindmap),
-        ("Sub-Projects", lambda: _render_subprojects(profile)),
-        ("War Room", lambda: _render_chat(profile)),
-        ("File Vault", lambda: _render_file_center(profile)),
+        ("Portfolio Overview", lambda: _render_competition_portfolio(profile, result)),
+        ("WInS & Reconciliation", lambda: _render_ios_live_pipeline(profile)),
+        ("Risk & Scenarios", lambda: _render_risk_scenarios_workspace(profile, result)),
+        ("Report & Pitch", lambda: _render_report_pitch_workspace(profile)),
+        ("Rules & Compliance", lambda: _render_rules_compliance_workspace(profile)),
     ]
-    visible_panel_renderers = [
-        (label, renderer)
-        for label, renderer in tab_renderers
-        if label not in HIDDEN_COCKPIT_TABS
-    ]
-    renderer_by_label = dict(visible_panel_renderers)
+    renderer_by_label = dict(tab_renderers)
     active_panel = _render_cockpit_navigation(
         profile,
-        [label for label, _ in visible_panel_renderers],
+        [label for label, _ in tab_renderers],
     )
     renderer_by_label[active_panel]()
 

@@ -37,6 +37,455 @@ def _lines(value: str) -> list[str]:
     return [item.strip() for item in re.split(r"[\n;]+", value or "") if item.strip()]
 
 
+def _tags(value: str | Sequence[Any]) -> list[str]:
+    """Return stable, de-duplicated dossier tags without changing their display case."""
+    raw_items = (
+        re.split(r"[,;\n]+", value)
+        if isinstance(value, str)
+        else [str(item) for item in value]
+    )
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        tag = item.strip()
+        identity = tag.casefold()
+        if tag and identity not in seen:
+            result.append(tag)
+            seen.add(identity)
+    return result
+
+
+def _dossier_items(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return _lines(value)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _dossier_date(value: Any, *, fallback: date | None = None) -> date:
+    """Coerce historical ISO timestamps to the date widget's value type."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    candidate = str(value or "").strip()
+    if candidate:
+        try:
+            return date.fromisoformat(candidate[:10])
+        except ValueError:
+            pass
+    return fallback or date.today()
+
+
+def _dossier_number(value: Any, label: str) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+    if number < 0:
+        raise ValueError(f"{label} cannot be negative.")
+    return number
+
+
+def _security_dossier_payload(
+    values: Mapping[str, Any],
+    *,
+    existing: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical dossier payload while preserving unknown legacy fields.
+
+    This adapter keeps old dossier versions readable and gives new/revised versions a
+    stable schema.  It deliberately contains research evidence only; committee votes
+    and approvals remain in the Investment Committee lifecycle store.
+    """
+    conviction = int(values.get("conviction") or 3)
+    if conviction not in range(1, 6):
+        raise ValueError("Conviction must be between 1 and 5.")
+
+    reference_price = _dossier_number(values.get("reference_price"), "Reference price")
+    fair_value_bear = _dossier_number(values.get("fair_value_bear"), "Bear fair value")
+    fair_value_base = _dossier_number(values.get("fair_value_base"), "Base fair value")
+    fair_value_bull = _dossier_number(values.get("fair_value_bull"), "Bull fair value")
+    incoherent_range = (
+        fair_value_bear is not None
+        and fair_value_base is not None
+        and fair_value_bear > fair_value_base
+    ) or (
+        fair_value_base is not None
+        and fair_value_bull is not None
+        and fair_value_base > fair_value_bull
+    ) or (
+        fair_value_bear is not None
+        and fair_value_bull is not None
+        and fair_value_bear > fair_value_bull
+    )
+    if incoherent_range:
+        raise ValueError("Fair values must be ordered bear ≤ base ≤ bull.")
+    margin_of_safety = (
+        round((fair_value_base / reference_price - 1.0) * 100.0, 2)
+        if fair_value_base is not None and reference_price not in (None, 0.0)
+        else None
+    )
+
+    payload = dict(existing or {})
+    payload.pop("primary_goal", None)
+    payload.update(
+        {
+            "sector": str(values.get("sector") or "").strip(),
+            "asset_type": str(values.get("asset_type") or "").strip(),
+            "owner": str(values.get("owner") or "").strip(),
+            "client_goal": str(values.get("client_goal") or "").strip(),
+            "portfolio_role": str(values.get("portfolio_role") or "").strip(),
+            "conviction": conviction,
+            "tags": _tags(values.get("tags") or []),
+            "thesis": str(values.get("thesis") or "").strip(),
+            "why_now": str(values.get("why_now") or "").strip(),
+            "value_drivers": _dossier_items(values.get("value_drivers")),
+            "base_case": str(values.get("base_case") or "").strip(),
+            "bull_case": str(values.get("bull_case") or "").strip(),
+            "bear_case": str(values.get("bear_case") or "").strip(),
+            "counter_thesis": str(values.get("counter_thesis") or "").strip(),
+            "risks": _dossier_items(values.get("risks")),
+            "reference_price": reference_price,
+            "fair_value_bear": fair_value_bear,
+            "fair_value_base": fair_value_base,
+            "fair_value_bull": fair_value_bull,
+            "fair_value_currency": str(values.get("fair_value_currency") or "USD").strip().upper(),
+            "valuation_as_of": _dossier_date(values.get("valuation_as_of")).isoformat(),
+            "margin_of_safety_pct": margin_of_safety,
+            "catalysts": _dossier_items(values.get("catalysts")),
+            "invalidation_condition": str(values.get("invalidation_condition") or "").strip(),
+            "sell_discipline": str(values.get("sell_discipline") or "").strip(),
+            "next_review_at": _dossier_date(values.get("next_review_at")).isoformat(),
+            "evidence_refs": _dossier_items(values.get("evidence_refs")),
+        }
+    )
+    return payload
+
+
+def _payload_number(payload: Mapping[str, Any], key: str) -> float | None:
+    """Read optional valuation fields from current and early nested schemas."""
+    direct = payload.get(key)
+    if direct not in (None, ""):
+        return _dossier_number(direct, key.replace("_", " ").title())
+    valuation = payload.get("valuation")
+    if isinstance(valuation, Mapping):
+        aliases = {
+            "reference_price": ("reference_price", "market_price"),
+            "fair_value_bear": ("fair_value_bear", "bear"),
+            "fair_value_base": ("fair_value_base", "base"),
+            "fair_value_bull": ("fair_value_bull", "bull"),
+        }
+        for alias in aliases.get(key, (key,)):
+            if valuation.get(alias) not in (None, ""):
+                return _dossier_number(valuation.get(alias), key.replace("_", " ").title())
+    return None
+
+
+def _render_security_dossier_fields(
+    *,
+    key_prefix: str,
+    members: Sequence[str],
+    actor: str,
+    defaults: Mapping[str, Any] | None = None,
+    ticker: str = "",
+    editable_ticker: bool,
+    evidence_sources: Sequence[Mapping[str, Any]] = (),
+) -> tuple[str, str, dict[str, Any]]:
+    """Render the shared create/revise evidence form and return unpersisted values."""
+    payload = dict(defaults or {})
+    owner_options = list(dict.fromkeys([*members, actor, str(payload.get("owner") or "").strip()]))
+    owner_options = [name for name in owner_options if name] or ["Unassigned"]
+    selected_owner = str(payload.get("owner") or actor or owner_options[0]).strip()
+    if selected_owner not in owner_options:
+        owner_options.append(selected_owner)
+
+    asset_types = ["Stock", "ETF", "Bond", "Commodity", "Fund", "Cash", "Other"]
+    current_asset_type = str(payload.get("asset_type") or payload.get("security_type") or "Stock")
+    if current_asset_type not in asset_types:
+        asset_types.append(current_asset_type)
+    try:
+        conviction = int(payload.get("conviction") or 3)
+    except (TypeError, ValueError):
+        conviction = 3
+    conviction = min(max(conviction, 1), 5)
+    currencies = ["USD", "EUR", "GBP", "CZK", "JPY", "CHF", "CAD", "Other"]
+    valuation = payload.get("valuation") if isinstance(payload.get("valuation"), Mapping) else {}
+    current_currency = str(
+        payload.get("fair_value_currency") or valuation.get("currency") or "USD"
+    ).upper()
+    if current_currency not in currencies:
+        currencies.append(current_currency)
+
+    st.markdown("#### Identity & ownership")
+    identity = st.columns(3)
+    with identity[0]:
+        if editable_ticker:
+            security_ticker = st.text_input(
+                "Ticker / security ID",
+                value=ticker,
+                key=f"{key_prefix}_ticker",
+            ).strip().upper()
+        else:
+            security_ticker = ticker.strip().upper()
+            st.text_input(
+                "Ticker / security ID",
+                value=security_ticker,
+                disabled=True,
+                key=f"{key_prefix}_ticker",
+            )
+        asset_type = st.selectbox(
+            "Instrument type",
+            asset_types,
+            index=asset_types.index(current_asset_type),
+            key=f"{key_prefix}_asset_type",
+        )
+        sector = st.text_input(
+            "Sector / exposure",
+            value=str(payload.get("sector") or ""),
+            placeholder="Technology, duration, gold...",
+            key=f"{key_prefix}_sector",
+        )
+    with identity[1]:
+        owner = st.selectbox(
+            "Dossier owner",
+            owner_options,
+            index=owner_options.index(selected_owner),
+            key=f"{key_prefix}_owner",
+        )
+        client_goal = st.text_input(
+            "Primary client goal",
+            value=str(payload.get("client_goal") or payload.get("primary_goal") or ""),
+            placeholder="Growth bucket, capital preservation...",
+            key=f"{key_prefix}_client_goal",
+        )
+        portfolio_role = st.text_input(
+            "Portfolio role",
+            value=str(payload.get("portfolio_role") or ""),
+            placeholder="Core compounder, diversifier, hedge...",
+            key=f"{key_prefix}_portfolio_role",
+        )
+    with identity[2]:
+        conviction = st.selectbox(
+            "Conviction",
+            [1, 2, 3, 4, 5],
+            index=conviction - 1,
+            format_func=lambda value: {
+                1: "1 · Low",
+                2: "2 · Cautious",
+                3: "3 · Balanced",
+                4: "4 · High",
+                5: "5 · Very high",
+            }[value],
+            key=f"{key_prefix}_conviction",
+        )
+        next_review_at = st.date_input(
+            "Next required review",
+            value=_dossier_date(payload.get("next_review_at")),
+            key=f"{key_prefix}_next_review_at",
+        )
+        tags = st.text_input(
+            "Tags",
+            value=", ".join(_tags(payload.get("tags") or [])),
+            placeholder="quality, AI, client-growth",
+            key=f"{key_prefix}_tags",
+        )
+    candidate_source = st.text_input(
+        "Origin / candidate source",
+        value=str(payload.get("candidate_source") or ""),
+        placeholder="Screener, analyst, team task",
+        disabled=not editable_ticker,
+        key=f"{key_prefix}_candidate_source",
+    )
+
+    st.markdown("#### Investment case")
+    thesis = st.text_area(
+        "Investment thesis",
+        value=str(payload.get("thesis") or ""),
+        height=115,
+        placeholder="One evidence-backed paragraph: what is mispriced and why it matters to this portfolio.",
+        key=f"{key_prefix}_thesis",
+    )
+    case_columns = st.columns(2)
+    with case_columns[0]:
+        why_now = st.text_area(
+            "Why now?",
+            value=str(payload.get("why_now") or ""),
+            height=95,
+            placeholder="What catalyst, dislocation, or timing edge makes this actionable now?",
+            key=f"{key_prefix}_why_now",
+        )
+    with case_columns[1]:
+        base_case = st.text_area(
+            "Base-case operating outcome",
+            value=str(payload.get("base_case") or ""),
+            height=95,
+            placeholder="The operating result expected if the thesis is broadly right.",
+            key=f"{key_prefix}_base_case",
+        )
+    value_drivers = st.text_area(
+        "Value drivers · one per line",
+        value="\n".join(_dossier_items(payload.get("value_drivers"))),
+        height=80,
+        placeholder="The small set of economic or operating drivers that must create value.",
+        key=f"{key_prefix}_value_drivers",
+    )
+
+    st.markdown("#### Valuation & challenge")
+    st.caption("Fair values are scenario inputs, not a vote or an approval.")
+    valuation_columns = st.columns(6)
+    with valuation_columns[0]:
+        reference_price = st.number_input(
+            "Reference price",
+            min_value=0.0,
+            value=_payload_number(payload, "reference_price"),
+            step=0.01,
+            placeholder="Optional",
+            key=f"{key_prefix}_reference_price",
+        )
+    with valuation_columns[1]:
+        fair_value_bear = st.number_input(
+            "Bear fair value",
+            min_value=0.0,
+            value=_payload_number(payload, "fair_value_bear"),
+            step=0.01,
+            placeholder="Optional",
+            key=f"{key_prefix}_fair_value_bear",
+        )
+    with valuation_columns[2]:
+        fair_value_base = st.number_input(
+            "Base fair value",
+            min_value=0.0,
+            value=_payload_number(payload, "fair_value_base"),
+            step=0.01,
+            placeholder="Optional",
+            key=f"{key_prefix}_fair_value_base",
+        )
+    with valuation_columns[3]:
+        fair_value_bull = st.number_input(
+            "Bull fair value",
+            min_value=0.0,
+            value=_payload_number(payload, "fair_value_bull"),
+            step=0.01,
+            placeholder="Optional",
+            key=f"{key_prefix}_fair_value_bull",
+        )
+    with valuation_columns[4]:
+        fair_value_currency = st.selectbox(
+            "Currency",
+            currencies,
+            index=currencies.index(current_currency),
+            key=f"{key_prefix}_fair_value_currency",
+        )
+    with valuation_columns[5]:
+        valuation_as_of = st.date_input(
+            "Valuation as of",
+            value=_dossier_date(payload.get("valuation_as_of")),
+            key=f"{key_prefix}_valuation_as_of",
+        )
+    scenario_columns = st.columns(2)
+    with scenario_columns[0]:
+        bull_case = st.text_area(
+            "Bull-case narrative",
+            value=str(payload.get("bull_case") or ""),
+            height=80,
+            key=f"{key_prefix}_bull_case",
+        )
+        bear_case = st.text_area(
+            "Bear-case narrative",
+            value=str(payload.get("bear_case") or ""),
+            height=80,
+            key=f"{key_prefix}_bear_case",
+        )
+    with scenario_columns[1]:
+        counter_thesis = st.text_area(
+            "Best counter-thesis",
+            value=str(payload.get("counter_thesis") or ""),
+            height=80,
+            placeholder="The strongest evidence-based reason this thesis may be wrong.",
+            key=f"{key_prefix}_counter_thesis",
+        )
+        risks = st.text_area(
+            "Key risks · one per line",
+            value="\n".join(_dossier_items(payload.get("risks"))),
+            height=80,
+            key=f"{key_prefix}_risks",
+        )
+
+    st.markdown("#### Monitoring & exit")
+    monitoring_columns = st.columns(2)
+    with monitoring_columns[0]:
+        catalysts = st.text_area(
+            "Catalysts / dated thesis tests · one per line",
+            value="\n".join(_dossier_items(payload.get("catalysts"))),
+            height=95,
+            key=f"{key_prefix}_catalysts",
+        )
+        invalidation_condition = st.text_area(
+            "Observable invalidation condition",
+            value=str(payload.get("invalidation_condition") or payload.get("invalidation") or ""),
+            height=95,
+            key=f"{key_prefix}_invalidation",
+        )
+    with monitoring_columns[1]:
+        sell_discipline = st.text_area(
+            "Sell / review discipline",
+            value=str(payload.get("sell_discipline") or payload.get("sell_condition") or ""),
+            height=95,
+            key=f"{key_prefix}_sell_discipline",
+        )
+        current_evidence_refs = _dossier_items(payload.get("evidence_refs"))
+        evidence_labels = {
+            f"registry-source-{int(item['id'])}": (
+                f"#{int(item['id'])} · {item.get('ticker') or 'Global'} · "
+                f"{item.get('title') or 'Untitled source'}"
+            )
+            for item in evidence_sources
+            if item.get("id") is not None
+        }
+        evidence_options = list(dict.fromkeys([*current_evidence_refs, *evidence_labels]))
+        evidence_refs = st.multiselect(
+            "Verified Evidence Registry sources",
+            evidence_options,
+            default=current_evidence_refs,
+            format_func=lambda value: evidence_labels.get(value, f"{value} · legacy reference"),
+            key=f"{key_prefix}_evidence_refs",
+            help="Register and verify each source once in Research Workspace; this dossier stores only its registry ID.",
+        )
+
+    return security_ticker, candidate_source, {
+        "sector": sector,
+        "asset_type": asset_type,
+        "owner": owner,
+        "client_goal": client_goal,
+        "portfolio_role": portfolio_role,
+        "conviction": conviction,
+        "tags": tags,
+        "thesis": thesis,
+        "why_now": why_now,
+        "value_drivers": value_drivers,
+        "base_case": base_case,
+        "bull_case": bull_case,
+        "bear_case": bear_case,
+        "counter_thesis": counter_thesis,
+        "risks": risks,
+        "reference_price": reference_price,
+        "fair_value_bear": fair_value_bear,
+        "fair_value_base": fair_value_base,
+        "fair_value_bull": fair_value_bull,
+        "fair_value_currency": fair_value_currency,
+        "valuation_as_of": valuation_as_of,
+        "catalysts": catalysts,
+        "invalidation_condition": invalidation_condition,
+        "sell_discipline": sell_discipline,
+        "next_review_at": next_review_at,
+        "evidence_refs": evidence_refs,
+    }
+
+
 def _current_document(
     get_connection: ConnectionFactory,
     record_type: str,
@@ -112,13 +561,18 @@ def render_security_dossiers(
         list_security_dossiers,
         upsert_kpi_definition,
     )
+    from src.portfolio_tracker.governance_store import list_research_sources
 
     actor = _actor(profile)
     members = _team_names(team_members)
     st.markdown("### Security Dossiers")
     st.caption(
-        "One canonical record now owns the thesis, catalysts, invalidation, portfolio role, "
-        "sell discipline, evidence links, and monitored KPIs. Committee proposals freeze a version of it."
+        "One canonical record owns the complete investment case, valuation challenge, monitoring plan, "
+        "exit discipline, evidence links, and KPIs."
+    )
+    st.info(
+        "Evidence only — no vote or approval is recorded here. Voting happens only in Investment Committee "
+        "after an immutable dossier version is frozen."
     )
     dossier_tab, kpi_tab, universe_tab = st.tabs(
         ["Canonical dossier", "KPI thesis monitor", "Authoritative universe"]
@@ -126,63 +580,48 @@ def render_security_dossiers(
 
     with get_connection() as connection:
         dossiers = list_security_dossiers(connection)
+        evidence_sources = list_research_sources(connection, verified=True)
 
     with dossier_tab:
         with st.expander("Create security dossier", expanded=not dossiers):
             with st.form("ios_create_dossier", clear_on_submit=True):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    ticker = st.text_input("Ticker / security ID").strip().upper()
-                    client_goal = st.text_input("Client goal")
-                with c2:
-                    portfolio_role = st.text_input("Portfolio role")
-                    owner = st.selectbox("Dossier owner", members, index=members.index(actor) if actor in members else 0)
-                with c3:
-                    candidate_source = st.text_input("Candidate source", placeholder="Screener, analyst, task")
-                    asset_type = st.selectbox("Instrument type", ["Stock", "ETF", "Bond", "Commodity", "Other"])
-                thesis = st.text_area("Investment thesis", height=110)
-                catalysts = st.text_area("Catalysts / dated thesis tests", height=80)
-                invalidation = st.text_area("Observable invalidation condition", height=75)
-                sell_discipline = st.text_area("Sell / review discipline", height=75)
-                d1, d2 = st.columns(2)
-                with d1:
-                    bull_case = st.text_area("Bull case", height=65)
-                    risks = st.text_area("Key risks", height=65)
-                with d2:
-                    bear_case = st.text_area("Bear case", height=65)
-                    evidence_refs = st.text_area("Evidence IDs / citations", height=65)
+                ticker, candidate_source, form_values = _render_security_dossier_fields(
+                    key_prefix="ios_create_dossier",
+                    members=members,
+                    actor=actor,
+                    editable_ticker=True,
+                    evidence_sources=evidence_sources,
+                )
                 create_clicked = st.form_submit_button("Create canonical dossier", type="primary", use_container_width=True)
             if create_clicked:
-                payload = {
-                    "thesis": thesis.strip(),
-                    "catalysts": _lines(catalysts),
-                    "invalidation_condition": invalidation.strip(),
-                    "portfolio_role": portfolio_role.strip(),
-                    "sell_discipline": sell_discipline.strip(),
-                    "client_goal": client_goal.strip(),
-                    "asset_type": asset_type,
-                    "owner": owner,
-                    "bull_case": bull_case.strip(),
-                    "bear_case": bear_case.strip(),
-                    "risks": _lines(risks),
-                    "evidence_refs": _lines(evidence_refs),
-                }
+                def create() -> Any:
+                    payload = _security_dossier_payload(form_values)
+                    if not ticker or any(
+                        not payload[key]
+                        for key in (
+                            "thesis",
+                            "catalysts",
+                            "invalidation_condition",
+                            "portfolio_role",
+                            "sell_discipline",
+                        )
+                    ):
+                        raise ValueError("Ticker and all five core thesis fields are required.")
+                    return _call_db(
+                        get_connection,
+                        create_security_dossier,
+                        ticker,
+                        payload,
+                        candidate={
+                            "source": candidate_source.strip(),
+                            "asset_type": payload["asset_type"],
+                            "sector": payload["sector"],
+                        },
+                        created_by=actor,
+                    )
+
                 _error_or_rerun(
-                    lambda: (
-                        (_ for _ in ()).throw(ValueError("Ticker and all five core thesis fields are required."))
-                        if not ticker or any(
-                            not payload[key]
-                            for key in ("thesis", "catalysts", "invalidation_condition", "portfolio_role", "sell_discipline")
-                        )
-                        else _call_db(
-                            get_connection,
-                            create_security_dossier,
-                            ticker,
-                            payload,
-                            candidate={"source": candidate_source.strip(), "asset_type": asset_type},
-                            created_by=actor,
-                        )
-                    ),
+                    create,
                     f"Canonical dossier {ticker} created.",
                 )
 
@@ -200,47 +639,141 @@ def render_security_dossiers(
             selected = next(item for item in dossiers if int(item["id"]) == selected_id)
             version = selected["current_version"]
             payload = version["payload"]
-            metrics = st.columns(4)
+            try:
+                display_conviction = int(payload.get("conviction") or 3)
+            except (TypeError, ValueError):
+                display_conviction = 3
+            metrics = st.columns(6)
             metrics[0].metric("Ticker", selected["ticker"])
-            metrics[1].metric("Version", version["version"])
-            metrics[2].metric("State", version["status"].title())
-            metrics[3].metric("KPI definitions", len(version.get("kpi_snapshot") or []))
-            st.dataframe(
-                pd.DataFrame([
-                    {"Field": key.replace("_", " ").title(), "Canonical value": value}
-                    for key, value in payload.items()
-                ]),
-                hide_index=True,
-                use_container_width=True,
+            metrics[1].metric("Sector", str(payload.get("sector") or "Not set"))
+            metrics[2].metric("Conviction", f"{display_conviction}/5")
+            metrics[3].metric("Next review", str(payload.get("next_review_at") or "Not set"))
+            metrics[4].metric("Version", version["version"])
+            metrics[5].metric("State", version["status"].title())
+            tags = _tags(payload.get("tags") or [])
+            st.caption(
+                f"Owner: {payload.get('owner') or 'Unassigned'} · "
+                f"Instrument: {payload.get('asset_type') or payload.get('security_type') or 'Not set'} · "
+                f"KPI definitions: {len(version.get('kpi_snapshot') or [])}"
+                + (f" · Tags: {', '.join(tags)}" if tags else "")
             )
+
+            case_columns = st.columns(2)
+            with case_columns[0]:
+                with st.container(border=True):
+                    st.markdown("#### Investment case")
+                    st.markdown("**Thesis**")
+                    st.write(payload.get("thesis") or "Not recorded.")
+                    st.markdown("**Why now**")
+                    st.write(payload.get("why_now") or "Not recorded.")
+                    st.markdown("**Value drivers**")
+                    value_drivers = payload.get("value_drivers") or []
+                    st.write(
+                        " · ".join(value_drivers)
+                        if isinstance(value_drivers, list) and value_drivers
+                        else value_drivers or "Not recorded."
+                    )
+                    st.markdown("**Client goal → portfolio role**")
+                    st.write(
+                        f"{payload.get('client_goal') or payload.get('primary_goal') or 'Not linked'} "
+                        f"→ {payload.get('portfolio_role') or 'Not recorded'}"
+                    )
+            with case_columns[1]:
+                with st.container(border=True):
+                    st.markdown("#### Base case & challenge")
+                    st.markdown("**Base-case operating outcome**")
+                    st.write(payload.get("base_case") or "Not recorded.")
+                    st.markdown("**Best counter-thesis**")
+                    st.write(payload.get("counter_thesis") or "Not recorded.")
+                    st.markdown("**Key risks**")
+                    risks = payload.get("risks") or []
+                    st.write(" · ".join(risks) if isinstance(risks, list) and risks else risks or "Not recorded.")
+
+            currency = str(payload.get("fair_value_currency") or "USD")
+            reference_price = _payload_number(payload, "reference_price")
+            fair_value_bear = _payload_number(payload, "fair_value_bear")
+            fair_value_base = _payload_number(payload, "fair_value_base")
+            fair_value_bull = _payload_number(payload, "fair_value_bull")
+            margin_of_safety = payload.get("margin_of_safety_pct")
+            if margin_of_safety in (None, "") and fair_value_base is not None and reference_price not in (None, 0.0):
+                margin_of_safety = round((fair_value_base / reference_price - 1.0) * 100.0, 2)
+            st.markdown("#### Valuation snapshot")
+            valuation_metrics = st.columns(5)
+            for column, label, value in zip(
+                valuation_metrics[:4],
+                ["Reference", "Bear", "Base", "Bull"],
+                [reference_price, fair_value_bear, fair_value_base, fair_value_bull],
+            ):
+                column.metric(label, f"{value:,.2f} {currency}" if value is not None else "Not set")
+            valuation_metrics[4].metric(
+                "Margin of safety",
+                f"{float(margin_of_safety):+.1f}%" if margin_of_safety not in (None, "") else "Not set",
+            )
+            st.caption(f"Valuation as of {payload.get('valuation_as_of') or 'not recorded'}.")
+
+            with st.container(border=True):
+                st.markdown("#### Monitoring & exit")
+                monitoring_columns = st.columns(3)
+                with monitoring_columns[0]:
+                    st.markdown("**Catalysts / dated tests**")
+                    catalysts = payload.get("catalysts") or []
+                    st.write(" · ".join(catalysts) if isinstance(catalysts, list) and catalysts else catalysts or "Not recorded.")
+                with monitoring_columns[1]:
+                    st.markdown("**Invalidation**")
+                    st.write(payload.get("invalidation_condition") or payload.get("invalidation") or "Not recorded.")
+                with monitoring_columns[2]:
+                    st.markdown("**Sell / review discipline**")
+                    st.write(payload.get("sell_discipline") or payload.get("sell_condition") or "Not recorded.")
+                st.markdown("**Evidence references**")
+                evidence_refs = payload.get("evidence_refs") or []
+                st.write(
+                    " · ".join(evidence_refs)
+                    if isinstance(evidence_refs, list) and evidence_refs
+                    else evidence_refs or "Not recorded."
+                )
+
+            with st.expander("Audit payload"):
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Field": key.replace("_", " ").title(), "Canonical value": value}
+                        for key, value in payload.items()
+                    ]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
             with st.expander("Append a revised dossier version"):
                 with st.form(f"ios_revise_dossier_{selected_id}"):
-                    revised_thesis = st.text_area("Thesis", value=str(payload.get("thesis") or ""))
-                    revised_catalysts = st.text_area("Catalysts", value="\n".join(payload.get("catalysts") or []))
-                    revised_invalidation = st.text_area("Invalidation", value=str(payload.get("invalidation_condition") or ""))
-                    revised_role = st.text_input("Portfolio role", value=str(payload.get("portfolio_role") or ""))
-                    revised_sell = st.text_area("Sell discipline", value=str(payload.get("sell_discipline") or ""))
+                    candidate = selected.get("candidate") or {}
+                    revision_defaults = {
+                        **payload,
+                        "candidate_source": candidate.get("source") if isinstance(candidate, Mapping) else "",
+                    }
+                    _, _, revised_values = _render_security_dossier_fields(
+                        key_prefix=f"ios_revise_dossier_{selected_id}",
+                        members=members,
+                        actor=actor,
+                        defaults=revision_defaults,
+                        ticker=selected["ticker"],
+                        editable_ticker=False,
+                        evidence_sources=evidence_sources,
+                    )
                     revision_reason = st.text_input("Revision reason")
                     revise_clicked = st.form_submit_button("Append revision", use_container_width=True)
                 if revise_clicked:
-                    revised = {
-                        **payload,
-                        "thesis": revised_thesis.strip(),
-                        "catalysts": _lines(revised_catalysts),
-                        "invalidation_condition": revised_invalidation.strip(),
-                        "portfolio_role": revised_role.strip(),
-                        "sell_discipline": revised_sell.strip(),
-                        "revision_reason": revision_reason.strip(),
-                    }
-                    _error_or_rerun(
-                        lambda: _call_db(
+                    def revise() -> Any:
+                        revised = _security_dossier_payload(revised_values, existing=payload)
+                        revised["revision_reason"] = revision_reason.strip()
+                        return _call_db(
                             get_connection,
                             append_dossier_version,
                             selected_id,
                             revised,
                             created_by=actor,
                             expected_current_version=int(version["version"]),
-                        ),
+                        )
+
+                    _error_or_rerun(
+                        revise,
                         "A new dossier version was appended.",
                     )
             if version["status"] == "draft":
@@ -1638,6 +2171,8 @@ def render_report_evidence_studio(
         validate_report_workspace,
     )
     from src.portfolio_tracker.portfolio_pipeline import build_live_portfolio_pipeline
+    from src.portfolio_tracker.governance_store import list_research_sources
+    from src.analytics.competition_analytics import calculate_brinson_attribution
 
     actor = _actor(profile)
     members = _team_names(team_members)
@@ -1751,24 +2286,58 @@ def render_report_evidence_studio(
     with evidence_tab:
         left, right = st.columns(2)
         with left:
-            st.markdown("#### Register verified evidence")
-            with st.form("ios_report_evidence", clear_on_submit=True):
-                evidence_id = st.text_input("Evidence ID", placeholder="src-10k-msft")
-                evidence_title = st.text_input("Title")
-                citation = st.text_area("Citation")
-                locator = st.text_input("Source URL / file / passage")
-                source_type = st.selectbox("Type", ["official", "filing", "dataset", "analysis", "interview", "other"])
-                evidence_clicked = st.form_submit_button("Register evidence", use_container_width=True)
+            st.markdown("#### Attach verified registry evidence")
+            st.caption(
+                "Research Evidence Registry is the single source of truth. The report stores an immutable snapshot "
+                "of selected records so a future registry edit cannot change a frozen submission."
+            )
+            with get_connection() as connection:
+                verified_sources = list_research_sources(connection, verified=True)
+            source_by_label = {
+                (
+                    f"#{int(item['id'])} · {item.get('ticker') or 'Global'} · "
+                    f"{item.get('title') or 'Untitled source'}"
+                ): item
+                for item in verified_sources
+                if f"registry-source-{int(item['id'])}" not in workspace["evidence"]
+            }
+            selected_sources = st.multiselect(
+                "Evidence registry sources",
+                list(source_by_label),
+                key="ios_report_registry_sources",
+            )
+            evidence_clicked = st.button(
+                "Attach selected evidence snapshots",
+                disabled=not selected_sources,
+                use_container_width=True,
+            )
             if evidence_clicked:
-                save(
-                    register_report_evidence(
-                        workspace, evidence_id, title=evidence_title,
-                        citation=citation, source_locator=locator,
-                        source_type=source_type, verified_by=actor,
-                        accessed_at=date.today(),
-                    ),
-                    "Evidence registered with an integrity hash.",
-                )
+                revised = workspace
+                for source_label in selected_sources:
+                    item = source_by_label[source_label]
+                    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+                    publisher = str(item.get("publisher") or "Unknown publisher")
+                    title = str(item.get("title") or f"Registry source #{item['id']}")
+                    published = str(item.get("published_at") or "date not recorded")
+                    citation = f"{publisher}. {title}. {published}."
+                    revised = register_report_evidence(
+                        revised,
+                        f"registry-source-{int(item['id'])}",
+                        title=title,
+                        citation=citation,
+                        source_locator=str(item.get("url") or f"evidence-registry:{int(item['id'])}"),
+                        source_type=str(item.get("source_type") or "other"),
+                        verified_by=str(item.get("verified_by") or actor),
+                        published_at=item.get("published_at"),
+                        accessed_at=item.get("accessed_at") or date.today(),
+                        notes=(
+                            f"Canonical Evidence Registry ID: {int(item['id'])}. "
+                            f"{str(payload.get('claim_supported') or item.get('notes') or '').strip()}"
+                        ).strip(),
+                    )
+                save(revised, "Verified registry evidence attached as immutable report snapshots.")
+            if not verified_sources:
+                st.info("Verify at least one source in Research Workspace before attaching report evidence.")
         with right:
             st.markdown("#### Add evidence-backed claim")
             with st.form("ios_report_claim", clear_on_submit=True):
@@ -1884,31 +2453,132 @@ def render_report_evidence_studio(
             st.warning("Build the live portfolio pipeline first.")
 
         if report_type == "final":
+            existing_attribution = workspace.get("performance_attribution")
+            if isinstance(existing_attribution, Mapping):
+                attribution_metrics = st.columns(4)
+                attribution_metrics[0].metric(
+                    "Portfolio return", f"{float(existing_attribution.get('portfolio_return') or 0):+.2%}"
+                )
+                attribution_metrics[1].metric(
+                    "Benchmark return", f"{float(existing_attribution.get('benchmark_return') or 0):+.2%}"
+                )
+                attribution_metrics[2].metric(
+                    "Active return", f"{float(existing_attribution.get('active_return') or 0):+.2%}"
+                )
+                attribution_metrics[3].metric(
+                    "Residual", f"{float(existing_attribution.get('residual') or 0):+.3%}"
+                )
+                st.dataframe(
+                    pd.DataFrame(existing_attribution.get("contributions") or []),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+            st.markdown("#### Reconciled Brinson-Fachler attribution")
+            st.caption(
+                "Enter sector weights and holding-period returns from the reconciled portfolio and its policy "
+                "benchmark. Allocation, selection, and interaction are calculated here; free-form contribution "
+                "labels are intentionally not accepted."
+            )
+            attribution_frame = pd.DataFrame([
+                {
+                    "Sector": "",
+                    "Portfolio weight %": 0.0,
+                    "Portfolio return %": 0.0,
+                    "Benchmark weight %": 0.0,
+                    "Benchmark return %": 0.0,
+                }
+            ])
+            attached_snapshot = workspace.get("portfolio_snapshot")
+            attribution_inputs_unlocked = bool(
+                isinstance(attached_snapshot, Mapping) and attached_snapshot.get("reconciled")
+            )
+            if not attribution_inputs_unlocked:
+                st.warning("Attach a clean reconciled WInS snapshot before saving performance attribution.")
             with st.form("ios_report_attribution"):
-                a1, a2, a3 = st.columns(3)
+                a1, a2 = st.columns(2)
                 with a1:
                     benchmark = st.text_input("Benchmark", value="SPY")
                 with a2:
-                    portfolio_return = st.number_input("Portfolio return (%)", value=0.0)
-                with a3:
-                    benchmark_return = st.number_input("Benchmark return (%)", value=0.0)
-                contribution_text = st.text_area("Contributions: label=percent", placeholder="Security selection=2.4\nAllocation=-0.5")
-                methodology = st.text_area("Attribution methodology")
-                attribution_clicked = st.form_submit_button("Save performance attribution", use_container_width=True)
-            if attribution_clicked:
-                contributions = []
-                for index, line in enumerate(_lines(contribution_text), start=1):
-                    label, raw = line.split("=", 1)
-                    contributions.append({"id": f"c{index}", "label": label.strip(), "contribution": float(raw.rstrip("%")) / 100})
-                save(
-                    set_performance_attribution(
-                        workspace, as_of=date.today(), benchmark=benchmark,
-                        portfolio_return=portfolio_return / 100,
-                        benchmark_return=benchmark_return / 100,
-                        contributions=contributions, methodology=methodology,
-                    ),
-                    "Performance attribution saved.",
+                    attribution_as_of = st.date_input("Attribution period end", value=date.today())
+                edited_attribution = st.data_editor(
+                    attribution_frame,
+                    num_rows="dynamic",
+                    hide_index=True,
+                    use_container_width=True,
+                    key="ios_brinson_attribution_inputs",
+                    column_config={
+                        column: st.column_config.NumberColumn(column, format="%.3f")
+                        for column in (
+                            "Portfolio weight %",
+                            "Portfolio return %",
+                            "Benchmark weight %",
+                            "Benchmark return %",
+                        )
+                    },
                 )
+                methodology = st.text_area(
+                    "Input provenance / methodology note",
+                    placeholder="Period start/end, WInS snapshot IDs, benchmark constituent source, treatment of cash and costs.",
+                )
+                attribution_clicked = st.form_submit_button(
+                    "Calculate and save Brinson attribution",
+                    disabled=not attribution_inputs_unlocked,
+                    use_container_width=True,
+                )
+            if attribution_clicked:
+                try:
+                    if not methodology.strip():
+                        raise ValueError("input provenance / methodology note is required")
+                    rows = [
+                        row for row in edited_attribution.to_dict("records")
+                        if str(row.get("Sector") or "").strip()
+                    ]
+                    portfolio_input = pd.DataFrame({
+                        "sector": [str(row["Sector"]).strip() for row in rows],
+                        "weight": [float(row["Portfolio weight %"]) / 100.0 for row in rows],
+                        "return": [float(row["Portfolio return %"]) / 100.0 for row in rows],
+                    })
+                    benchmark_input = pd.DataFrame({
+                        "sector": [str(row["Sector"]).strip() for row in rows],
+                        "weight": [float(row["Benchmark weight %"]) / 100.0 for row in rows],
+                        "return": [float(row["Benchmark return %"]) / 100.0 for row in rows],
+                    })
+                    brinson = calculate_brinson_attribution(portfolio_input, benchmark_input)
+                    portfolio_weights = portfolio_input["weight"] / portfolio_input["weight"].sum()
+                    benchmark_weights = benchmark_input["weight"] / benchmark_input["weight"].sum()
+                    portfolio_return = float((portfolio_weights * portfolio_input["return"]).sum())
+                    benchmark_return = float((benchmark_weights * benchmark_input["return"]).sum())
+                    contributions = [{
+                        "id": "benchmark-base",
+                        "label": f"{benchmark.strip().upper()} benchmark return",
+                        "contribution": benchmark_return,
+                    }]
+                    for index, row in brinson.iterrows():
+                        for effect in ("allocation", "selection", "interaction"):
+                            contributions.append({
+                                "id": f"brinson-{index + 1}-{effect}",
+                                "label": f"{row['sector']} · {effect.title()}",
+                                "contribution": float(row[effect]),
+                            })
+                    methodology_text = (
+                        "Single-period Brinson-Fachler attribution. Contributions include the benchmark base "
+                        "return plus allocation, selection, and interaction effects, so they reconcile to the "
+                        "portfolio return. " + methodology.strip()
+                    ).strip()
+                    revised = set_performance_attribution(
+                        workspace,
+                        as_of=attribution_as_of,
+                        benchmark=benchmark,
+                        portfolio_return=portfolio_return,
+                        benchmark_return=benchmark_return,
+                        contributions=contributions,
+                        methodology=methodology_text,
+                    )
+                except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+                    st.error(f"Brinson attribution inputs are incomplete: {exc}")
+                else:
+                    save(revised, "Calculated Brinson attribution saved to the report workspace.")
 
     with freeze_tab:
         if validation["issues"]:

@@ -7,6 +7,7 @@ import pytest
 
 from src.portfolio_tracker.strategy_store import (
     append_strategy_version,
+    delete_strategy_version,
     get_active_strategy_version,
     get_approved_security,
     get_holding_thesis,
@@ -91,6 +92,34 @@ def test_inactive_strategy_draft_does_not_replace_the_active_version():
 
     assert draft["is_active"] is False
     assert get_active_strategy_version(connection)["version"] == active["version"]
+
+
+def test_inactive_strategy_can_be_deleted_and_thesis_links_are_cleared():
+    connection = sqlite3.connect(":memory:")
+    old = append_strategy_version(connection, {"name": "Old"}, now=NOW)
+    active = append_strategy_version(connection, {"name": "Active"}, now=LATER)
+    upsert_holding_thesis(
+        connection,
+        "MSFT",
+        {"thesis": "Cloud scale"},
+        strategy_version=old["version"],
+        now=LATER,
+    )
+
+    assert delete_strategy_version(connection, old["version"])
+    assert get_strategy_version(connection, old["version"]) is None
+    assert get_active_strategy_version(connection) == active
+    assert get_holding_thesis(connection, "MSFT")["strategy_version"] is None
+
+
+def test_active_strategy_cannot_be_deleted():
+    connection = sqlite3.connect(":memory:")
+    active = append_strategy_version(connection, {"name": "Active"}, now=NOW)
+
+    with pytest.raises(ValueError, match="active strategy"):
+        delete_strategy_version(connection, active["version"])
+
+    assert get_active_strategy_version(connection) == active
 
 
 def test_holding_thesis_upsert_preserves_created_at_and_supports_status_filter():

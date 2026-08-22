@@ -46,6 +46,11 @@ def calculate_brinson_attribution(
         missing = required - set(frame.columns)
         if missing:
             raise ValueError(f"{name} is missing columns: {', '.join(sorted(missing))}")
+        numeric = frame[[weight_col, return_col]].apply(pd.to_numeric, errors="coerce")
+        if not np.isfinite(numeric.to_numpy()).all():
+            raise ValueError(f"{name} weights and returns must contain only finite values.")
+        if (numeric[weight_col] < 0).any():
+            raise ValueError(f"{name} weights must be non-negative.")
     p = portfolio.groupby(sector_col, dropna=False).apply(
         lambda x: pd.Series({"wp": x[weight_col].sum(), "rp": np.average(x[return_col], weights=x[weight_col]) if x[weight_col].sum() else 0.0}),
         include_groups=False,

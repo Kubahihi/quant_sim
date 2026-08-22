@@ -27,6 +27,18 @@ def test_brinson_effects_reconcile_to_active_return():
     assert np.isclose(result["total_effect"].sum(), active)
 
 
+def test_brinson_rejects_negative_long_only_weights():
+    portfolio = pd.DataFrame({
+        "sector": ["Tech", "Cash"], "weight": [1.1, -0.1], "return": [0.1, 0.0],
+    })
+    benchmark = pd.DataFrame({
+        "sector": ["Tech", "Cash"], "weight": [0.9, 0.1], "return": [0.08, 0.02],
+    })
+
+    with np.testing.assert_raises_regex(ValueError, "non-negative"):
+        calculate_brinson_attribution(portfolio, benchmark)
+
+
 def test_walk_forward_lags_scores_and_charges_turnover():
     dates = pd.date_range("2026-01-01", periods=4)
     returns = pd.DataFrame({"A": [0.0, 0.1, 0.0, 0.0], "B": [0.0, 0.0, 0.2, 0.0]}, index=dates)

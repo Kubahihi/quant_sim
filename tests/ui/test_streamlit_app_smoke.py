@@ -117,6 +117,7 @@ def test_pytest_context_alone_does_not_bypass_login(monkeypatch):
     monkeypatch.delenv("QUANT_SIM_TEST_AUTO_LOGIN", raising=False)
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["quant_sim_workspace_route"] = "Quant Platform"
     at.run(timeout=60)
 
     assert len(at.exception) == 0
@@ -124,13 +125,14 @@ def test_pytest_context_alone_does_not_bypass_login(monkeypatch):
     assert not any(item.value == "Workspace Hub" for item in at.subheader)
 
 
-def test_streamlit_app_shows_workspace_by_default(monkeypatch):
+def test_streamlit_app_defaults_to_wharton_cockpit(monkeypatch):
     _enable_test_auto_login(monkeypatch)
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=60)
 
     assert len(at.exception) == 0
-    assert any(item.value == "Workspace Hub" for item in at.subheader)
+    assert any("Wharton Cockpit" in item.value for item in at.markdown)
+    assert not any(item.value == "Workspace Hub" for item in at.subheader)
 
 
 def test_streamlit_app_loads_default_portfolio_only_once(monkeypatch):
@@ -150,6 +152,7 @@ def test_streamlit_app_loads_default_portfolio_only_once(monkeypatch):
     )
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["quant_sim_workspace_route"] = "Quant Platform"
     at.run(timeout=60)
 
     assert len(at.exception) == 0
@@ -318,13 +321,10 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert len(at.exception) == 0
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
     assert area_selector.options == [
-        "Home", "Portfolio", "Research", "Risk & Quant", "Scenarios", "Teamspace"
+        "Home", "Client & Policy", "Research", "Decisions", "Portfolio", "Deliverables"
     ]
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == [
-        "Overview & Tasks", "Competition Readiness", "Report Evidence Studio",
-        "Assignment & Rules", "Official Rules Watch",
-    ]
+    assert panel_selector.options == ["Overview & Tasks", "Competition Readiness"]
 
     panel_selector.set_value("Competition Readiness").run(timeout=60)
     assert len(at.exception) == 0
@@ -333,49 +333,26 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert "Red Team & AI Audit" in readiness_tabs
     assert "Report & Pitch" in readiness_tabs
 
-    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    panel_selector.set_value("Assignment & Rules").run(timeout=60)
-    assert any("Assignment & Rules" in item.value for item in at.markdown)
-
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
-    area_selector.set_value("Portfolio").run(timeout=60)
+    area_selector.set_value("Client & Policy").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == [
-        "Strategy & Decisions", "Security Dossiers", "Investment Committee",
-        "Portfolio Tracker",
-    ]
-    assert any("Strategy Lab" in item.value for item in at.markdown)
+    assert panel_selector.options == ["Mandate & Strategy"]
+    assert any("Mandate & Strategy" in item.value for item in at.markdown)
     strategy_tab_labels = [tab.label for tab in at.tabs]
-    assert "Client Mandate" in strategy_tab_labels
-    assert "Behavioral Profile" in strategy_tab_labels
-    assert "Alignment & Drift" in strategy_tab_labels
-    assert "Thesis Monitor" in strategy_tab_labels
-
-    panel_selector.set_value("Security Dossiers").run(timeout=60)
-    assert len(at.exception) == 0
-    assert any("Security Dossiers" in item.value for item in at.markdown)
-
-    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    panel_selector.set_value("Investment Committee").run(timeout=60)
-    assert len(at.exception) == 0
-    assert any("Investment Committee" in item.value for item in at.markdown)
-
-    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    panel_selector.set_value("Portfolio Tracker").run(timeout=60)
-    assert any("Portfolio Tracker" in item.value for item in at.markdown)
-    assert not any("Company Analysis" in item.value for item in at.markdown)
-    assert not any(item.label == "WInS positions snapshot" for item in at.file_uploader)
-    assert any(
-        "Live Portfolio & Data Reliability" in str(item.value)
-        for item in at.info
-    )
+    assert strategy_tab_labels == [
+        "Client Mandate", "Behavioral Profile", "Strategy Rulebook", "Alignment & Drift"
+    ]
+    assert "Thesis Monitor" not in strategy_tab_labels
+    assert "Decision Journal" not in strategy_tab_labels
 
     area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
     area_selector.set_value("Research").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == [
-        "Company Analysis", "Bond Analysis", "Commodity Analysis", "Stock Screener"
-    ]
+    assert panel_selector.options == ["Research Workspace", "Security Dossiers"]
+    research_view = next(item for item in at.radio if item.label == "Research view")
+    assert research_view.options == ["Stock Screener", "Company Analysis", "Fixed Income", "Real Assets"]
+    research_view.set_value("Company Analysis").run(timeout=60)
+    assert len(at.exception) == 0
     assert any("Company Analysis" in item.value for item in at.markdown)
 
     region_view = next(item for item in at.radio if item.label == "Regional analysis view")
@@ -400,34 +377,50 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     assert any("Regional Macro Drill-down" in item.value for item in at.markdown)
     assert any(item.label == "Macro resilience (2024)" for item in at.metric)
 
-    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    panel_selector.set_value("Bond Analysis").run(timeout=60)
+    research_view = next(item for item in at.radio if item.label == "Research view")
+    research_view.set_value("Fixed Income").run(timeout=60)
     assert len(at.exception) == 0
     assert any(item.label == "Canonical Security Dossier" for item in at.selectbox)
     assert any(item.label == "Instrument type" for item in at.radio)
 
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
-    area_selector.set_value("Risk & Quant").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == [
-        "Live Portfolio & Data Reliability",
-        "Quant Engine",
-        "Risk Cockpit",
-        "Currency Risk & Hedging",
-        "Factor Exposure",
-        "Regime Detection",
-    ]
-    panel_selector.set_value("Live Portfolio & Data Reliability").run(timeout=60)
+    panel_selector.set_value("Security Dossiers").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any("Security Dossiers" in item.value for item in at.markdown)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Decisions").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == ["Investment Committee"]
+    assert len(at.exception) == 0
+    assert any("Investment Committee" in item.value for item in at.markdown)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Portfolio").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == ["Portfolio Overview", "WInS & Reconciliation", "Risk & Scenarios"]
+    assert any("Portfolio Overview" in item.value for item in at.markdown)
+    assert not any("Company Analysis" in item.value for item in at.markdown)
+    assert not any(item.label == "WInS positions snapshot" for item in at.file_uploader)
+
+    panel_selector.set_value("WInS & Reconciliation").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Live Portfolio & Data Reliability" in item.value for item in at.markdown)
     assert [item.label for item in at.file_uploader].count(
         "WInS positions CSV or Excel"
     ) == 1
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    panel_selector.set_value("Currency Risk & Hedging").run(timeout=60)
+    panel_selector.set_value("Risk & Scenarios").run(timeout=60)
+    analytics_view = next(item for item in at.radio if item.label == "Analytics view")
+    analytics_view.set_value("FX & Hedging").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Currency Risk & Hedging" in item.value for item in at.markdown)
     assert any(item.label == "Reporting currency" for item in at.selectbox)
+
+    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector.set_value("Deliverables").run(timeout=60)
+    panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
+    assert panel_selector.options == ["Report & Pitch", "Rules & Compliance"]
 
 
 @pytest.mark.parametrize(
@@ -533,6 +526,7 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(
     )
 
     at = AppTest.from_file(str(APP_PATH))
+    at.session_state["quant_sim_workspace_route"] = "Quant Platform"
     at.session_state["dashboard_layout_preset"] = "Focused"
     at.session_state["dashboard_layout_preset_auto"] = False
     at.session_state["dashboard_layout_preset_applied"] = "Focused"

@@ -10,11 +10,15 @@ import src.portfolio_tracker.security_dossier_store as dossier_store
 from ui.investment_os import (
     _activate_reconciled_tracker_position,
     _committee_roster,
+    _payload_number,
     _record_wins_execution_and_stage_tracker_position,
+    _render_security_dossier_fields,
+    _security_dossier_payload,
     _stage_pending_tracker_position,
     _tracker_cash_value,
     _tracker_snapshot_rows,
     render_investment_committee,
+    render_security_dossiers,
 )
 
 
@@ -24,6 +28,99 @@ TEAM = [
     {"username": "Martin", "role": "Risk"},
     {"username": "Matej", "role": "Co-Captain"},
 ]
+
+
+def test_canonical_dossier_payload_covers_research_monitoring_and_valuation():
+    payload = _security_dossier_payload(
+        {
+            "sector": "Technology",
+            "asset_type": "Stock",
+            "owner": "Jakub",
+            "client_goal": "Long-term growth",
+            "portfolio_role": "Core compounder",
+            "conviction": 4,
+            "tags": "quality, AI, Quality",
+            "thesis": "Durable cash-flow compounding is underappreciated.",
+            "why_now": "The investment cycle is becoming visible in revenue.",
+            "value_drivers": "Recurring revenue\nOperating leverage",
+            "base_case": "Margins expand with disciplined reinvestment.",
+            "bull_case": "Faster adoption",
+            "bear_case": "Returns on capex disappoint",
+            "counter_thesis": "Competition captures the economics.",
+            "risks": "Regulation\nExecution",
+            "reference_price": 100,
+            "fair_value_bear": 80,
+            "fair_value_base": 125,
+            "fair_value_bull": 160,
+            "fair_value_currency": "usd",
+            "valuation_as_of": "2026-08-20",
+            "catalysts": "Quarterly KPI\nProduct launch",
+            "invalidation_condition": "Two quarters below the KPI floor",
+            "sell_discipline": "Review on invalidation or valuation",
+            "next_review_at": "2026-09-30",
+            "evidence_refs": "10-K p.42\nindustry-source-2",
+        },
+        existing={"legacy_note": "preserve me", "primary_goal": "old duplicate"},
+    )
+
+    assert payload["sector"] == "Technology"
+    assert payload["client_goal"] == "Long-term growth"
+    assert payload["conviction"] == 4
+    assert payload["tags"] == ["quality", "AI"]
+    assert payload["why_now"].startswith("The investment cycle")
+    assert payload["value_drivers"] == ["Recurring revenue", "Operating leverage"]
+    assert payload["base_case"].startswith("Margins expand")
+    assert payload["counter_thesis"].startswith("Competition")
+    assert payload["fair_value_bear"] == 80.0
+    assert payload["fair_value_base"] == 125.0
+    assert payload["fair_value_bull"] == 160.0
+    assert payload["margin_of_safety_pct"] == 25.0
+    assert payload["next_review_at"] == "2026-09-30"
+    assert payload["legacy_note"] == "preserve me"
+    assert "primary_goal" not in payload
+
+
+def test_canonical_dossier_rejects_an_incoherent_valuation_range():
+    with pytest.raises(ValueError, match="bear ≤ base ≤ bull"):
+        _security_dossier_payload(
+            {
+                "conviction": 3,
+                "fair_value_bear": 120,
+                "fair_value_base": 100,
+                "fair_value_bull": 150,
+            }
+        )
+
+
+def test_dossier_reads_early_nested_valuation_without_migrating_old_versions():
+    payload = {"valuation": {"market_price": 90, "bear": 70, "base": 110, "bull": 140}}
+
+    assert _payload_number(payload, "reference_price") == 90.0
+    assert _payload_number(payload, "fair_value_bear") == 70.0
+    assert _payload_number(payload, "fair_value_base") == 110.0
+    assert _payload_number(payload, "fair_value_bull") == 140.0
+
+
+def test_security_dossier_is_evidence_only_and_has_no_duplicate_vote_controls():
+    surface_source = getsource(render_security_dossiers)
+    form_source = getsource(_render_security_dossier_fields)
+
+    assert "Evidence only" in surface_source
+    assert "Voting happens only in Investment Committee" in surface_source
+    assert 'st.form_submit_button("Submit vote' not in surface_source
+    assert 'st.radio("Vote' not in surface_source
+    assert 'st.selectbox("Approval' not in surface_source
+    assert all(
+        section in form_source
+        for section in (
+            "Identity & ownership",
+            "Investment case",
+            "Valuation & challenge",
+            "Monitoring & exit",
+        )
+    )
+
+
 def test_committee_member_ids_are_stable_when_roster_order_changes():
     first, first_ids, first_captains = _committee_roster(TEAM)
     second, second_ids, second_captains = _committee_roster(list(reversed(TEAM)))

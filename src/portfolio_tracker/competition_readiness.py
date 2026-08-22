@@ -75,6 +75,12 @@ def assess_security_dossier(
     linked_sources = [item for item in sources if not item.get("ticker") or str(item.get("ticker")).upper() == code]
     primary_sources = [item for item in linked_sources if bool(item.get("primary_source"))]
     linked_catalysts = [item for item in catalysts if str(item.get("ticker") or "").upper() == code]
+    dossier_catalysts = thesis.get("catalysts")
+    dossier_catalyst_count = (
+        len(dossier_catalysts)
+        if isinstance(dossier_catalysts, Sequence) and not isinstance(dossier_catalysts, (str, bytes))
+        else int(_present(dossier_catalysts))
+    )
     fair_values = thesis.get("fair_value_scenarios") if isinstance(thesis.get("fair_value_scenarios"), Mapping) else {}
     checks = [
         ("role", "Portfolio role and client goal", _present(thesis.get("portfolio_role")) and _present(thesis.get("primary_goal"))),
@@ -87,12 +93,17 @@ def assess_security_dossier(
         ("counter", "Strongest counter-thesis", _present(thesis.get("counter_thesis"))),
         ("risks", "Key risks", _present(thesis.get("risks"))),
         ("invalidation", "Observable invalidation condition", _present(thesis.get("invalidation"))),
-        ("catalysts", "Dated catalyst / thesis test", bool(linked_catalysts)),
+        ("catalysts", "Dated catalyst / thesis test", bool(linked_catalysts) or dossier_catalyst_count > 0),
         ("evidence", "At least one primary source", bool(primary_sources)),
         ("review", "Next review date", _present(thesis.get("review_date")) or _present(thesis_record.get("next_review_at") if isinstance(thesis_record, Mapping) else None)),
     ]
     result = _assessment(checks)
-    result.update({"ticker": code, "source_count": len(linked_sources), "primary_source_count": len(primary_sources), "catalyst_count": len(linked_catalysts)})
+    result.update({
+        "ticker": code,
+        "source_count": len(linked_sources),
+        "primary_source_count": len(primary_sources),
+        "catalyst_count": len(linked_catalysts) + dossier_catalyst_count,
+    })
     return result
 
 

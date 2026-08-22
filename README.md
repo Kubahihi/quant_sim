@@ -9,10 +9,11 @@ Streamlit aplikace pro vyhodnoceni investicniho portfolia:
 - volitelny doplnkovy komentar pres Groq API
 - export vsech vysledku do vice-strankoveho PDF + CSV + JSON
 - portfolio tracker pro dluhopisova ETF i jednotlive dluhopisy vcetne kuponu, FX, YTM, durace, DV01 a cash-flow kalendare
-- samostatny panel Research -> Bond Analysis pro analyzu navrhovane emise, YTW/call risk, benchmark spread, kreditni ocekavanou ztratu, kombinovane rate/spread scenare a porovnani s ulozenym dluhopisovym portfoliem
-- samostatny panel Research -> Commodity Analysis pro ETF a futures proxy, s momentum/risk prehledem, korelacemi a transparentnim stresem pozice
-- panel Risk & Quant -> Currency Risk & Hedging pro vice-menove expozice, FX VaR/expected shortfall, stresy a nakladove optimalizovane forwardove zajisteni
-- behaviorální profil klienta v Strategy & Decisions: transparentni dotaznik, reakce na drawdown, kontrola souladu s deklarovanou toleranci a konkretni rozhodovaci guardraily
+- jeden Research Workspace pro screener, company analysis, fixed income a real assets; investicni teze se uklada jen do canonical Security Dossier
+- jeden Portfolio -> Risk & Scenarios workspace pro benchmark, faktory, FX, stresy, simulace a pokrocile diagnostiky
+- behavioralni profil klienta v Client & Policy -> Mandate & Strategy: transparentni dotaznik, reakce na drawdown, kontrola souladu s deklarovanou toleranci a konkretni rozhodovaci guardraily
+- Client Goal Outlook: pravdepodobnost splneni penezniho cile, expected/median/P10 terminal wealth a conditional shortfall pro current/optimalizovana portfolia pod stejnymi bootstrap scenari
+- vypocitany Brinson-Fachler attribution v Report & Pitch z reconciled sektorovych vah a vynosu; allocation, selection a interaction se nezadavaji volnym textem
 - Wharton bond case s kontrolou zpusobilosti ve WInS, vazbou na cil klienta, position-sizing limitem, pitch-defense otazkami, relative-value shortlistem a exportem pracovniho investicniho memo
 - rucni jednotlive dluhopisy primo v Quant Enginu: smluvni parametry, YTW/durace/DV01 a transparentni ETF proxy pro kovarianci, optimalizaci, Monte Carlo a stresove scenare
 - liquidity-aware portfolio construction s 30dennim dollar-ADV, spreadem, square-root market impactem a limitem ucasti na dennim objemu
@@ -28,6 +29,7 @@ Metodika konstrukce portfolia, sdilenych odhadu, omezeni a rolling
 out-of-sample reoptimalizace je popsana v
 [docs/PORTFOLIO_OPTIMIZATION.md](docs/PORTFOLIO_OPTIMIZATION.md).
 Metodika behaviorálního profilu, skore, evidence a governance omezeni je popsana v [docs/BEHAVIORAL_PROFILE.md](docs/BEHAVIORAL_PROFILE.md).
+Metodika goal-funding bootstrapu, cash flow a interpretacnich omezeni je popsana v [docs/GOAL_FUNDING.md](docs/GOAL_FUNDING.md).
 
 ## 1) Jak projekt spustit lokalne
 
@@ -371,31 +373,50 @@ nested walk-forward testing of the full ensemble, untouched holdout data and
 comparison with investable benchmarks after costs. See
 `docs/MODEL_VALIDATION.md` for the methodology and interpretation rules.
 
-## 12) Wharton analytical workflow
+## 12) Wharton competition workflow
 
-The Wharton Cockpit contains an analytical Strategy Lab rather than a report
-generator. Its shared SQLite/Turso data model stores:
+The default workspace follows one competition process instead of exposing every
+model as a separate destination:
 
-- a measurable Client Mandate with goal buckets, horizons, liquidity needs,
-  risk tolerance, exclusions and required holding tags;
-- a versioned Client Behavioral Profile with evidence provenance, transparent
-  bias scores, drawdown actions, communication preferences and enforceable
-  decision guardrails;
-- append-only Strategy Rulebook versions with position, sector, cash,
-  diversification, turnover, beta and approved-universe limits;
-- a transparent 0-100 strategy-alignment diagnostic, client-goal and sector
-  drift, HHI, effective holdings, cash weight and holding-level violations;
-- per-holding thesis monitoring with bear/base/bull cases, catalysts, risks,
-  invalidation conditions, conviction and scheduled review dates;
-- a read-only WInS CSV/Excel reconciliation that flags missing or extra
-  positions and quantity, cost-basis and market-value differences without
-  overwriting either source;
-- an analyst-controlled approved-security universe that remains explicitly
-  unofficial until the current Wharton list is loaded;
-- peer-relative company analytics across valuation, growth, profitability and
-  balance-sheet risk, including coverage-adjusted percentiles;
-- user-entered Porter Five Forces and SWOT analysis. Missing qualitative inputs
-  are never inferred or invented by the application.
+1. **Home** — next action, owner, blocker and competition readiness.
+2. **Client & Policy** — measurable goals, behavior, rulebook and alignment.
+3. **Research** — screening and analysis followed by one canonical Security
+   Dossier. The dossier contains evidence, valuation, KPIs, catalysts and exit
+   discipline; it never contains an investment vote.
+4. **Decisions** — the Investment Committee is the sole investment-voting
+   system. Blind initial view, discussion, final vote, authorization and sizing
+   are stages of the same lifecycle.
+5. **Portfolio** — WInS import, reconciliation, portfolio outcomes, client-goal
+   probability and one consolidated risk/scenario workspace.
+6. **Deliverables** — report, pitch rehearsal, rules and submission evidence.
+
+The shared SQLite/Turso model has explicit authorities:
+
+- Client Mandate stores investable capital and goal-level target amount,
+  horizon, capital allocation, contributions/withdrawals, inflation and
+  nominal/real basis;
+- canonical Security Dossiers replace the legacy Thesis Monitor, Catalyst
+  Calendar and security-level review inputs;
+- the active Authoritative Universe replaces the parallel analyst-approved
+  universe as the eligibility gate;
+- the canonical Investment Committee lifecycle replaces the legacy Decision
+  Journal for all new decisions;
+- the signed WInS reconciliation is the only portfolio snapshot allowed into
+  reporting;
+- Research Evidence Registry is the source authority; dossiers store registry
+  IDs and reports freeze immutable snapshots of verified registry records;
+- report performance attribution is calculated with Brinson-Fachler from
+  reconciled sector inputs and must reconcile to portfolio return.
+
+Legacy thesis, universe, decision and position tables remain readable during
+the transition. A canonical-first, read-only adapter uses a legacy row only
+when no canonical record exists for that ticker; legacy editors are not part of
+the primary competition navigation.
+
+The Client Goal Outlook uses a seeded historical row bootstrap and applies the
+same sampled shocks to every candidate portfolio. It reports planning ranges,
+not a return forecast. A monetary target and cash-flow schedule do not remove
+model or parameter uncertainty.
 
 The 0-100 values are internal process diagnostics, not Wharton scores, credit
 ratings, recommendations or return forecasts.
