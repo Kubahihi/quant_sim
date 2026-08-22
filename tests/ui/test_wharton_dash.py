@@ -14,6 +14,7 @@ from streamlit.testing.v1 import AppTest
 from types import SimpleNamespace
 
 from src.auth.wharton_credentials import WhartonCredentialConfigError
+from ui import dashboard_shell
 from ui.pages import wharton_dash
 
 
@@ -28,6 +29,27 @@ def test_wharton_build_fingerprint_is_visible_and_auditable(monkeypatch):
     assert "build 2026-08-16" in captions[0]
     assert wharton_dash.WHARTON_BUILD_IDENTITY.commit in captions[0]
     assert wharton_dash.WHARTON_BUILD_IDENTITY.branch in captions[0]
+
+
+@pytest.mark.parametrize(
+    "style_renderer",
+    [dashboard_shell.inject_dashboard_styles, wharton_dash._inject_cockpit_styles],
+)
+def test_main_content_reserves_space_below_fixed_header(monkeypatch, style_renderer):
+    rendered = []
+    monkeypatch.setattr(
+        style_renderer.__globals__["st"],
+        "markdown",
+        lambda body, **kwargs: rendered.append((body, kwargs)),
+    )
+
+    style_renderer()
+
+    assert len(rendered) == 1
+    stylesheet, options = rendered[0]
+    assert '[data-testid="stMainBlockContainer"]' in stylesheet
+    assert "calc(4.5rem + env(safe-area-inset-top, 0px))" in stylesheet
+    assert options == {"unsafe_allow_html": True}
 
 
 def test_wharton_page_refreshes_stale_credential_module(monkeypatch):

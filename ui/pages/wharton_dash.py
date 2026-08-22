@@ -116,6 +116,8 @@ DB_PATH = Path("data/wharton_production.db")
 UPLOAD_DIR = Path("data/wharton_uploads")
 USER_PROFILE_KEY = "wharton_user_profile_v2"
 LOGIN_CLIENT_KEY = "wharton_login_client_v1"
+DATABASE_INIT_SESSION_KEY = "wharton_database_initialized_v1"
+DATABASE_SCHEMA_CACHE_VERSION = 1
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".xlsx", ".xls", ".csv", ".docx", ".doc",
@@ -141,6 +143,7 @@ MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPT_WINDOW_MINUTES = 10
 
 TASK_EDITOR_VERSION_KEY = "wharton_task_editor_version"
+TASK_BOARD_VISIBLE_KEY = "wharton_task_board_visible"
 QUANT_RESULT_KEY = "wharton_quant_result"
 QUANT_ERROR_KEY = "wharton_quant_error"
 QUANT_STACK_RESULT_KEY = "wharton_quant_stack_result"
@@ -803,12 +806,58 @@ def _initialize_database_once(database_path: str, upload_path: str) -> None:
     _initialize_database()
 
 
+def _development_database_signature() -> str:
+    """Fingerprint inputs that require a development schema/credential refresh."""
+    try:
+        secret_values = st.secrets
+        nested_users = secret_values.get("wharton_users", {})
+        if not isinstance(nested_users, Mapping):
+            nested_users = {}
+        credential_inputs = {
+            "WHARTON_SHARED_PASSWORD": secret_values.get("WHARTON_SHARED_PASSWORD"),
+            "WHARTON_PASSWORD": secret_values.get("WHARTON_PASSWORD"),
+            "nested_shared": nested_users.get("WHARTON_PASSWORD"),
+            "users": {
+                username: nested_users.get(username)
+                for username in REQUIRED_WHARTON_USERS
+            },
+        }
+    except Exception:
+        credential_inputs = {}
+
+    try:
+        source_revision = Path(__file__).stat().st_mtime_ns
+    except OSError:
+        source_revision = 0
+    payload = {
+        "schema_cache_version": DATABASE_SCHEMA_CACHE_VERSION,
+        "source_revision": source_revision,
+        "database_path": str(DB_PATH.resolve()),
+        "upload_path": str(UPLOAD_DIR.resolve()),
+        "credentials": credential_inputs,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def init_db() -> None:
-    # Development and tests intentionally support repeated initialization so a
-    # changed seeded password is applied immediately. Production schema setup is
-    # stable for a deployed process and should not run on every widget rerun.
+    # Keep direct calls deterministic for migrations/tests, but avoid repeating
+    # the full DDL audit and bcrypt verification on every Streamlit widget
+    # rerun. The signature changes when local schema code, paths, or credential
+    # inputs change, so development updates are still applied immediately.
     if _is_development_mode():
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx(suppress_warning=True) is None:
+            _initialize_database()
+            return
+
+        signature = _development_database_signature()
+        if st.session_state.get(DATABASE_INIT_SESSION_KEY) == signature:
+            return
         _initialize_database()
+        st.session_state[DATABASE_INIT_SESSION_KEY] = signature
         return
     _initialize_database_once(str(DB_PATH.resolve()), str(UPLOAD_DIR.resolve()))
 
@@ -946,17 +995,21 @@ def _render_login() -> None:
                 use_container_width=True,
             )
 
-    # Check if we are in development mode and using the insecure default password
-    if _is_development_mode() and submitted and password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD:
-        st.warning(
-            "You are using the insecure default password in development mode. "
-            "Please set `st.secrets['wharton_users']['<username>']` for production."
-        )
-    elif submitted and password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD and not _is_development_mode():
-        st.error("Insecure default password is not allowed in production mode.")
-        return
-
     if submitted:
+        # Resolving Streamlit secrets can touch the filesystem. Keep that work
+        # entirely off the anonymous landing path and do it only once after a
+        # real form submission.
+        development_mode = _is_development_mode()
+        if password == DEV_ONLY_INSECURE_DEFAULT_PASSWORD:
+            if development_mode:
+                st.warning(
+                    "You are using the insecure default password in development mode. "
+                    "Please set `st.secrets['wharton_users']['<username>']` for production."
+                )
+            else:
+                st.error("Insecure default password is not allowed in production mode.")
+                return
+
         # Authentication and brute-force tracking require their schemas, but
         # anonymous visitors should never pay this remote initialization cost.
         if not _initialize_database_for_login():
@@ -995,9 +1048,13 @@ def _render_login() -> None:
 def _inject_cockpit_styles() -> None:
     st.markdown("""
         <style>
+        /* Streamlit's header is fixed and overlays the document.  Reserve
+           enough space for it at every zoom level, including any device safe
+           area, so the build fingerprint is never clipped underneath it. */
+        [data-testid="stMainBlockContainer"],
         .block-container {
             max-width: 1480px !important;
-            padding-top: 2rem !important;
+            padding-top: calc(4.5rem + env(safe-area-inset-top, 0px)) !important;
             padding-left: 2.25rem !important;
             padding-right: 2.25rem !important;
         }
@@ -1141,8 +1198,9 @@ def _inject_cockpit_styles() -> None:
             font-weight:650;
         }
         @media (max-width:900px) {
+            [data-testid="stMainBlockContainer"],
             .block-container {
-                padding:1.15rem 1rem 3rem !important;
+                padding:calc(4.5rem + env(safe-area-inset-top, 0px)) 1rem 3rem !important;
             }
             .wharton-hero { padding:1.35rem 1.2rem; border-radius:16px; }
         }
@@ -5705,21 +5763,26 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     st.markdown("### Overview & Action Center")
 
     with get_connection() as conn:
-        open_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE COALESCE(is_done, 0) = 0").fetchone()[0])
-        done_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE COALESCE(is_done, 0) = 1").fetchone()[0])
-        critical_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE priority='Critical' AND COALESCE(is_done,0)=0").fetchone()[0])
-        overdue_tasks = int(conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE COALESCE(is_done, 0) = 0 "
-            "AND COALESCE(due_date, '') <> '' AND due_date < ?",
+        task_counts = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN COALESCE(is_done, 0) = 0 THEN 1 ELSE 0 END), 0) AS open_tasks,
+                COALESCE(SUM(CASE WHEN COALESCE(is_done, 0) = 1 THEN 1 ELSE 0 END), 0) AS done_tasks,
+                COALESCE(SUM(CASE WHEN priority = 'Critical' AND COALESCE(is_done, 0) = 0 THEN 1 ELSE 0 END), 0) AS critical_tasks,
+                COALESCE(SUM(CASE WHEN COALESCE(is_done, 0) = 0
+                    AND COALESCE(due_date, '') <> '' AND due_date < ? THEN 1 ELSE 0 END), 0) AS overdue_tasks
+            FROM tasks
+            """,
             (date.today().isoformat(),),
-        ).fetchone()[0])
-        committee_cases = int(conn.execute(
-            "SELECT COUNT(*) FROM canonical_investment_lifecycles "
-            "WHERE state NOT IN ('active', 'rejected', 'closed')"
-        ).fetchone()[0])
-        reconciliation_cases = int(conn.execute(
-            "SELECT COUNT(*) FROM canonical_investment_lifecycles WHERE state = 'reconciliation'"
-        ).fetchone()[0])
+        ).fetchone()
+        lifecycle_counts = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN state NOT IN ('active', 'rejected', 'closed') THEN 1 ELSE 0 END), 0) AS committee_cases,
+                COALESCE(SUM(CASE WHEN state = 'reconciliation' THEN 1 ELSE 0 END), 0) AS reconciliation_cases
+            FROM canonical_investment_lifecycles
+            """
+        ).fetchone()
         next_task = conn.execute(
             "SELECT id, priority, task_text, assignee, due_date, client_goal, dossier_id, decision_id "
             "FROM tasks WHERE COALESCE(is_done, 0) = 0 "
@@ -5728,6 +5791,13 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
             "CASE WHEN COALESCE(due_date, '') = '' THEN 1 ELSE 0 END, due_date, id LIMIT 1",
             (str(profile["username"]),),
         ).fetchone()
+
+    open_tasks = int(task_counts["open_tasks"])
+    done_tasks = int(task_counts["done_tasks"])
+    critical_tasks = int(task_counts["critical_tasks"])
+    overdue_tasks = int(task_counts["overdue_tasks"])
+    committee_cases = int(lifecycle_counts["committee_cases"])
+    reconciliation_cases = int(lifecycle_counts["reconciliation_cases"])
 
     r = st.columns(6)
     r[0].metric("Open Tasks", open_tasks)
@@ -5776,7 +5846,16 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
         </div>
     """, unsafe_allow_html=True)
 
-    _render_task_manager(profile)
+    if st.toggle(
+        "Open Mission Task Board",
+        key=TASK_BOARD_VISIBLE_KEY,
+        help="Loads the editable task table only when you need it.",
+    ):
+        _render_task_manager(profile)
+    else:
+        st.caption(
+            "Task counts and the next action are current. Open the Mission Task Board to edit individual tasks."
+        )
 
 
 # ─── Strategy & Decisions ─────────────────────────────────────────────────────

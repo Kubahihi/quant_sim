@@ -99,9 +99,14 @@ def inject_dashboard_styles() -> None:
                 var(--background-color);
         }
 
+        /* Keep the first row below Streamlit's fixed 60px header.  The old
+           2rem offset could place captions underneath the header at some
+           browser zoom levels.  Include the device safe area for notched
+           displays as well. */
+        [data-testid="stMainBlockContainer"],
         .main .block-container {
             max-width: 1480px;
-            padding: 2rem 2.25rem 4rem;
+            padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 2.25rem 4rem;
         }
 
         [data-testid="stSidebar"][aria-expanded="true"] {
@@ -526,7 +531,10 @@ def inject_dashboard_styles() -> None:
         }
 
         @media (max-width: 900px) {
-            .main .block-container { padding: 1.15rem 1rem 3rem; }
+            [data-testid="stMainBlockContainer"],
+            .main .block-container {
+                padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 1rem 3rem;
+            }
             .dashboard-hero { padding: 1.35rem 1.2rem; border-radius: 16px; }
             .dashboard-hero h2 { font-size: 1.65rem; }
             .qp-workflow { grid-template-columns: 1fr; }
@@ -562,7 +570,10 @@ def render_dashboard_preferences(has_analysis: bool) -> DashboardPreferences:
     if raw_tables_key not in st.session_state:
         st.session_state[raw_tables_key] = True
     if workspace_key not in st.session_state:
-        st.session_state[workspace_key] = True
+        # Keep the first Quant screen lightweight. Operational tools can load
+        # portfolios, universes, and market data, so open them only when the
+        # user explicitly opts in.
+        st.session_state[workspace_key] = False
 
     with st.expander("View settings", expanded=False):
         preset = st.selectbox(

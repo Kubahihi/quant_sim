@@ -1,51 +1,48 @@
+"""Authentication API with lazy backend imports.
+
+Importing a lightweight authentication submodule (for example the fixed
+Wharton credential contract) must not initialize the database, session manager,
+and migration stack. Public exports retain the original ``src.auth`` API and
+are resolved on first use.
 """
-Authentication module for multi-user support.
 
-Provides user registration, login, logout, and session management
-with SQLite-backed persistent storage.
-"""
+from __future__ import annotations
 
-from .database import (
-    init_auth_database,
-    create_user,
-    get_user_by_username,
-    get_user_by_id,
-    validate_session_token,
-    create_session,
-    revoke_session,
-    cleanup_expired_sessions,
-    get_user_by_session_token,
-)
-from .manager import (
-    register_user,
-    login_user,
-    logout_user,
-    get_current_user,
-    is_authenticated,
-    get_user_data_dir,
-    ensure_user_dirs,
-)
-from .migrations import migrate_existing_data
+from importlib import import_module
+from typing import Any
 
-__all__ = [
-    # Database functions
-    "init_auth_database",
-    "create_user",
-    "get_user_by_username",
-    "get_user_by_id",
-    "validate_session_token",
-    "create_session",
-    "revoke_session",
-    "cleanup_expired_sessions",
-    "get_user_by_session_token",
-    # Manager functions
-    "register_user",
-    "login_user",
-    "logout_user",
-    "get_current_user",
-    "is_authenticated",
-    "get_user_data_dir",
-    "ensure_user_dirs",
-    # Migrations
-    "migrate_existing_data",
-]
+
+_EXPORT_MODULES = {
+    "init_auth_database": "src.auth.database",
+    "create_user": "src.auth.database",
+    "get_user_by_username": "src.auth.database",
+    "get_user_by_id": "src.auth.database",
+    "validate_session_token": "src.auth.database",
+    "create_session": "src.auth.database",
+    "revoke_session": "src.auth.database",
+    "cleanup_expired_sessions": "src.auth.database",
+    "get_user_by_session_token": "src.auth.database",
+    "register_user": "src.auth.manager",
+    "login_user": "src.auth.manager",
+    "logout_user": "src.auth.manager",
+    "get_current_user": "src.auth.manager",
+    "is_authenticated": "src.auth.manager",
+    "get_user_data_dir": "src.auth.manager",
+    "ensure_user_dirs": "src.auth.manager",
+    "migrate_existing_data": "src.auth.migrations",
+}
+
+__all__ = list(_EXPORT_MODULES)
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})
