@@ -285,7 +285,8 @@ src/
   simulation/
   visualization/
 ui/
-  streamlit_app.py
+  streamlit_app.py      # lightweight launcher
+  quant_platform.py     # analytical workspace loaded on demand
 .streamlit/
   secrets.toml.example
 requirements.txt
