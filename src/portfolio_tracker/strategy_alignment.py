@@ -198,10 +198,25 @@ def _normalise_weighted_rows(
             item["sector"] = name
         if kind == "goal":
             priority = int(round(_finite_number(row.get("priority"), 3.0)))
+            goal_horizon_years = max(0, int(round(_finite_number(row.get("horizon_years"), 0.0))))
+            target_wealth = max(
+                0.0,
+                _finite_number(row.get("target_wealth", row.get("target_amount")), 0.0),
+            )
+            wealth_basis = (
+                "real"
+                if str(row.get("wealth_basis") or "nominal").strip().casefold() == "real"
+                else "nominal"
+            )
             item.update(
                 {
                     "priority": min(5, max(1, priority)),
                     "horizon": str(row.get("horizon") or "").strip(),
+                    "horizon_years": goal_horizon_years,
+                    "target_wealth": target_wealth,
+                    "annual_net_cashflow": _finite_number(row.get("annual_net_cashflow"), 0.0),
+                    "inflation_rate": max(-0.99, _finite_number(row.get("inflation_rate"), 0.0)),
+                    "wealth_basis": wealth_basis,
                     "description": str(row.get("description") or "").strip(),
                     "allowed_sectors": _string_list(row.get("allowed_sectors")),
                     "allowed_asset_types": _string_list(row.get("allowed_asset_types"), lower=True),
@@ -285,6 +300,7 @@ def normalize_client_mandate(mandate: Mapping[str, Any] | None) -> dict[str, Any
         "case_status": str(raw.get("case_status") or "draft").strip().casefold(),
         "risk_tolerance": str(raw.get("risk_tolerance") or "unspecified").strip().casefold(),
         "horizon_years": horizon,
+        "investable_capital": max(0.0, _finite_number(raw.get("investable_capital"), 0.0)),
         "liquidity_need_pct": liquidity,
         "base_currency": str(raw.get("base_currency") or "USD").strip().upper(),
         "values_constraints": values_constraints,

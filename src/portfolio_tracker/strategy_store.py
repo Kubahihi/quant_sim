@@ -345,6 +345,39 @@ def set_active_strategy_version(connection: Any, version: int) -> bool:
     return True
 
 
+def delete_strategy_version(connection: Any, version: int) -> bool:
+    """Delete an inactive strategy version and remove stale thesis links.
+
+    The active version is deliberately protected because deleting it would
+    leave the rest of the analytical workspace without a governing strategy.
+    Holding theses survive the deletion, but their link to the removed version
+    is cleared so callers never receive a dangling strategy reference.
+    """
+    version_number = int(version)
+    if version_number <= 0:
+        raise ValueError("Strategy version must be positive.")
+
+    target = get_strategy_version(connection, version_number)
+    if target is None:
+        return False
+    if target["is_active"]:
+        raise ValueError("The active strategy version cannot be deleted.")
+
+    cursor = connection.execute(
+        "DELETE FROM analytical_strategy_versions WHERE version = ? AND is_active = 0",
+        (version_number,),
+    )
+    changed = int(getattr(cursor, "rowcount", 0) or 0) > 0
+    if changed:
+        connection.execute(
+            "UPDATE analytical_holding_theses SET strategy_version = NULL "
+            "WHERE strategy_version = ?",
+            (version_number,),
+        )
+    _commit_and_sync(connection)
+    return changed
+
+
 def _optional_finite_number(value: float | int | None, name: str) -> float | None:
     if value is None or value == "":
         return None
@@ -731,6 +764,7 @@ __all__ = [
     "delete_approved_security",
     "delete_company_research",
     "delete_holding_thesis",
+    "delete_strategy_version",
     "get_active_strategy_version",
     "get_approved_security",
     "get_holding_thesis",

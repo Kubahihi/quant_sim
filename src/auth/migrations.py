@@ -175,6 +175,12 @@ def create_default_user(dry_run: bool = False) -> Optional[Dict[str, Any]]:
             "planned": True,
         }
 
+    # Capture an explicit process override before database initialization.
+    # Accessing Streamlit secrets while resolving a remote database can expose
+    # secret keys as environment variables in the current process.
+    import os
+
+    environment_password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
     init_auth_database()
     
     # Check if default user already exists
@@ -186,13 +192,18 @@ def create_default_user(dry_run: bool = False) -> Optional[Dict[str, Any]]:
     if user_exists(username=DEFAULT_USERNAME):
         return None
     
-    # Read password from secrets or env – never use a hardcoded fallback
-    import os
-    try:
-        import streamlit as st
-        password = st.secrets.get("ADMIN_BOOTSTRAP_PASSWORD") or os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
-    except Exception:
-        password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
+    # An explicit process environment value wins over a local secrets file.
+    # Besides matching deployment conventions, reading it first prevents
+    # Streamlit from replacing a test/deployment override while resolving
+    # ``st.secrets``.
+    password = environment_password
+    if not password:
+        try:
+            import streamlit as st
+
+            password = st.secrets.get("ADMIN_BOOTSTRAP_PASSWORD")
+        except Exception:
+            password = None
 
     if not password:
         return None  # No password configured – skip admin creation silently

@@ -136,12 +136,14 @@ def test_strategy_form_number_helpers_reject_nan_and_preserve_zero():
     assert wharton_dash._finite_form_number("2.5", 0.0) == 2.5
     assert wharton_dash._saved_number({"limit": 0.0}, "limit", 0.15) == 0.0
     assert math.isclose(wharton_dash._saved_number({}, "limit", 0.15), 0.15)
-    assert "Bond Analysis" in wharton_dash.COCKPIT_AREAS["Research"]
-    assert "Bond Analysis" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
-    assert "Commodity Analysis" in wharton_dash.COCKPIT_AREAS["Research"]
-    assert "Commodity Analysis" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
-    assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_AREAS["Risk & Quant"]
-    assert "Currency Risk & Hedging" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
+    assert wharton_dash.COCKPIT_AREAS["Research"] == (
+        "Research Workspace", "Security Dossiers"
+    )
+    assert wharton_dash.COCKPIT_AREAS["Decisions"] == ("Investment Committee",)
+    assert wharton_dash.COCKPIT_AREAS["Portfolio"] == (
+        "Portfolio Overview", "WInS & Reconciliation", "Risk & Scenarios"
+    )
+    assert "Risk & Scenarios" in wharton_dash.COCKPIT_PANEL_DESCRIPTIONS
     assert wharton_dash._parse_tickers("", allow_empty=True) == []
     assert "Mandate-Aware Optimizer" in wharton_dash.QUANT_MODULES
 

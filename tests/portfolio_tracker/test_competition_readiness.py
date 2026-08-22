@@ -56,6 +56,19 @@ def test_complete_constitution_and_dossier_score_full_marks():
     assert assess_security_dossier("ABC", THESIS, [source], [catalyst])["score"] == 100
 
 
+def test_canonical_dossier_catalyst_does_not_require_a_legacy_calendar_copy():
+    source = {"ticker": "ABC", "title": "10-K", "primary_source": True}
+    canonical = {
+        **THESIS,
+        "payload": {**THESIS["payload"], "catalysts": ["Investor day · 2026-10-01"]},
+    }
+
+    assessment = assess_security_dossier("ABC", canonical, [source], [])
+
+    assert assessment["score"] == 100
+    assert assessment["catalyst_count"] == 1
+
+
 def test_readiness_exposes_gaps_and_generates_defensible_brief():
     readiness = build_competition_readiness(
         mandate=MANDATE,

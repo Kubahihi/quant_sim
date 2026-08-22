@@ -18,6 +18,7 @@ def _mandate() -> dict:
         "case_status": "active",
         "risk_tolerance": "moderate",
         "horizon_years": 12,
+        "investable_capital": 400_000,
         "liquidity_need_pct": 5,
         "base_currency": "usd",
         "behavioral_profile": {"answers": {"loss_1": 4}, "source_status": "Client interview"},
@@ -31,6 +32,11 @@ def _mandate() -> dict:
                 "target_weight": 70,
                 "priority": 5,
                 "horizon": "10+ years",
+                "horizon_years": 10,
+                "target_wealth": 750_000,
+                "annual_net_cashflow": -20_000,
+                "inflation_rate": 0.02,
+                "wealth_basis": "real",
                 "description": "Compound capital",
             },
             {"name": "Social impact", "target_weight": 30, "priority": 4},
@@ -61,7 +67,12 @@ def test_normalizers_accept_editable_payloads_and_apply_client_floor():
 
     assert mandate["base_currency"] == "USD"
     assert mandate["liquidity_need_pct"] == pytest.approx(0.05)
+    assert mandate["investable_capital"] == pytest.approx(400_000)
     assert [goal["target_weight"] for goal in mandate["goals"]] == pytest.approx([0.7, 0.3])
+    assert mandate["goals"][0]["target_wealth"] == pytest.approx(750_000)
+    assert mandate["goals"][0]["horizon_years"] == 10
+    assert mandate["goals"][0]["annual_net_cashflow"] == pytest.approx(-20_000)
+    assert mandate["goals"][0]["wealth_basis"] == "real"
     assert mandate["values_constraints"]["excluded_tickers"] == ["BAD"]
     assert mandate["behavioral_profile"]["answers"] == {"loss_1": 4}
     assert strategy["min_cash_weight"] == pytest.approx(0.05)

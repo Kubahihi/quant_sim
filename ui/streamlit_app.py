@@ -124,7 +124,7 @@ with st.sidebar:
     st.markdown('<div class="qp-eyebrow">Workspace</div>', unsafe_allow_html=True)
     app_route = st.radio(
         "Choose workspace",
-        options=["Quant Platform", "Wharton Cockpit"],
+        options=["Wharton Cockpit", "Quant Platform"],
         key="quant_sim_workspace_route",
         label_visibility="collapsed",
     )

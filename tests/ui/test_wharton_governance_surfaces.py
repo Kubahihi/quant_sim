@@ -17,6 +17,8 @@ def test_decision_journal_is_a_read_only_canonical_projection() -> None:
     assert "INSERT INTO decision_log" not in source
     assert "UPDATE decision_log" not in source
     assert "form_submit_button" not in source
+    assert "delete_legacy_decision" in source
+    assert "canonical Investment Committee decisions remain protected" in source
     assert "pre_vote" not in source
     assert "post_vote" not in source
 
@@ -29,7 +31,7 @@ def test_portfolio_tracker_cannot_render_the_legacy_wins_uploader() -> None:
     assert not hasattr(wharton_dash, "_render_wins_reconciliation")
     assert "wins_reconciliation_upload" not in module_source
     assert '"WInS positions snapshot"' not in module_source
-    assert "Live Portfolio & Data Reliability" in source
+    assert "WInS & Reconciliation" in source
 
 
 def test_live_pipeline_persists_legacy_ledger_migration() -> None:
