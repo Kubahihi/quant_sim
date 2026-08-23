@@ -23,7 +23,7 @@ from .scoring import (
     compute_weighted_factor_score,
     evaluate_portfolio_score,
 )
-from .advanced.runner import run_advanced_models
+from .advanced.runner import run_advanced_models, run_advanced_models_with_bundle
 from .scenario_playground import (
     build_role_exposure_table,
     build_scenario_suite,
@@ -103,6 +103,7 @@ __all__ = [
     "build_deterministic_fallback_review",
     "compute_weighted_factor_score",
     "run_advanced_models",
+    "run_advanced_models_with_bundle",
     "classify_asset_role",
     "build_role_exposure_table",
     "run_scenario_preset",

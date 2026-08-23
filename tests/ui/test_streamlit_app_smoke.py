@@ -36,7 +36,13 @@ def _sample_prices(symbols: list[str], periods: int = 90) -> pd.DataFrame:
 
 
 def _fake_quant_stack(tmp_path: Path):
-    def _runner(portfolio_returns: pd.Series, returns_df: pd.DataFrame, config: dict, history_dir: str = "data/run_history") -> dict:
+    def _runner(
+        portfolio_returns: pd.Series,
+        returns_df: pd.DataFrame,
+        config: dict,
+        history_dir: str = "data/run_history",
+        precomputed_models=None,
+    ) -> dict:
         summary = SummaryResult(
             generated_at=datetime.now(timezone.utc).isoformat(),
             composite_score=0.12,
@@ -467,7 +473,11 @@ def test_streamlit_app_evaluate_flow_renders_both_export_sections(
             "error": "Smoke test fallback",
         },
     )
-    monkeypatch.setattr(src.analytics, "run_advanced_models", lambda returns, forecast_periods, returns_df: {})
+    monkeypatch.setattr(
+        src.analytics,
+        "run_advanced_models_with_bundle",
+        lambda returns, forecast_periods, returns_df, model_context=None: ({}, {}),
+    )
     monkeypatch.setattr(src.analytics, "run_quant_stack", _fake_quant_stack(tmp_path))
     monkeypatch.setattr(src.analytics, "list_run_records", lambda *args, **kwargs: [])
     monkeypatch.setattr(

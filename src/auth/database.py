@@ -8,6 +8,7 @@ connection handling, and data access functions.
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 import os
 import secrets
 import sqlite3
@@ -41,6 +42,8 @@ _REMOTE_SYNC_LOCK = threading.Lock()
 _LAST_REMOTE_SYNC_BY_DATABASE: dict[str, float] = {}
 _AUTH_INITIALIZATION_LOCK = threading.Lock()
 _INITIALIZED_AUTH_DATABASES: set[str] = set()
+_SQLITE_JOURNAL_LOCK = threading.Lock()
+_SQLITE_WAL_IDENTITIES: dict[str, tuple[int, int]] = {}
 
 
 def _session_token_digest(token: str) -> str:
@@ -65,8 +68,9 @@ class ProductionDatabaseConfigError(RuntimeError):
     """Raised when production would otherwise fall back to local SQLite."""
 
 
-def _resolve_turso_credentials() -> tuple[str | None, str | None]:
-    """Read Turso credentials without logging or exposing their values."""
+@lru_cache(maxsize=1)
+def _streamlit_turso_credentials() -> tuple[str | None, str | None]:
+    """Read immutable process-level Streamlit secrets only once."""
     turso_url = None
     turso_token = None
     try:
@@ -76,6 +80,19 @@ def _resolve_turso_credentials() -> tuple[str | None, str | None]:
         turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
     except Exception:
         pass
+
+    return turso_url, turso_token
+
+
+def _resolve_turso_credentials() -> tuple[str | None, str | None]:
+    """Read Turso credentials without logging or exposing their values.
+
+    Streamlit's secrets proxy performs filesystem/configuration work on every
+    access. Secrets are immutable for a running deployment, so cache that part
+    while still checking environment overrides on each call for test and CLI
+    compatibility.
+    """
+    turso_url, turso_token = _streamlit_turso_credentials()
 
     if not turso_url:
         turso_url = os.environ.get("TURSO_DATABASE_URL")
@@ -87,18 +104,24 @@ def _resolve_turso_credentials() -> tuple[str | None, str | None]:
 def _remote_sync_interval_seconds() -> float:
     raw_value = os.environ.get("TURSO_SYNC_INTERVAL_SECONDS")
     if raw_value is None:
-        try:
-            import streamlit as st
-
-            raw_value = st.secrets.get("TURSO_SYNC_INTERVAL_SECONDS")
-        except Exception:
-            raw_value = None
+        raw_value = _streamlit_remote_sync_interval()
     if raw_value is None:
         raw_value = str(DEFAULT_TURSO_SYNC_INTERVAL_SECONDS)
     try:
         return max(0.0, float(raw_value))
     except (TypeError, ValueError):
         return DEFAULT_TURSO_SYNC_INTERVAL_SECONDS
+
+
+@lru_cache(maxsize=1)
+def _streamlit_remote_sync_interval() -> Any:
+    """Resolve the optional Streamlit-only sync interval once per process."""
+    try:
+        import streamlit as st
+
+        return st.secrets.get("TURSO_SYNC_INTERVAL_SECONDS")
+    except Exception:
+        return None
 
 
 def _sync_remote_if_due(conn: Any, database_key: str) -> Any:
@@ -223,6 +246,33 @@ def _get_db_path() -> Path:
     return AUTH_DB_PATH
 
 
+def _sqlite_file_identity(db_path: str | Path) -> tuple[int, int] | None:
+    """Return a stable identity so a recreated database is configured again."""
+    try:
+        stat = Path(db_path).resolve().stat()
+    except OSError:
+        return None
+    return int(stat.st_dev), int(stat.st_ino)
+
+
+def _configure_sqlite_wal_once(conn: sqlite3.Connection, db_path: str | Path) -> None:
+    """Enable persistent WAL mode once per database file and process.
+
+    ``foreign_keys`` is connection-local and must be set for every connection;
+    journal mode is persistent. Reissuing ``PRAGMA journal_mode`` for every
+    short-lived UI query adds disk locking and measurable latency.
+    """
+    database_key = str(Path(db_path).resolve())
+    identity = _sqlite_file_identity(db_path)
+    with _SQLITE_JOURNAL_LOCK:
+        if identity is not None and _SQLITE_WAL_IDENTITIES.get(database_key) == identity:
+            return
+        result = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        mode = str(result[0] if result else "").lower()
+        if mode == "wal" and identity is not None:
+            _SQLITE_WAL_IDENTITIES[database_key] = identity
+
+
 def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
     """Get a database connection with proper settings. Uses Turso if configured."""
     turso_url, turso_token = _resolve_turso_credentials()
@@ -268,7 +318,7 @@ def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    _configure_sqlite_wal_once(conn, db_path)
     return conn
 
 

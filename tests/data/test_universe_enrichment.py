@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import threading
 
 import yfinance as yf
 
@@ -190,6 +191,100 @@ def test_fetch_detail_info_counts_failures_once_per_symbol(monkeypatch):
 
     # max_consecutive_failures is 50, so we should attempt exactly 50 symbols.
     assert call_count["value"] == 50
+
+
+def test_fetch_detail_info_accepts_zero_symbol_limit(monkeypatch):
+    monkeypatch.setattr(universe_enrichment, "_load_fundamental_cache", lambda: {})
+
+    assert universe_enrichment._fetch_detail_info(["AAPL"], max_symbols=0) == {}
+
+
+def test_fetch_detail_info_uses_bounded_parallel_requests(monkeypatch):
+    worker_count = 4
+    barrier = threading.Barrier(worker_count)
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class _ConcurrentTicker:
+        def __init__(self, symbol: str, session=None):
+            self.symbol = symbol
+
+        def get_info(self):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                barrier.wait(timeout=5)
+                return {
+                    "shortName": self.symbol,
+                    "sector": "Technology",
+                    "marketCap": 1_000_000,
+                }
+            finally:
+                with state_lock:
+                    active -= 1
+
+    monkeypatch.setattr(universe_enrichment, "_load_fundamental_cache", lambda: {})
+    monkeypatch.setattr(universe_enrichment, "_save_fundamental_cache", lambda data: None)
+    monkeypatch.setattr(universe_enrichment.yf, "Ticker", _ConcurrentTicker)
+
+    result = universe_enrichment._fetch_detail_info(
+        [f"T{index}" for index in range(8)],
+        probe_size=4,
+        min_probe_success_ratio=0.0,
+        session=object(),
+        max_workers=worker_count,
+    )
+
+    assert list(result) == [f"T{index}" for index in range(8)]
+    assert max_active == worker_count
+
+
+def test_fetch_fast_info_uses_bounded_parallel_requests(monkeypatch):
+    worker_count = 4
+    barrier = threading.Barrier(worker_count)
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class _FastTicker:
+        def __init__(self, symbol: str):
+            self.symbol = symbol
+
+        @property
+        def fast_info(self):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                barrier.wait(timeout=5)
+                value = float(self.symbol.removeprefix("T")) + 1.0
+                return {"lastPrice": value, "marketCap": value * 1_000_000}
+            finally:
+                with state_lock:
+                    active -= 1
+
+    class _TickerBundle:
+        def __init__(self, symbols: str, session=None):
+            self.tickers = {
+                symbol: _FastTicker(symbol)
+                for symbol in symbols.split()
+            }
+
+    monkeypatch.setattr(universe_enrichment.yf, "Tickers", _TickerBundle)
+
+    result = universe_enrichment._fetch_fast_info(
+        [f"T{index}" for index in range(8)],
+        chunk_size=8,
+        session=object(),
+        max_workers=worker_count,
+    )
+
+    assert list(result) == [f"T{index}" for index in range(8)]
+    assert max_active == worker_count
 
 
 def test_enrichment_requests_detail_before_fast_info(monkeypatch):
