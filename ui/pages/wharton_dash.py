@@ -3358,6 +3358,8 @@ def _run_quant_research_stack(result: dict[str, Any]) -> dict[str, Any]:
         portfolio_returns=portfolio_returns,
         simulation_stats=dict(result.get("simulation_stats") or {}),
         backtest=backtest,
+        optimization_validation=dict(result.get("optimization_validation") or {}),
+        data_snapshot_id=str(inputs.get("portfolio_snapshot_id") or "") or None,
         risk_free_rate=float(inputs.get("risk_free_rate", 0.03)),
         random_seed=int(inputs.get("random_seed", 42)),
     )
@@ -3425,6 +3427,8 @@ def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
         portfolio_returns=portfolio_returns,
         simulation_stats=simulation_stats,
         backtest=backtest,
+        optimization_validation=dict(result.get("optimization_validation") or {}),
+        data_snapshot_id=str(inputs.get("portfolio_snapshot_id") or "") or None,
         risk_free_rate=float(inputs.get("risk_free_rate", 0.03)),
         random_seed=random_seed,
     )
@@ -3679,13 +3683,16 @@ def _render_methodology_validation(result: dict) -> None:
 
     score = float(report.get("methodology_score", 0.0))
     distribution = report.get("distribution", {})
-    backtest = result.get("quant_stack", {}).get("backtest", {}) if isinstance(result.get("quant_stack"), dict) else {}
-    metrics = backtest.get("metrics", {}) if isinstance(backtest, dict) else {}
+    accuracy_evidence = report.get("accuracy_evidence", {})
+    evidence_counts = accuracy_evidence.get("counts", {}) if isinstance(accuracy_evidence, dict) else {}
     top = st.columns(4)
     top[0].metric("Methodology score", f"{score:.0f}/100")
     top[1].metric("Evidence band", str(report.get("band", "unknown")).replace("_", " ").title())
     top[2].metric("History", f"{float(distribution.get('observations', 0)) / 252.0:.1f} years")
-    top[3].metric("Causal baseline hit rate", _fmt_pct(metrics.get("directional_hit_rate")))
+    top[3].metric(
+        "Accuracy evidence",
+        f"{int(evidence_counts.get('pass', 0))}/{sum(int(evidence_counts.get(key, 0)) for key in ('pass', 'partial', 'gap')) or 0}",
+    )
 
     st.info(
         "This score measures evidence quality and reproducibility — not future predictive accuracy, "
@@ -3704,6 +3711,22 @@ def _render_methodology_validation(result: dict) -> None:
             "Evidence": gate.get("evidence", ""),
         })
     st.dataframe(pd.DataFrame(gate_rows), use_container_width=True, hide_index=True)
+
+    evidence_rows = []
+    evidence_status_labels = {"pass": "Available", "partial": "Partial", "gap": "Missing"}
+    for item in accuracy_evidence.get("checks", []) if isinstance(accuracy_evidence, dict) else []:
+        evidence_rows.append({
+            "Evidence": item.get("label", ""),
+            "Status": evidence_status_labels.get(str(item.get("status", "")), str(item.get("status", ""))),
+            "What this run proves": item.get("evidence", ""),
+        })
+    if evidence_rows:
+        st.markdown("#### Accuracy evidence — no duplicate model score")
+        st.caption(
+            "These checks separate numerical correctness from evidence about future performance. "
+            "They do not add a second readiness score."
+        )
+        st.dataframe(pd.DataFrame(evidence_rows), use_container_width=True, hide_index=True)
 
     intervals = report.get("metric_intervals", {})
     if intervals:
@@ -3735,8 +3758,8 @@ def _render_methodology_validation(result: dict) -> None:
     diag[2].metric("Normality p-value", _fmt_float(distribution.get("normality_p_value")))
     diag[3].metric("Lag-1 autocorrelation", _fmt_float(distribution.get("lag1_autocorrelation")))
 
-    with st.expander("Limitations that must accompany a Wharton-level presentation", expanded=True):
-        for limitation in report.get("limitations", []):
+    with st.expander("Model limitations that must accompany a Wharton-level presentation", expanded=True):
+        for limitation in report.get("presentation_caveats", report.get("limitations", [])):
             st.markdown(f"- {escape(str(limitation))}")
 
 
@@ -8818,12 +8841,24 @@ def _render_live_competition_analytics(
         h1, h2, h3, h4 = st.columns(4)
         h1.metric("Fresh price coverage", f"{float(summary.get('fresh_price_coverage_pct') or 0):.0f}%")
         h2.metric("Thesis coverage", f"{float(summary.get('thesis_coverage_pct') or 0):.0f}%")
-        h3.metric("Evidence coverage", f"{float(summary.get('evidence_coverage_pct') or 0):.0f}%")
-        h4.metric("Review queue", int(summary.get("review_queue_count") or 0))
+        h3.metric("Verified evidence", f"{float(summary.get('verified_source_coverage_pct') or 0):.0f}%")
+        h4.metric("Decision-ready", f"{float(summary.get('decision_ready_ticker_pct') or 0):.0f}%")
         if health.get("tickers"):
-            st.dataframe(pd.DataFrame(health["tickers"]), use_container_width=True, hide_index=True)
+            health_rows = pd.DataFrame(health["tickers"])
+            visible_health_columns = [
+                "ticker", "decision_ready", "price_status", "thesis_status",
+                "primary_source_count", "verified_source_count", "evidence_status",
+                "overdue_catalysts",
+            ]
+            st.dataframe(
+                health_rows[[column for column in visible_health_columns if column in health_rows.columns]],
+                use_container_width=True,
+                hide_index=True,
+            )
         if health.get("review_queue"):
-            st.markdown("##### Actionable data and review gaps")
+            st.markdown(
+                f"##### Actionable data and review gaps · {int(summary.get('blocking_issue_count') or 0)} blockers"
+            )
             st.dataframe(pd.DataFrame(health["review_queue"]), use_container_width=True, hide_index=True)
         st.caption(str(health.get("methodology") or ""))
         st.caption(str(health.get("macro_policy") or ""))
@@ -12495,29 +12530,29 @@ def _render_competition_readiness(profile: dict[str, str | int]) -> None:
     gate_cols = st.columns(3)
     for column, (gate, passed) in zip(gate_cols, readiness.get("operating_gates", {}).items()):
         column.metric(gate.replace("_", " ").title(), "Ready" if passed else "Blocked")
+    next_action = readiness.get("next_action")
+    if isinstance(next_action, Mapping):
+        st.info(
+            f"Next action · {next_action.get('area', 'Workflow')}: "
+            f"{next_action.get('action', '')}"
+        )
 
     gaps_tab, audit_tab, report_tab, quant_tab = st.tabs(
-        ["Priority Gaps", "Red Team & AI Audit", "Report & Pitch", "Quant Standard"]
+        ["Next Actions", "Red Team & AI Audit", "Report & Pitch", "Quant Standard"]
     )
     with gaps_tab:
-        left, right = st.columns(2)
-        with left:
-            st.markdown("#### Strategy constitution")
-            missing = readiness["constitution"]["missing"]
-            if missing:
-                for item in missing:
-                    st.warning(item["label"])
-            else:
-                st.success("All strategy-constitution gates are documented.")
-        with right:
-            st.markdown("#### Governance")
-            missing = readiness["governance"]["missing"]
-            if missing:
-                for item in missing:
-                    st.warning(item["label"])
-            else:
-                st.success("All governance gates are documented.")
-        st.markdown("#### Security dossiers")
+        st.markdown("#### Dependency-ordered team actions")
+        priority_actions = readiness.get("priority_actions", [])
+        if priority_actions:
+            for index, item in enumerate(priority_actions, start=1):
+                st.write(
+                    f"{index}. **{item.get('area', 'Workflow')}** — "
+                    f"{item.get('action', '')}"
+                )
+        else:
+            st.success("No readiness blockers are currently recorded.")
+
+        st.markdown("#### Security dossier detail")
         dossier_rows = [{
             "Ticker": item["ticker"],
             "Readiness": item["score"] / 100.0,

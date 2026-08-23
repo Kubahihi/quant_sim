@@ -32,6 +32,79 @@ def _assessment(checks: Sequence[tuple[str, str, bool]]) -> dict[str, Any]:
     return {"score": score, "status": status, "completed": completed, "missing": missing, "total": len(checks)}
 
 
+def _build_priority_actions(
+    constitution: Mapping[str, Any],
+    dossiers: Sequence[Mapping[str, Any]],
+    governance: Mapping[str, Any],
+    operating_gates: Mapping[str, bool],
+) -> list[dict[str, Any]]:
+    """Return one dependency-ordered action per workflow area."""
+    actions: list[dict[str, Any]] = []
+    constitution_missing = list(constitution.get("missing", []))
+    if constitution_missing:
+        actions.append({
+            "key": "strategy_constitution",
+            "area": "Client & Policy",
+            "action": (
+                "Complete the strategy constitution "
+                f"({len(constitution_missing)} required field group(s) remain)."
+            ),
+        })
+
+    incomplete_dossiers = [item for item in dossiers if item.get("missing")]
+    if not dossiers:
+        actions.append({
+            "key": "security_dossiers",
+            "area": "Research",
+            "action": "Create the first canonical Security Dossier with primary evidence.",
+        })
+    elif incomplete_dossiers:
+        weakest = min(incomplete_dossiers, key=lambda item: float(item.get("score") or 0))
+        actions.append({
+            "key": "security_dossiers",
+            "area": "Research",
+            "action": (
+                f"Close gaps in {len(incomplete_dossiers)} Security Dossier(s); "
+                f"start with {weakest.get('ticker') or 'the lowest-scoring holding'}."
+            ),
+        })
+
+    supporting_governance_keys = {"reviews", "red_team", "qa", "rules", "ai"}
+    supporting_gaps = [
+        item for item in governance.get("missing", [])
+        if item.get("key") in supporting_governance_keys
+    ]
+    if supporting_gaps:
+        actions.append({
+            "key": "governance_evidence",
+            "area": "Evidence & Defense",
+            "action": (
+                "Complete the review, rules, AI-disclosure, and oral-defense trail "
+                f"({len(supporting_gaps)} gate(s) remain)."
+            ),
+        })
+
+    gate_actions = {
+        "investment_committee": (
+            "Investment Committee",
+            "Complete independent pre/post votes and final sign-off for an approved case.",
+        ),
+        "wins_reconciliation": (
+            "Portfolio / WInS",
+            "Import the authoritative WInS snapshot and close every reconciliation exception.",
+        ),
+        "report_frozen_to_snapshot": (
+            "Report & Pitch",
+            "Freeze the report against the clean, reconciled WInS portfolio snapshot.",
+        ),
+    }
+    for key, (area, action) in gate_actions.items():
+        if not operating_gates.get(key, False):
+            actions.append({"key": key, "area": area, "action": action})
+
+    return actions
+
+
 def assess_strategy_constitution(mandate_record: Any, strategy_record: Any) -> dict[str, Any]:
     """Score explicit client and process rules; no market performance enters the score."""
     mandate = _payload(mandate_record)
@@ -235,6 +308,12 @@ def build_competition_readiness(
     }
     if not all(operating_gates.values()):
         overall = min(overall, 89)
+    priority_actions = _build_priority_actions(
+        constitution,
+        dossiers,
+        governance,
+        operating_gates,
+    )
     return {
         "overall_score": overall,
         "status": "Pitch ready" if overall >= 90 else "Evidence build" if overall >= 65 else "Foundation incomplete",
@@ -243,6 +322,8 @@ def build_competition_readiness(
         "dossier_score": dossier_score,
         "governance": governance,
         "operating_gates": operating_gates,
+        "priority_actions": priority_actions,
+        "next_action": priority_actions[0] if priority_actions else None,
     }
 
 
@@ -253,13 +334,14 @@ def build_pitch_question_bank(readiness: Mapping[str, Any]) -> list[str]:
         "Which single assumption would most damage the portfolio if it proved wrong?",
         "How does the policy benchmark reflect the client's actual goals and constraints?",
     ]
-    missing_labels: list[str] = []
-    for section in (readiness.get("constitution", {}), readiness.get("governance", {})):
-        missing_labels.extend(str(item.get("label")) for item in section.get("missing", []) if isinstance(item, Mapping))
-    for dossier in readiness.get("dossiers", []):
-        for item in dossier.get("missing", []):
-            missing_labels.append(f"{dossier.get('ticker')}: {item.get('label')}")
-    questions.extend(f"What evidence closes the current gap: {label}?" for label in missing_labels[:8])
+    priority_actions = [
+        item for item in readiness.get("priority_actions", [])
+        if isinstance(item, Mapping) and item.get("action")
+    ]
+    questions.extend(
+        f"What evidence proves this action is complete: {item['action']}"
+        for item in priority_actions[:6]
+    )
     return questions
 
 
@@ -281,6 +363,22 @@ def generate_competition_brief(
         f"Generated: {(generated_on or date.today()).isoformat()}",
         f"Readiness: {readiness.get('overall_score', 0)}/100 — {readiness.get('status', 'Not assessed')}",
         "",
+        "## Priority actions",
+        "",
+    ]
+    priority_actions = [
+        item for item in readiness.get("priority_actions", [])
+        if isinstance(item, Mapping) and item.get("action")
+    ]
+    if priority_actions:
+        lines.extend(
+            f"- {item.get('area')}: {item.get('action')}"
+            for item in priority_actions
+        )
+    else:
+        lines.append("- No readiness blockers are currently recorded.")
+    lines.extend([
+        "",
         "## Client and investment policy",
         "",
         f"- Client: {m.get('client_name') or 'Not documented'}",
@@ -294,7 +392,7 @@ def generate_competition_brief(
         "",
         "## Security dossier readiness",
         "",
-    ]
+    ])
     for dossier in readiness.get("dossiers", []):
         gaps = ", ".join(item["label"] for item in dossier.get("missing", [])) or "None"
         lines.append(f"- {dossier.get('ticker')}: {dossier.get('score')}%; gaps: {gaps}")

@@ -78,6 +78,9 @@ def test_readiness_exposes_gaps_and_generates_defensible_brief():
         decision_reviews=[], red_team_reviews=[], ai_usage=[],
     )
     assert readiness["overall_score"] < 100
+    action_keys = [item["key"] for item in readiness["priority_actions"]]
+    assert action_keys == list(dict.fromkeys(action_keys))
+    assert readiness["next_action"] == readiness["priority_actions"][0]
     questions = build_pitch_question_bank(readiness)
     assert any("evidence" in question.lower() for question in questions)
     brief = generate_competition_brief(
@@ -86,6 +89,7 @@ def test_readiness_exposes_gaps_and_generates_defensible_brief():
     )
     assert "Competition Readiness Brief" in brief
     assert "60% ACWI / 40% AGG" in brief
+    assert "## Priority actions" in brief
     assert "team must verify every claim" in brief
 
 
@@ -154,3 +158,8 @@ def test_pitch_ready_is_gated_by_committee_reconciliation_and_frozen_report():
         report_workspace={"status": "frozen", "portfolio_snapshot_id": "wins-42"},
     )
     assert all(ready["operating_gates"].values())
+    assert not {
+        "investment_committee",
+        "wins_reconciliation",
+        "report_frozen_to_snapshot",
+    }.intersection(item["key"] for item in ready["priority_actions"])

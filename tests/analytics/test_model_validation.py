@@ -57,3 +57,69 @@ def test_validation_report_does_not_claim_predictive_accuracy():
     assert report["predictive_accuracy_measured"] is False
     assert report["generated_with"]["backtest_validation_type"] == "walk_forward_causal_baseline"
     assert any("full model ensemble" in item.lower() for item in report["limitations"])
+
+
+def test_validation_report_reuses_rolling_optimizer_and_snapshot_evidence():
+    series = _returns()
+    optimization_validation = {
+        "success": True,
+        "causal": True,
+        "validation_type": "point_in_time_rolling_reoptimization_out_of_sample",
+        "survivorship_bias_controlled": True,
+        "windows": [{"window_id": 1}, {"window_id": 2}],
+        "metrics": {"transaction_cost_drag": 0.002, "annualized_return": 0.08},
+        "equal_weight_metrics": {
+            "transaction_cost_drag": 0.001,
+            "annualized_return": 0.06,
+        },
+    }
+
+    report = build_model_validation_report(
+        series,
+        backtest=walk_forward_baseline_backtest(series),
+        optimization_validation=optimization_validation,
+        data_snapshot_id="wins-42",
+        n_bootstrap=200,
+    )
+
+    oos_gate = next(item for item in report["gates"] if item["gate"] == "Out-of-sample process")
+    assert oos_gate["status"] == "pass"
+    assert oos_gate["points"] == 18.0
+    evidence = {item["key"]: item for item in report["accuracy_evidence"]["checks"]}
+    assert evidence["causal_oos"]["status"] == "pass"
+    assert evidence["after_costs"]["status"] == "pass"
+    assert evidence["comparator"]["status"] == "pass"
+    assert evidence["point_in_time_universe"]["status"] == "pass"
+    assert evidence["frozen_snapshot"]["status"] == "pass"
+    assert evidence["full_ensemble"]["status"] == "partial"
+    assert evidence["untouched_holdout"]["status"] == "gap"
+    assert report["accuracy_evidence"]["decision_use"] == "decision_support_only"
+    assert report["generated_with"]["data_snapshot_id"] == "wins-42"
+
+
+def test_failed_rolling_window_is_only_partial_accuracy_evidence():
+    series = _returns()
+    report = build_model_validation_report(
+        series,
+        backtest=walk_forward_baseline_backtest(series),
+        optimization_validation={
+            "success": False,
+            "causal": True,
+            "validation_type": "rolling_reoptimization_out_of_sample",
+            "survivorship_bias_controlled": True,
+            "windows": [{"window_id": 1}, {"window_id": 2, "success": False}],
+            "metrics": {"transaction_cost_drag": 0.002},
+            "equal_weight_metrics": {"annualized_return": 0.06},
+        },
+        n_bootstrap=200,
+    )
+
+    oos_gate = next(item for item in report["gates"] if item["gate"] == "Out-of-sample process")
+    causal_check = next(
+        item
+        for item in report["accuracy_evidence"]["checks"]
+        if item["key"] == "causal_oos"
+    )
+    assert oos_gate["status"] == "warning"
+    assert oos_gate["points"] == 10.0
+    assert causal_check["status"] == "partial"
