@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 import src.analytics.modular.news as news_module
+from src.analytics.advanced.runner import run_advanced_models_with_bundle
 from src.analytics.modular.backtest import (
     deterministic_signal_backtest,
     walk_forward_baseline_backtest,
@@ -640,3 +641,66 @@ def test_run_quant_stack_preserves_portfolio_metrics_and_namespaces_backtest(tmp
     assert "backtest_sharpe" in saved["metrics"]
     assert seen_context["news_api_key"] == "news-key-from-config"
     assert seen_context["tickers"] == ["AAA"]
+
+
+def test_run_quant_stack_reuses_precomputed_models(tmp_path, monkeypatch):
+    returns_df = _sample_returns_df()
+    portfolio_returns = returns_df.mean(axis=1)
+    monkeypatch.setattr(
+        "src.analytics.modular.pipeline.run_model_bundle",
+        lambda *args, **kwargs: pytest.fail("model bundle was fitted twice"),
+    )
+    monkeypatch.setattr(
+        "src.analytics.modular.pipeline.build_news_analysis",
+        lambda *args, **kwargs: NewsResult(
+            available=True,
+            items=[],
+            context={"relevance_coverage": 0.0, "provider_used": "test"},
+            sentiment_score=0.0,
+            sentiment_dispersion=0.0,
+        ),
+    )
+
+    result = run_quant_stack(
+        portfolio_returns=portfolio_returns,
+        returns_df=returns_df,
+        config={
+            "tickers": list(returns_df.columns),
+            "weights": [1 / len(returns_df.columns)] * len(returns_df.columns),
+            "start_date": portfolio_returns.index.min().date(),
+            "end_date": portfolio_returns.index.max().date(),
+        },
+        history_dir=tmp_path,
+        precomputed_models={},
+    )
+
+    assert result["models"] == {}
+
+
+def test_advanced_model_bundle_preserves_quant_model_context(monkeypatch):
+    returns_df = _sample_returns_df()
+    portfolio_returns = returns_df.mean(axis=1)
+    weights = [0.6, 0.3, 0.1]
+    seen_context = {}
+
+    def fake_model_bundle(series, context):
+        seen_context.update(context)
+        return {}
+
+    monkeypatch.setattr(
+        "src.analytics.advanced.runner.run_model_bundle",
+        fake_model_bundle,
+    )
+
+    legacy, bundle = run_advanced_models_with_bundle(
+        portfolio_returns,
+        forecast_periods=7,
+        returns_df=returns_df,
+        model_context={"market_weights": weights},
+    )
+
+    assert legacy == {}
+    assert bundle == {}
+    assert seen_context["market_weights"] == weights
+    assert seen_context["forecast_periods"] == 7
+    assert seen_context["returns_df"] is returns_df

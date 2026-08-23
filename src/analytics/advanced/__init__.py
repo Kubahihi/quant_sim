@@ -1,4 +1,4 @@
-from .runner import run_advanced_models
+from .runner import run_advanced_models, run_advanced_models_with_bundle
 
 __all__ = [
     "LinearRegressionModel",
@@ -6,6 +6,7 @@ __all__ = [
     "GARCHModel",
     "ExponentialSmoothingModel",
     "run_advanced_models",
+    "run_advanced_models_with_bundle",
 ]
 
 

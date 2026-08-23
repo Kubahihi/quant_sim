@@ -552,9 +552,16 @@ _SIMULATION_SURFACE_PERCENTILES = tuple(range(5, 100, 5))
 def _create_simulation_percentiles(
     price_paths: np.ndarray,
     percentiles: Tuple[int, ...] = (5, 25, 50, 75, 95),
+    *,
+    overwrite_input: bool = False,
 ) -> pd.DataFrame:
     days = np.arange(price_paths.shape[0])
-    percentile_values = np.percentile(price_paths, percentiles, axis=1)
+    percentile_values = np.percentile(
+        price_paths,
+        percentiles,
+        axis=1,
+        overwrite_input=overwrite_input,
+    )
     result = pd.DataFrame(
         percentile_values.T,
         columns=[f"p{percentile}" for percentile in percentiles],
@@ -818,7 +825,7 @@ def _compute_analysis(
     # them out of app startup removes scipy optimizers and optional forecasting
     # libraries from the empty-dashboard path.
     from src.ai import generate_ai_review, resolve_groq_api_key
-    from src.analytics import run_advanced_models, run_quant_stack
+    from src.analytics import run_advanced_models_with_bundle, run_quant_stack
     from src.optimization import (
         calculate_efficient_frontier,
         estimate_portfolio_inputs,
@@ -904,10 +911,11 @@ def _compute_analysis(
     return_contribution_df = calculate_return_contribution(returns, weights)
     risk_contribution_df = calculate_risk_contribution(returns, weights)
 
-    advanced_models = run_advanced_models(
+    advanced_models, precomputed_models = run_advanced_models_with_bundle(
         returns=portfolio_returns,
         forecast_periods=min(10, max(3, horizon_days // 63)),
         returns_df=returns,
+        model_context={"market_weights": weights},
     )
     model_signals = _model_signals_from_outputs(advanced_models)
 
@@ -974,6 +982,7 @@ def _compute_analysis(
     simulation_percentile_grid = _create_simulation_percentiles(
         price_paths,
         _SIMULATION_SURFACE_PERCENTILES,
+        overwrite_input=True,
     )
     simulation_percentiles = simulation_percentile_grid[
         ["day", "p5", "p25", "p50", "p75", "p95"]
@@ -996,6 +1005,7 @@ def _compute_analysis(
     adv_simulation_percentile_grid = _create_simulation_percentiles(
         adv_price_paths,
         _SIMULATION_SURFACE_PERCENTILES,
+        overwrite_input=True,
     )
     adv_simulation_percentiles = adv_simulation_percentile_grid[
         ["day", "p5", "p25", "p50", "p75", "p95"]
@@ -1167,6 +1177,7 @@ def _compute_analysis(
             "news_api_key": news_api_key,
             "sector_keywords": ["macro", "rates", "inflation", "earnings", "volatility"],
         },
+        precomputed_models=precomputed_models,
     )
 
     return {

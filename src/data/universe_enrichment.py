@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
@@ -67,6 +68,8 @@ TEXT_COLUMNS = [
 ProgressCallback = Callable[[dict[str, Any]], None]
 PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
 YF_PROXY_BYPASS = {"http": "", "https": "", "all": ""}
+MAX_DETAIL_FETCH_WORKERS = 6
+MAX_FAST_INFO_WORKERS = 6
 
 
 def _configure_yfinance_cache() -> None:
@@ -404,72 +407,87 @@ def _fetch_fast_info(
     progress_start: float = 0.50,
     progress_end: float = 0.75,
     session: Any | None = None,
+    max_workers: int = MAX_FAST_INFO_WORKERS,
 ) -> dict[str, dict[str, float]]:
     """Fetch lightweight fast_info fields (market cap, beta, fallback price)."""
     output: dict[str, dict[str, float]] = {}
     if not tickers:
         return output
+    if not isinstance(max_workers, int) or max_workers < 1:
+        raise ValueError("max_workers must be a positive integer.")
+
+    def fetch_one(symbol: str, ticker_bundle: Any | None) -> tuple[str, dict[str, float]]:
+        try:
+            ticker_obj = None
+            if ticker_bundle is not None:
+                ticker_obj = ticker_bundle.tickers.get(symbol)
+            if ticker_obj is None:
+                ticker_obj = yf.Ticker(symbol, session=session)
+
+            fast_info = getattr(ticker_obj, "fast_info", None) or {}
+
+            def safe_get(*keys: str) -> float | None:
+                for key in keys:
+                    try:
+                        value = fast_info.get(key)
+                    except Exception:
+                        continue
+                    if value is not None:
+                        return value
+                return None
+
+            market_cap = safe_get("marketCap", "market_cap")
+            beta = safe_get("beta")
+            price = safe_get("lastPrice", "last_price")
+            shares = safe_get("shares")
+            if market_cap is None and shares is not None and price is not None:
+                try:
+                    market_cap = float(shares) * float(price)
+                except Exception:
+                    market_cap = None
+
+            row: dict[str, float] = {}
+            if market_cap is not None:
+                row["MarketCap"] = float(market_cap)
+            if beta is not None:
+                row["Beta"] = float(beta)
+            if price is not None:
+                row["Price"] = float(price)
+            return symbol, row
+        except Exception:
+            return symbol, {}
 
     chunks = list(_chunked(tickers, chunk_size))
     total_chunks = len(chunks)
-    for idx, chunk in enumerate(chunks, start=1):
-        chunk_progress = progress_start + (progress_end - progress_start) * (idx - 1) / max(1, total_chunks)
-        _emit_progress(
-            progress_callback,
-            chunk_progress,
-            "fast_info",
-            f"Downloading fast info chunk {idx}/{total_chunks}",
-            current=idx,
-            total=total_chunks,
-        )
-        try:
-            ticker_bundle = yf.Tickers(" ".join(chunk), session=session)
-        except Exception:
-            ticker_bundle = None
-
-        for symbol in chunk:
+    worker_count = min(max_workers, len(tickers))
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="universe-fast-info",
+    ) as executor:
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_progress = progress_start + (
+                (progress_end - progress_start) * (idx - 1) / max(1, total_chunks)
+            )
+            _emit_progress(
+                progress_callback,
+                chunk_progress,
+                "fast_info",
+                f"Downloading fast info chunk {idx}/{total_chunks}",
+                current=idx,
+                total=total_chunks,
+            )
             try:
-                ticker_obj = None
-                if ticker_bundle is not None:
-                    ticker_obj = ticker_bundle.tickers.get(symbol)
-                if ticker_obj is None:
-                    ticker_obj = yf.Ticker(symbol, session=session)
+                ticker_bundle = yf.Tickers(" ".join(chunk), session=session)
+            except Exception:
+                ticker_bundle = None
 
-                fast_info = getattr(ticker_obj, "fast_info", None) or {}
-                row: dict[str, float] = {}
-
-                def _safe_fast_info_get(*keys: str) -> float | None:
-                    for key in keys:
-                        try:
-                            value = fast_info.get(key)
-                        except Exception:
-                            continue
-                        if value is not None:
-                            return value
-                    return None
-
-                market_cap = _safe_fast_info_get("marketCap", "market_cap")
-                beta = _safe_fast_info_get("beta")
-                price = _safe_fast_info_get("lastPrice", "last_price")
-                shares = _safe_fast_info_get("shares")
-
-                if market_cap is None and shares is not None and price is not None:
-                    try:
-                        market_cap = float(shares) * float(price)
-                    except Exception:
-                        market_cap = None
-
-                if market_cap is not None:
-                    row["MarketCap"] = float(market_cap)
-                if beta is not None:
-                    row["Beta"] = float(beta)
-                if price is not None:
-                    row["Price"] = float(price)
-
+            rows = executor.map(
+                lambda symbol: fetch_one(symbol, ticker_bundle),
+                chunk,
+            )
+            for symbol, row in rows:
                 if row:
                     output[symbol] = row
-            except Exception:
-                continue
 
     _emit_progress(
         progress_callback,
@@ -659,6 +677,39 @@ def _select_detail_tickers(
     return detail_candidates["Ticker"].astype(str).head(max_symbols).tolist()
 
 
+def _fetch_detail_row(
+    symbol: str,
+    session: Any | None,
+) -> tuple[dict[str, object] | None, bool]:
+    """Fetch and normalize one detailed quote-info payload."""
+    try:
+        ticker = yf.Ticker(symbol, session=session)
+        info = ticker.get_info()
+    except Exception:
+        return None, False
+
+    if not isinstance(info, dict) or not info:
+        return None, False
+    row: dict[str, object] = {
+        "Company": info.get("longName") or info.get("shortName"),
+        "Exchange": info.get("exchange"),
+        "Sector": info.get("sector"),
+        "Industry": info.get("industry"),
+        "MarketCap": info.get("marketCap"),
+        "Beta": info.get("beta"),
+        "PE": info.get("trailingPE"),
+        "ForwardPE": info.get("forwardPE"),
+        "PEG": info.get("pegRatio"),
+        "ROE": info.get("returnOnEquity"),
+        "ROA": info.get("returnOnAssets"),
+        "RevenueGrowth": info.get("revenueGrowth"),
+        "EarningsGrowth": info.get("earningsGrowth"),
+        "DividendYield": info.get("dividendYield"),
+    }
+    meaningful = bool(row.get("Sector") or row.get("MarketCap") or row.get("Company"))
+    return row, meaningful
+
+
 def _fetch_detail_info(
     tickers: list[str],
     max_symbols: int = 1200,
@@ -668,6 +719,7 @@ def _fetch_detail_info(
     progress_start: float = 0.75,
     progress_end: float = 0.96,
     session: Any | None = None,
+    max_workers: int = MAX_DETAIL_FETCH_WORKERS,
 ) -> dict[str, dict[str, object]]:
     """
     Fetch richer metadata with improved coverage and caching.
@@ -682,6 +734,8 @@ def _fetch_detail_info(
     output: dict[str, dict[str, object]] = {}
     if not tickers:
         return output
+    if not isinstance(max_workers, int) or max_workers < 1:
+        raise ValueError("max_workers must be a positive integer.")
 
     # Load cached data to avoid re-fetching
     cache = _load_fundamental_cache()
@@ -689,94 +743,116 @@ def _fetch_detail_info(
 
     limited_tickers = tickers[:max_symbols]
     total_symbols = len(limited_tickers)
+    if total_symbols == 0:
+        return output
     probe_target = min(max(1, probe_size), total_symbols)
     probe_success = 0
     processed_symbols = 0
     consecutive_failures = 0
     max_consecutive_failures = 50  # Stop if we have 50 consecutive failures
 
-    for idx, symbol in enumerate(limited_tickers, start=1):
-        processed_symbols = idx
-        if idx == 1 or idx % 10 == 0 or idx == total_symbols:
-            step_progress = progress_start + (progress_end - progress_start) * idx / max(1, total_symbols)
+    worker_count = min(max_workers, total_symbols)
+    index = 0
+    phase_end = probe_target
+    stop_reason = ""
+    # curl_cffi sessions are thread-safe. Keep concurrency deliberately bounded
+    # so the refresh is fast without creating an unbounded burst at Yahoo.
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="universe-detail",
+    ) as executor:
+        while index < total_symbols:
+            remaining_failure_budget = max_consecutive_failures - consecutive_failures
+            if remaining_failure_budget <= 0:
+                stop_reason = (
+                    f"Too many consecutive failures ({consecutive_failures}), stopping early"
+                )
+                break
+
+            batch_end = min(
+                phase_end,
+                total_symbols,
+                index + worker_count,
+                index + remaining_failure_budget,
+            )
+            batch_symbols = limited_tickers[index:batch_end]
+            batch_results: dict[str, tuple[dict[str, object] | None, bool, bool]] = {}
+            uncached_symbols: list[str] = []
+
+            for symbol in batch_symbols:
+                normalized_cached = _normalize_cached_fundamental_row(cache.get(symbol))
+                if (
+                    normalized_cached.get("Sector")
+                    or normalized_cached.get("MarketCap")
+                    or normalized_cached.get("Company")
+                ):
+                    batch_results[symbol] = (normalized_cached, True, True)
+                else:
+                    uncached_symbols.append(symbol)
+
+            fetched_rows = executor.map(
+                lambda symbol: _fetch_detail_row(symbol, session),
+                uncached_symbols,
+            )
+            for symbol, (row, meaningful) in zip(
+                uncached_symbols,
+                fetched_rows,
+                strict=True,
+            ):
+                batch_results[symbol] = (row, meaningful, False)
+
+            for offset, symbol in enumerate(batch_symbols, start=index + 1):
+                row, meaningful, from_cache = batch_results[symbol]
+                processed_symbols = offset
+                if row is None:
+                    consecutive_failures += 1
+                else:
+                    output[symbol] = row
+                    cache[symbol] = row
+                    consecutive_failures = 0
+                    if from_cache:
+                        cache_hits += 1
+                    elif offset <= probe_target and meaningful:
+                        probe_success += 1
+
+            index = batch_end
+            step_progress = progress_start + (
+                (progress_end - progress_start) * index / max(1, total_symbols)
+            )
             _emit_progress(
                 progress_callback,
                 step_progress,
                 "detail_info",
-                f"Downloading detailed fundamentals {idx}/{total_symbols} (cache hits: {cache_hits})",
-                current=idx,
+                f"Downloading detailed fundamentals {index}/{total_symbols} (cache hits: {cache_hits})",
+                current=index,
                 total=total_symbols,
             )
 
-        # Check cache first (support both legacy and canonical key names).
-        if symbol in cache:
-            normalized_cached = _normalize_cached_fundamental_row(cache[symbol])
-            if normalized_cached.get("Sector") or normalized_cached.get("MarketCap") or normalized_cached.get("Company"):
-                output[symbol] = normalized_cached
-                cache[symbol] = normalized_cached
-                cache_hits += 1
-                consecutive_failures = 0
-                continue
-
-        try:
-            ticker = yf.Ticker(symbol, session=session)
-            info = ticker.get_info()
-        except Exception:
-            info = {}
-
-        if isinstance(info, dict) and info:
-            consecutive_failures = 0
-            row: dict[str, object] = {
-                "Company": info.get("longName") or info.get("shortName"),
-                "Exchange": info.get("exchange"),
-                "Sector": info.get("sector"),
-                "Industry": info.get("industry"),
-                "MarketCap": info.get("marketCap"),
-                "Beta": info.get("beta"),
-                "PE": info.get("trailingPE"),
-                "ForwardPE": info.get("forwardPE"),
-                "PEG": info.get("pegRatio"),
-                "ROE": info.get("returnOnEquity"),
-                "ROA": info.get("returnOnAssets"),
-                "RevenueGrowth": info.get("revenueGrowth"),
-                "EarningsGrowth": info.get("earningsGrowth"),
-                "DividendYield": info.get("dividendYield"),
-            }
-            output[symbol] = row
-            # Update cache
-            cache[symbol] = row
-
-            if idx <= probe_target:
-                # Count as success if we got any meaningful data
-                if row.get("Sector") or row.get("MarketCap") or row.get("Company"):
-                    probe_success += 1
-        else:
-            consecutive_failures += 1
-
-        # Check for consecutive failures (indicates rate limiting or network issues)
-        if consecutive_failures >= max_consecutive_failures:
-            _emit_progress(
-                progress_callback,
-                progress_end,
-                "detail_info",
-                f"Too many consecutive failures ({consecutive_failures}), stopping early",
-                current=idx,
-                total=total_symbols,
-            )
-            break
-
-        if idx == probe_target and total_symbols > probe_target:
-            success_ratio = probe_success / float(probe_target)
-            if success_ratio < min_probe_success_ratio:
-                _emit_progress(
-                    progress_callback,
-                    progress_end,
-                    "detail_info",
-                    f"Low detail info yield ({probe_success}/{probe_target}, ratio={success_ratio:.2f}), skipping remaining expensive calls",
-                    current=idx,
-                    total=total_symbols,
+            if consecutive_failures >= max_consecutive_failures:
+                stop_reason = (
+                    f"Too many consecutive failures ({consecutive_failures}), stopping early"
                 )
                 break
+
+            if index == probe_target and total_symbols > probe_target:
+                success_ratio = probe_success / float(probe_target)
+                if success_ratio < min_probe_success_ratio:
+                    stop_reason = (
+                        f"Low detail info yield ({probe_success}/{probe_target}, "
+                        f"ratio={success_ratio:.2f}), skipping remaining expensive calls"
+                    )
+                    break
+                phase_end = total_symbols
+
+    if stop_reason:
+        _emit_progress(
+            progress_callback,
+            progress_end,
+            "detail_info",
+            stop_reason,
+            current=processed_symbols,
+            total=total_symbols,
+        )
 
     # Persist cache to disk
     if cache:

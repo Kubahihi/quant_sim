@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 from uuid import uuid4
 
 import pandas as pd
@@ -10,7 +10,7 @@ from .backtest import walk_forward_baseline_backtest
 from .history import list_run_records, save_run_record
 from .models import run_model_bundle
 from .news import build_news_analysis
-from .results import RunRecord
+from .results import ModelResult, RunRecord
 from .signals import run_signal_bundle
 from .summary import build_summary
 
@@ -21,6 +21,7 @@ def run_quant_stack(
     config: Dict[str, Any],
     history_dir: str = "data/run_history",
     user_id: int | None = None,
+    precomputed_models: Mapping[str, ModelResult] | None = None,
 ) -> Dict[str, Any]:
     context = {
         "returns_df": returns_df,
@@ -28,7 +29,14 @@ def run_quant_stack(
         "market_weights": config.get("weights", []),
     }
 
-    models = run_model_bundle(portfolio_returns, context=context)
+    # The dashboard also exposes a legacy advanced-model view. Accept its raw
+    # bundle so ARIMA, GARCH, and the remaining models are not fitted twice in
+    # the same analysis request.
+    models = (
+        dict(precomputed_models)
+        if precomputed_models is not None
+        else run_model_bundle(portfolio_returns, context=context)
+    )
     preliminary_signals = run_signal_bundle(models, context=context)
     pre_risk = float(preliminary_signals.get("risk_on_off").score if preliminary_signals.get("risk_on_off") else 0.0)
 

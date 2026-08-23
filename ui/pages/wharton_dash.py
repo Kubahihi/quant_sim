@@ -212,29 +212,50 @@ _SIMULATION_DISPLAY_PERCENTILES = (5, 10, 25, 50, 75, 90, 95)
 _SIMULATION_SAMPLE_PATH_COUNT = 50
 
 
-def _percentile_path_map(paths: np.ndarray, percentiles: list[int]) -> dict[str, np.ndarray]:
+def _percentile_path_map(
+    paths: np.ndarray,
+    percentiles: list[int],
+    *,
+    overwrite_input: bool = False,
+) -> dict[str, np.ndarray]:
     """Calculate all requested path percentiles in one partitioning pass."""
-    values = np.percentile(paths, percentiles, axis=1)
+    values = np.percentile(
+        paths,
+        percentiles,
+        axis=1,
+        overwrite_input=overwrite_input,
+    )
     return {f"p{percentile}": values[index] for index, percentile in enumerate(percentiles)}
 
 
-def _compact_simulation_paths(paths: np.ndarray) -> dict[str, Any]:
+def _compact_simulation_paths(
+    paths: np.ndarray,
+    *,
+    overwrite_input: bool = False,
+) -> dict[str, Any]:
     """Keep every displayed result without retaining the full path matrix."""
     values = np.asarray(paths, dtype=float)
     if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] < 2:
         raise ValueError("simulation paths must be a non-empty 2D matrix.")
 
-    percentile_paths = _percentile_path_map(
-        values, list(_SIMULATION_DISPLAY_PERCENTILES)
-    )
     sample_count = min(_SIMULATION_SAMPLE_PATH_COUNT, values.shape[1])
     sample_indices = np.random.default_rng(42).choice(
         values.shape[1], sample_count, replace=False
     )
+    # Preserve the chart samples and terminal distribution before allowing
+    # NumPy's percentile partitioning to reuse the soon-to-be-released path
+    # matrix. This avoids another full-size allocation for large UI runs.
+    terminal_values = values[-1].copy()
+    sample_paths = values[:, sample_indices].copy()
+    percentile_paths = _percentile_path_map(
+        values,
+        list(_SIMULATION_DISPLAY_PERCENTILES),
+        overwrite_input=overwrite_input,
+    )
     return {
         "percentile_paths": percentile_paths,
-        "terminal_values": values[-1].copy(),
-        "sample_paths": values[:, sample_indices].copy(),
+        "terminal_values": terminal_values,
+        "sample_paths": sample_paths,
         "path_count": int(values.shape[1]),
         "period_count": int(values.shape[0] - 1),
     }
@@ -3391,7 +3412,10 @@ def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
         n_simulations=n_simulations,
         random_seed=random_seed,
     )
-    simulation_artifacts = _compact_simulation_paths(price_paths)
+    simulation_artifacts = _compact_simulation_paths(
+        price_paths,
+        overwrite_input=True,
+    )
     del price_paths
     adv_price_paths, adv_simulation_stats = (
         simulation.run_advanced_monte_carlo_simulation(
@@ -3406,7 +3430,10 @@ def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
             jump_volatility=float(inputs.get("jump_volatility", 0.08)),
         )
     )
-    advanced_simulation_artifacts = _compact_simulation_paths(adv_price_paths)
+    advanced_simulation_artifacts = _compact_simulation_paths(
+        adv_price_paths,
+        overwrite_input=True,
+    )
     del adv_price_paths
     # Keep the legacy keys empty so old sessions remain readable while new
     # runs retain only chart-ready data and the exact terminal distribution.
