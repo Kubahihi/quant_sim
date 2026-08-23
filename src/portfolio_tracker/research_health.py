@@ -166,8 +166,24 @@ def assess_research_health(
             threshold_days=FRESHNESS_THRESHOLDS_DAYS["price"],
         )
 
+        decision_blockers: list[str] = []
+        if price_status != "fresh":
+            decision_blockers.append(f"price:{price_status}")
+        if thesis_review_status != "scheduled":
+            decision_blockers.append(f"thesis:{thesis_review_status}")
+        if primary_sources < 1:
+            decision_blockers.append("evidence:no_primary_source")
+        if verified_sources < 1:
+            decision_blockers.append("evidence:no_verified_source")
+        if evidence_status != "fresh":
+            decision_blockers.append(f"evidence:{evidence_status}")
+        if overdue:
+            decision_blockers.append("catalyst:outcome_overdue")
+
         row = {
             "ticker": code,
+            "decision_ready": not decision_blockers,
+            "decision_blockers": decision_blockers,
             "price_status": price_status,
             "price_observed_at": observed_at.isoformat() if observed_at else None,
             "price_source": price_source,
@@ -200,6 +216,10 @@ def assess_research_health(
         "scheduled_thesis_review_pct": 100.0 * sum(row["thesis_status"] == "scheduled" for row in rows) / count if count else 0.0,
         "evidence_coverage_pct": 100.0 * sum(row["source_count"] > 0 for row in rows) / count if count else 0.0,
         "primary_source_coverage_pct": 100.0 * sum(row["primary_source_count"] > 0 for row in rows) / count if count else 0.0,
+        "verified_source_coverage_pct": 100.0 * sum(row["verified_source_count"] > 0 for row in rows) / count if count else 0.0,
+        "decision_ready_count": sum(bool(row["decision_ready"]) for row in rows),
+        "decision_ready_ticker_pct": 100.0 * sum(bool(row["decision_ready"]) for row in rows) / count if count else 0.0,
+        "blocking_issue_count": sum(len(row["decision_blockers"]) for row in rows),
         "overdue_thesis_count": sum(row["thesis_status"] == "overdue" for row in rows),
         "overdue_catalyst_count": sum(int(row["overdue_catalysts"]) for row in rows),
         "review_queue_count": len(review_queue),
@@ -211,7 +231,11 @@ def assess_research_health(
         "review_queue": review_queue,
         "freshness_thresholds_days": dict(FRESHNESS_THRESHOLDS_DAYS),
         "macro_policy": "Reference-year locked; macro observations are labelled by year rather than scored as stale.",
-        "methodology": "Factual coverage and review status only; no investment or return score is produced.",
+        "methodology": (
+            "Decision-ready means a fresh price, a scheduled thesis review, current primary "
+            "and independently verified evidence, and no overdue catalyst outcome. It is an "
+            "input-quality gate, not an investment or return score."
+        ),
     }
 
 

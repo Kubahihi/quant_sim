@@ -364,7 +364,9 @@ forecast accuracy. The module includes:
 - Monte Carlo convergence error, an analytic GBM cross-check and reproducible
   seeded runs;
 - skewness, excess kurtosis, normality and lag-1 dependence diagnostics;
-- a causal walk-forward baseline with turnover and transaction costs;
+- a causal walk-forward baseline plus rolling portfolio re-optimization with
+  turnover costs, an equal-weight comparator, and optional lagged point-in-time
+  universe control;
 - explicit validation gates and limitations for a competition presentation.
 
 The score is **not an official Wharton rating or endorsement**. QuantSim is

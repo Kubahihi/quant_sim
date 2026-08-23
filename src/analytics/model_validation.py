@@ -6,6 +6,7 @@ accuracy and not affiliation with or endorsement by Wharton.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Dict
 
 import numpy as np
@@ -158,10 +159,161 @@ def _gate(name: str, status: str, points: float, maximum: float, evidence: str) 
     }
 
 
+def _accuracy_evidence(
+    backtest: Mapping[str, Any],
+    optimization_validation: Mapping[str, Any],
+    *,
+    data_snapshot_id: str,
+) -> dict[str, Any]:
+    """Summarize decision-use evidence without inventing a predictive score."""
+    optimization_windows = optimization_validation.get("windows")
+    has_optimization_windows = bool(
+        isinstance(optimization_windows, list) and optimization_windows
+    )
+    optimization_success = bool(optimization_validation.get("success"))
+    optimization_causal = bool(optimization_validation.get("causal"))
+    backtest_causal = bool(backtest.get("lookahead_safe"))
+    causal_evidence = optimization_causal and has_optimization_windows or backtest_causal
+
+    optimization_metrics = optimization_validation.get("metrics")
+    has_cost_model = bool(
+        isinstance(optimization_metrics, Mapping)
+        and optimization_metrics.get("transaction_cost_drag") is not None
+    ) or bool(
+        isinstance(backtest.get("parameters"), Mapping)
+        and backtest["parameters"].get("transaction_cost_bps") is not None
+    )
+    has_comparator = bool(
+        isinstance(optimization_validation.get("equal_weight_metrics"), Mapping)
+        and optimization_validation["equal_weight_metrics"].get("annualized_return")
+        is not None
+    )
+    point_in_time = bool(optimization_validation.get("survivorship_bias_controlled"))
+    full_ensemble = bool(backtest.get("full_model_ensemble"))
+    untouched_holdout = bool(
+        optimization_validation.get("untouched_holdout")
+        or backtest.get("untouched_holdout")
+    )
+    multiple_testing = bool(
+        optimization_validation.get("multiple_testing_control")
+        or backtest.get("multiple_testing_control")
+    )
+
+    checks = [
+        {
+            "key": "causal_oos",
+            "label": "Causal out-of-sample evaluation",
+            "status": (
+                "pass"
+                if optimization_success and optimization_causal and has_optimization_windows
+                else "partial"
+                if causal_evidence
+                else "gap"
+            ),
+            "evidence": (
+                f"{len(optimization_windows)} rolling optimization windows."
+                if optimization_success and optimization_causal and has_optimization_windows
+                else "Rolling validation exists, but at least one validation window failed."
+                if optimization_causal and has_optimization_windows
+                else str(backtest.get("scope") or "No causal out-of-sample evidence.")
+            ),
+        },
+        {
+            "key": "after_costs",
+            "label": "Transaction costs included",
+            "status": "pass" if has_cost_model else "gap",
+            "evidence": (
+                "Reported results deduct configured turnover costs."
+                if has_cost_model
+                else "No after-cost result is attached."
+            ),
+        },
+        {
+            "key": "comparator",
+            "label": "Simple after-cost comparator",
+            "status": "pass" if has_comparator else "gap",
+            "evidence": (
+                "Equal-weight after-cost metrics are attached."
+                if has_comparator
+                else "No investable simple comparator is attached."
+            ),
+        },
+        {
+            "key": "point_in_time_universe",
+            "label": "Point-in-time universe",
+            "status": "pass" if point_in_time else "partial" if causal_evidence else "gap",
+            "evidence": (
+                "Membership is lagged and survivorship bias is controlled."
+                if point_in_time
+                else "Causal returns are available, but current-universe survivorship bias remains."
+                if causal_evidence
+                else "No point-in-time membership evidence."
+            ),
+        },
+        {
+            "key": "frozen_snapshot",
+            "label": "Frozen input snapshot",
+            "status": "pass" if data_snapshot_id else "gap",
+            "evidence": (
+                f"Input snapshot recorded: {data_snapshot_id}."
+                if data_snapshot_id
+                else "No input snapshot identifier is attached to this run."
+            ),
+        },
+        {
+            "key": "full_ensemble",
+            "label": "Full model ensemble refit",
+            "status": "pass" if full_ensemble else "partial" if optimization_causal else "gap",
+            "evidence": (
+                "The full model and signal bundle is refit in every training fold."
+                if full_ensemble
+                else "Portfolio construction is re-estimated, but the full model/signal bundle is not refit in every fold."
+                if optimization_causal
+                else "Only a causal baseline is evaluated; the current-state model bundle is not validated."
+            ),
+        },
+        {
+            "key": "untouched_holdout",
+            "label": "Untouched final holdout",
+            "status": "pass" if untouched_holdout else "gap",
+            "evidence": (
+                "A reserved final holdout is identified."
+                if untouched_holdout
+                else "No untouched final holdout is recorded."
+            ),
+        },
+        {
+            "key": "multiple_testing",
+            "label": "Multiple-testing control",
+            "status": "pass" if multiple_testing else "gap",
+            "evidence": (
+                "A multiple-testing correction is attached."
+                if multiple_testing
+                else "No correction for model or strategy selection is attached."
+            ),
+        },
+    ]
+    counts = {
+        status: sum(item["status"] == status for item in checks)
+        for status in ("pass", "partial", "gap")
+    }
+    return {
+        "checks": checks,
+        "counts": counts,
+        "decision_use": (
+            "validated_forecast_candidate"
+            if counts["gap"] == 0 and counts["partial"] == 0
+            else "decision_support_only"
+        ),
+    }
+
+
 def build_model_validation_report(
     portfolio_returns: pd.Series,
     simulation_stats: Dict[str, Any] | None = None,
     backtest: Dict[str, Any] | None = None,
+    optimization_validation: Dict[str, Any] | None = None,
+    data_snapshot_id: str | None = None,
     risk_free_rate: float = 0.03,
     n_bootstrap: int = 600,
     random_seed: int = 1729,
@@ -178,6 +330,8 @@ def build_model_validation_report(
     distribution = distribution_diagnostics(clean)
     simulation = dict(simulation_stats or {})
     backtest_data = dict(backtest or {})
+    optimization_data = dict(optimization_validation or {})
+    snapshot_id = str(data_snapshot_id or "").strip()
     gates: list[Dict[str, Any]] = []
 
     if n >= 756:
@@ -233,8 +387,43 @@ def build_model_validation_report(
     gates.append(_gate("Distribution/model risk", distribution_status, distribution_points, 15, distribution_evidence))
 
     validation_type = str(backtest_data.get("validation_type", "unknown"))
+    optimization_validation_type = str(
+        optimization_data.get("validation_type", "unknown")
+    )
+    optimization_windows = optimization_data.get("windows")
+    optimization_has_causal_windows = bool(optimization_data.get("causal")) and bool(
+        isinstance(optimization_windows, list) and optimization_windows
+    )
+    optimization_is_causal = bool(optimization_data.get("success")) and optimization_has_causal_windows
+    optimization_has_comparator = bool(
+        isinstance(optimization_data.get("equal_weight_metrics"), Mapping)
+        and optimization_data["equal_weight_metrics"].get("annualized_return")
+        is not None
+    )
+    optimization_is_point_in_time = bool(
+        optimization_data.get("survivorship_bias_controlled")
+    )
     is_causal = bool(backtest_data.get("lookahead_safe", False))
-    if is_causal and validation_type == "walk_forward_causal_baseline":
+    if optimization_is_causal and optimization_is_point_in_time and optimization_has_comparator:
+        backtest_points, backtest_status = 18.0, "pass"
+        backtest_evidence = (
+            f"{len(optimization_windows)} point-in-time rolling re-optimization windows "
+            "with turnover costs and an equal-weight comparator; an untouched holdout and "
+            "full model-ensemble refit are still absent."
+        )
+    elif optimization_is_causal:
+        backtest_points, backtest_status = 15.0, "warning"
+        backtest_evidence = (
+            f"{len(optimization_windows)} rolling re-optimization windows include costs, "
+            "but the universe is not point-in-time or the simple comparator is missing."
+        )
+    elif optimization_has_causal_windows:
+        backtest_points, backtest_status = 10.0, "warning"
+        backtest_evidence = (
+            f"Rolling re-optimization produced {len(optimization_windows)} windows, "
+            "but at least one window failed; treat the result as incomplete evidence."
+        )
+    elif is_causal and validation_type == "walk_forward_causal_baseline":
         backtest_points, backtest_status = 15.0, "warning"
         backtest_evidence = "Causal walk-forward baseline is available, but it does not validate the full ensemble."
     elif is_causal:
@@ -255,6 +444,11 @@ def build_model_validation_report(
     ))
 
     score = float(sum(float(item["points"]) for item in gates))
+    accuracy_evidence = _accuracy_evidence(
+        backtest_data,
+        optimization_data,
+        data_snapshot_id=snapshot_id,
+    )
     if score >= 85:
         band = "research_ready"
         verdict = "Strong research workflow; complete full-ensemble walk-forward validation before claiming predictive accuracy."
@@ -268,16 +462,37 @@ def build_model_validation_report(
         band = "prototype"
         verdict = "Prototype evidence only; do not rely on point estimates for investment decisions."
 
-    limitations = [
+    presentation_caveats = [
         "The methodology score is not predictive hit rate and is not a Wharton endorsement.",
         "Historical estimates are sensitive to the selected sample and market regime.",
         "GBM does not model jumps, stochastic volatility, liquidity, taxes, or transaction costs.",
-        "The causal backtest is a baseline; the full model ensemble still needs nested walk-forward validation.",
     ]
+    limitations = [*presentation_caveats]
+    evidence_status = {
+        item["key"]: item["status"] for item in accuracy_evidence["checks"]
+    }
+    if evidence_status["full_ensemble"] != "pass":
+        limitations.append(
+            "The full model ensemble still needs nested walk-forward validation."
+        )
+    if evidence_status["point_in_time_universe"] != "pass":
+        limitations.append(
+            "Current-universe testing can retain survivorship and selection bias."
+        )
+    if evidence_status["untouched_holdout"] != "pass":
+        limitations.append("No untouched final holdout is attached to this run.")
+    if evidence_status["multiple_testing"] != "pass":
+        limitations.append(
+            "Model and strategy selection is not corrected for multiple testing."
+        )
     if rejects_normality:
-        limitations.append("Historical returns reject normality at 5%; Gaussian tail estimates may be optimistic.")
+        caveat = "Historical returns reject normality at 5%; Gaussian tail estimates may be optimistic."
+        limitations.append(caveat)
+        presentation_caveats.append(caveat)
     if n < 504:
-        limitations.append("Fewer than two years of aligned observations weakens parameter stability.")
+        caveat = "Fewer than two years of aligned observations weakens parameter stability."
+        limitations.append(caveat)
+        presentation_caveats.append(caveat)
 
     return {
         "methodology_score": score,
@@ -288,11 +503,15 @@ def build_model_validation_report(
         "gates": gates,
         "metric_intervals": intervals,
         "distribution": distribution,
+        "accuracy_evidence": accuracy_evidence,
         "limitations": limitations,
+        "presentation_caveats": presentation_caveats,
         "generated_with": {
             "bootstrap_resamples": int(n_bootstrap),
             "bootstrap_seed": int(random_seed),
             "simulation_model": model_name,
             "backtest_validation_type": validation_type,
+            "optimization_validation_type": optimization_validation_type,
+            "data_snapshot_id": snapshot_id or None,
         },
     }

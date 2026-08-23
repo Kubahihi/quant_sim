@@ -21,7 +21,7 @@ The 100-point methodology score is the sum of six visible gates:
 | Parameter uncertainty | 20 | Moving-block bootstrap intervals |
 | Simulation convergence | 15 | Relative standard error of terminal mean |
 | Distribution/model risk | 15 | GBM assumptions versus sample diagnostics |
-| Out-of-sample process | 20 | Causal walk-forward evidence and its scope |
+| Out-of-sample process | 20 | Causal rolling evidence, costs, comparator, and universe scope |
 | Reproducibility | 10 | Recorded deterministic simulation seed |
 
 Bands are interpreted as follows:
@@ -62,13 +62,28 @@ liquidity shocks or changing correlations.
 
 The old dashboard replayed one full-sample model score across the same history.
 Lagging that constant exposure by one day did not make the score genuinely
-out-of-sample. The production pipeline now uses a causal walk-forward baseline:
-each position uses data available strictly before that return, turnover is
-measured, and transaction costs are deducted.
+out-of-sample. The production pipeline now keeps two existing evidence layers
+in one report rather than creating a second validation path:
 
-This baseline validates the process plumbing and provides an honest comparator.
-It does **not** validate the full model ensemble. That limitation is displayed
-in the UI and caps the out-of-sample gate at 15 of 20 points.
+- the causal trend/risk baseline verifies signal timing and transaction-cost
+  plumbing;
+- the rolling portfolio optimizer re-estimates inputs and target weights inside
+  each training window, charges turnover costs, and reports an equal-weight
+  after-cost comparator. When lagged point-in-time membership is supplied, it
+  also controls the principal survivorship-bias path.
+
+Point-in-time rolling re-optimization can earn 18 of 20 points. It still does
+**not** validate the full current-state model and signal bundle, reserve an
+untouched final holdout, or correct selection across many tried specifications.
+Those limitations remain explicit rather than being hidden inside the score.
+
+### Accuracy evidence checklist
+
+The report displays one non-scoring checklist for causal OOS evidence, costs,
+simple comparator, point-in-time membership, frozen input snapshot, full-bundle
+refitting, untouched holdout, and multiple-testing control. This checklist does
+not create another readiness score. It separates numerical reproducibility from
+evidence about future performance and identifies the next missing proof.
 
 ## What is still needed before claiming predictive accuracy
 

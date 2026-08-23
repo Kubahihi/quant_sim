@@ -47,8 +47,17 @@ def test_research_health_reports_factual_coverage_and_review_queue():
     assert result["summary"]["thesis_coverage_pct"] == 50.0
     assert result["summary"]["evidence_coverage_pct"] == 50.0
     assert result["summary"]["primary_source_coverage_pct"] == 50.0
+    assert result["summary"]["verified_source_coverage_pct"] == 50.0
+    assert result["summary"]["decision_ready_count"] == 1
+    assert result["summary"]["decision_ready_ticker_pct"] == 50.0
     assert result["summary"]["overdue_catalyst_count"] == 1
+    aaa = next(row for row in result["tickers"] if row["ticker"] == "AAA")
+    assert aaa["decision_ready"] is True
+    assert aaa["decision_blockers"] == []
     bbb = next(row for row in result["tickers"] if row["ticker"] == "BBB")
+    assert bbb["decision_ready"] is False
+    assert "evidence:no_primary_source" in bbb["decision_blockers"]
+    assert "evidence:no_verified_source" in bbb["decision_blockers"]
     assert bbb["price_status"] == "review_due"
     assert bbb["thesis_status"] == "missing"
     assert bbb["evidence_status"] == "missing"
@@ -63,6 +72,7 @@ def test_macro_is_year_labelled_and_no_composite_investment_score_is_returned():
     assert "reference-year locked" in result["macro_policy"].lower()
     assert "score" not in result
     assert result["summary"]["ticker_count"] == 0
+    assert result["summary"]["decision_ready_ticker_pct"] == 0.0
 
 
 def test_future_dates_are_not_silently_treated_as_fresh():
