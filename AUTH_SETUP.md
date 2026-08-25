@@ -236,6 +236,15 @@ Tests cover:
 4. **Input Validation**: All inputs are validated before processing
 5. **SQL Injection Protection**: Parameterized queries prevent SQL injection
 
+### Wharton Judge View
+
+The Wharton Cockpit can expose a separate read-only evaluator account by
+setting `WHARTON_JUDGE_PASSWORD` in Streamlit Secrets. The login name is
+`judge`. Its password must be 10-72 UTF-8 bytes and different from every team
+password. The judge account never inherits `WHARTON_SHARED_PASSWORD` or the
+legacy `WHARTON_PASSWORD`, and it is not included in the team roster,
+committee voting, approvals, or task assignment.
+
 ## Troubleshooting
 
 ### "Database locked" error

@@ -13,7 +13,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import uuid
 import secrets
 
@@ -87,7 +87,9 @@ from ui.runtime_diagnostics import resolve_build_identity
 # incomplete so a rolling deployment cannot mix the two revisions.
 _WHARTON_CREDENTIAL_EXPORTS = (
     "REQUIRED_WHARTON_USERS",
+    "WHARTON_JUDGE_USERNAME",
     "WhartonCredentialConfigError",
+    "resolve_wharton_judge_credential",
     "resolve_wharton_credentials",
 )
 if not all(hasattr(_wharton_credentials, name) for name in _WHARTON_CREDENTIAL_EXPORTS):
@@ -104,7 +106,9 @@ if not all(hasattr(_wharton_credentials, name) for name in _WHARTON_CREDENTIAL_E
         _wharton_credentials.WhartonCredentialConfigError = _existing_config_error
 
 REQUIRED_WHARTON_USERS = _wharton_credentials.REQUIRED_WHARTON_USERS
+WHARTON_JUDGE_USERNAME = _wharton_credentials.WHARTON_JUDGE_USERNAME
 WhartonCredentialConfigError = _wharton_credentials.WhartonCredentialConfigError
+resolve_wharton_judge_credential = _wharton_credentials.resolve_wharton_judge_credential
 resolve_wharton_credentials = _wharton_credentials.resolve_wharton_credentials
 
 
@@ -300,6 +304,13 @@ DEFAULT_USERS = [
     {"username": "Matěj", "role": "Co-Captain", "primary_module": "Dashboard & Strategy"},
 ]
 
+JUDGE_USER = {
+    "username": WHARTON_JUDGE_USERNAME,
+    "role": "Judge",
+    "primary_module": "Judge View",
+}
+LOGIN_USERS = [*DEFAULT_USERS, JUDGE_USER]
+
 assert tuple(user["username"] for user in DEFAULT_USERS) == REQUIRED_WHARTON_USERS
 
 LEGACY_USERS = {"Alexandra", "Janek", "Matfyz_Genius"}
@@ -411,7 +422,7 @@ def _synchronize_seeded_users(
     conn: sqlite3.Connection,
     seeded_passwords: Mapping[str, str],
 ) -> None:
-    """Upsert fixed team accounts with one bcrypt check per distinct password."""
+    """Upsert fixed login accounts with one bcrypt check per password."""
     existing_users = {
         str(row["username"]): str(row["password_hash"] or "")
         for row in conn.execute(
@@ -420,8 +431,14 @@ def _synchronize_seeded_users(
     }
     verified_hash_by_password: dict[str, str] = {}
 
-    for user in DEFAULT_USERS:
+    for user in LOGIN_USERS:
         username = str(user["username"])
+        if username not in seeded_passwords:
+            # Removing the dedicated judge secret revokes that account without
+            # affecting any team login.
+            if username == WHARTON_JUDGE_USERNAME and username in existing_users:
+                conn.execute("DELETE FROM wharton_users WHERE username = ?", (username,))
+            continue
         password = str(seeded_passwords[username])
         password_hash = verified_hash_by_password.get(password)
         if password_hash is None:
@@ -472,6 +489,15 @@ def _initialize_database() -> None:
         secret_values,
         production=not _is_development_mode(),
     )
+    judge_password = resolve_wharton_judge_credential(
+        secret_values,
+        team_credentials=seeded_passwords,
+    )
+    if judge_password is not None:
+        seeded_passwords = {
+            **seeded_passwords,
+            WHARTON_JUDGE_USERNAME: judge_password,
+        }
 
     with get_connection() as conn:
         from src.analytics.macro_snapshot_store import init_macro_snapshot_table
@@ -837,7 +863,9 @@ def _development_database_signature() -> str:
         credential_inputs = {
             "WHARTON_SHARED_PASSWORD": secret_values.get("WHARTON_SHARED_PASSWORD"),
             "WHARTON_PASSWORD": secret_values.get("WHARTON_PASSWORD"),
+            "WHARTON_JUDGE_PASSWORD": secret_values.get("WHARTON_JUDGE_PASSWORD"),
             "nested_shared": nested_users.get("WHARTON_PASSWORD"),
+            "nested_judge": nested_users.get(WHARTON_JUDGE_USERNAME),
             "users": {
                 username: nested_users.get(username)
                 for username in REQUIRED_WHARTON_USERS
@@ -941,11 +969,72 @@ def authenticate_user(username: str, password: str) -> dict[str, str | int] | No
     }
 
 
+def _configured_judge_password() -> str | None:
+    """Resolve the dedicated judge secret, failing closed on any unsafe config."""
+    try:
+        secret_values = st.secrets
+        team_credentials = resolve_wharton_credentials(
+            secret_values,
+            production=not _is_development_mode(),
+        )
+        return resolve_wharton_judge_credential(
+            secret_values,
+            team_credentials=team_credentials,
+        )
+    except Exception:
+        return None
+
+
+def _judge_session_is_current(profile: Mapping[str, Any]) -> bool:
+    """Revalidate the exceptional read-only account on every page run."""
+    judge_password = _configured_judge_password()
+    if judge_password is None:
+        return False
+    try:
+        profile_id = int(profile.get("id"))
+    except (TypeError, ValueError):
+        return False
+    try:
+        with get_connection() as conn:
+            user = conn.execute(
+                "SELECT id, username, password_hash, role, primary_module "
+                "FROM wharton_users WHERE username = ?",
+                (WHARTON_JUDGE_USERNAME,),
+            ).fetchone()
+    except Exception:
+        LOGGER.warning("The active judge session could not be revalidated.")
+        return False
+    return bool(
+        user is not None
+        and int(user["id"]) == profile_id
+        and str(user["username"]) == WHARTON_JUDGE_USERNAME
+        and str(user["role"]) == str(JUDGE_USER["role"])
+        and str(user["primary_module"]) == str(JUDGE_USER["primary_module"])
+        and _bcrypt_password_matches(judge_password, str(user["password_hash"] or ""))
+    )
+
+
 def _get_current_profile() -> dict[str, str | int] | None:
     profile = st.session_state.get(USER_PROFILE_KEY)
     if isinstance(profile, dict) and profile.get("username"):
+        if _is_judge_profile(profile) and not _judge_session_is_current(profile):
+            st.session_state.pop(USER_PROFILE_KEY, None)
+            return None
         return profile
     return None
+
+
+def _is_judge_profile(profile: Mapping[str, Any] | None) -> bool:
+    return bool(
+        isinstance(profile, Mapping)
+        and str(profile.get("username") or "").strip()
+        == WHARTON_JUDGE_USERNAME
+    )
+
+
+def _judge_credential_configured() -> bool:
+    """Return whether the dedicated judge login should be offered."""
+    return _configured_judge_password() is not None
 
 
 def _logout() -> None:
@@ -986,7 +1075,10 @@ def _render_login() -> None:
     # The team roster is static configuration, so the anonymous landing page
     # does not need a remote database connection.  Database/schema setup is
     # deferred until a user actually submits the form.
-    usernames = [str(user["username"]) for user in DEFAULT_USERS]
+    login_users = (
+        LOGIN_USERS if _judge_credential_configured() else DEFAULT_USERS
+    )
+    usernames = [str(user["username"]) for user in login_users]
     if not usernames:
         st.error("No users configured. Restart the app.")
         st.stop()
@@ -997,7 +1089,7 @@ def _render_login() -> None:
             """
             <div class="wharton-login-header">
               <h1>Wharton Cockpit</h1>
-              <p>Sign in to your team workspace.</p>
+              <p>Sign in to the Wharton workspace.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1005,7 +1097,7 @@ def _render_login() -> None:
         _render_build_fingerprint()
         with st.form("wharton_login_form", clear_on_submit=False):
             username = st.selectbox(
-                "Team member",
+                "Account",
                 options=usernames,
                 key="wharton_login_username",
             )
@@ -6083,7 +6175,10 @@ def _strategy_rows(value: Any, key_label: str) -> list[dict[str, Any]]:
     return []
 
 
-def _load_strategy_workspace_data() -> dict[str, Any]:
+def _load_strategy_workspace_data(
+    *,
+    include_all_universe: bool = False,
+) -> dict[str, Any]:
     from src.portfolio_tracker.canonical_compat import (
         list_canonical_first_approved_securities,
         list_canonical_first_holding_theses,
@@ -6100,7 +6195,10 @@ def _load_strategy_workspace_data() -> dict[str, Any]:
             "strategy_record": get_active_strategy_version(conn),
             "strategy_versions": list_strategy_versions(conn),
             "theses": list_canonical_first_holding_theses(conn),
-            "approved_securities": list_canonical_first_approved_securities(conn),
+            "approved_securities": list_canonical_first_approved_securities(
+                conn,
+                approved_only=None if include_all_universe else True,
+            ),
         }
 
 
@@ -12489,6 +12587,469 @@ def _render_cockpit_navigation(profile: dict[str, Any], visible_labels: list[str
     return active_panel
 
 
+def _judge_pipeline_reconciliation_record(
+    pipeline: Mapping[str, Any],
+    legacy_record: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project the authoritative pipeline gate into readiness/reporting shape."""
+    gate = pipeline.get("reconciliation_gate")
+    if not isinstance(gate, Mapping):
+        return dict(legacy_record or {})
+    reconciliation_id = gate.get("latest_reconciliation_id")
+    if not reconciliation_id:
+        return {}
+    blockers = gate.get("blockers", [])
+    blocker_list = (
+        [str(item) for item in blockers if str(item).strip()]
+        if isinstance(blockers, Sequence)
+        and not isinstance(blockers, (str, bytes, bytearray))
+        else []
+    )
+    canonical = pipeline.get("canonical_snapshot")
+    canonical_record = canonical if isinstance(canonical, Mapping) else {}
+    ready = gate.get("ready") is True
+    return {
+        "payload": {
+            "status": "reconciled" if ready else "blocked",
+            "ready": ready,
+            "reconciliation_id": str(reconciliation_id),
+            "wins_snapshot_id": gate.get("wins_snapshot_id"),
+            "open_exception_count": int(gate.get("open_exception_count") or 0),
+            "blockers": blocker_list,
+            "as_of": gate.get("signed_off_at")
+            or canonical_record.get("observed_at"),
+            "source": "portfolio_pipeline_reconciliation_gate",
+        }
+    }
+
+
+def _judge_json_value(value: Any, default: Any) -> Any:
+    """Decode one saved JSON value for the read-only judge projection."""
+    if isinstance(value, (Mapping, list)):
+        return value
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
+    return decoded
+
+
+def _load_shared_quant_run_records() -> list[dict[str, Any]]:
+    """Read legacy shared Quant history without creating or changing files."""
+    history_dir = Path(PROJECT_ROOT) / "data" / "run_history"
+    if not history_dir.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(history_dir.glob("*.json"), reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, Mapping):
+            records.append(dict(payload))
+    return records
+
+
+def _load_judge_view_data() -> dict[str, Any]:
+    """Load the governed competition record without mutating it.
+
+    Judge View intentionally avoids live market-data calls. Its portfolio
+    authority is resolved later by the pure model builder so every displayed
+    number retains an explicit snapshot source.
+    """
+    from src.portfolio_tracker.competition_audit import (
+        list_ai_usage,
+        list_red_team_reviews,
+    )
+    from src.portfolio_tracker.competition_readiness import (
+        build_competition_readiness,
+        build_pitch_question_bank,
+    )
+    from src.portfolio_tracker.authoritative_universe_store import (
+        get_active_authoritative_universe,
+        list_authoritative_universe_snapshots,
+    )
+    from src.portfolio_tracker.governance_store import (
+        list_catalyst_events,
+        list_decision_reviews,
+        list_research_sources,
+        list_thesis_reviews,
+    )
+    from src.portfolio_tracker.investment_lifecycle_store import (
+        list_investment_lifecycles,
+    )
+    from src.portfolio_tracker.judge_view import build_judge_view_model
+    from src.portfolio_tracker.operating_system_store import (
+        get_current_record,
+        list_current_records,
+        list_events,
+    )
+    from src.portfolio_tracker.portfolio_pipeline import (
+        build_live_portfolio_pipeline,
+    )
+    from src.portfolio_tracker.wharton_competition import (
+        calculate_portfolio_performance,
+        evaluate_compliance,
+    )
+    from src.portfolio_tracker.security_dossier_store import (
+        list_dossier_versions,
+        list_kpi_definitions,
+        list_kpi_observations,
+        list_security_dossiers,
+    )
+    from src.portfolio_tracker.strategy_store import list_company_research
+    from src.reporting.evidence_studio import validate_report_workspace
+
+    strategy_data = _load_strategy_workspace_data(include_all_universe=True)
+    with get_connection() as conn:
+        sources = list_research_sources(conn)
+        catalysts = list_catalyst_events(conn)
+        thesis_reviews = list_thesis_reviews(conn)
+        decision_reviews = list_decision_reviews(conn)
+        red_team_reviews = list_red_team_reviews(conn)
+        ai_usage = list_ai_usage(conn)
+        investment_cases = list_investment_lifecycles(conn)
+        qa_rounds = [
+            item["payload"]
+            for item in list_current_records(conn, "qa_round")
+            if isinstance(item.get("payload"), Mapping)
+        ]
+        qa_workspace_records = list_current_records(conn, "qa_workspace")
+        qa_workspace = qa_workspace_records[0] if qa_workspace_records else None
+        reconciliation_record = get_current_record(
+            conn,
+            "workspace",
+            "latest_reconciliation",
+        )
+        report_record = get_current_record(conn, "report_workspace", "final")
+        rules_record = get_current_record(conn, "workspace", "latest_rules")
+        pipeline_record = get_current_record(
+            conn,
+            "portfolio_pipeline",
+            "competition",
+        )
+        settings_row = conn.execute(
+            "SELECT * FROM competition_compliance WHERE id = 1"
+        ).fetchone()
+        position_rows = conn.execute(
+            "SELECT * FROM competition_positions ORDER BY entry_date, id"
+        ).fetchall()
+        tasks = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM tasks ORDER BY is_done, due_date, id"
+            ).fetchall()
+        ]
+        subprojects = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM subprojects ORDER BY status, due_date, id"
+            ).fetchall()
+        ]
+        subproject_files = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT sf.id, sf.subproject_id, sf.file_id,
+                       COALESCE(NULLIF(f.original_filename, ''), f.filename) AS filename
+                FROM subproject_files sf
+                LEFT JOIN files f ON f.id = sf.file_id
+                ORDER BY sf.subproject_id, sf.id
+                """
+            ).fetchall()
+        ]
+        file_register = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, timestamp, filename, original_filename, uploaded_by,
+                       file_size_bytes, mime_type, project_name, description, tags
+                FROM files ORDER BY timestamp DESC, id DESC
+                """
+            ).fetchall()
+        ]
+        chat = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT id, timestamp, username, message FROM chat ORDER BY id"
+            ).fetchall()
+        ]
+        mindmap_nodes = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT id, label, type FROM mindmap_nodes ORDER BY id"
+            ).fetchall()
+        ]
+        mindmap_edges = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT id, source, target FROM mindmap_edges ORDER BY id"
+            ).fetchall()
+        ]
+        raw_decision_rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM decision_log ORDER BY date DESC, id DESC"
+            ).fetchall()
+        ]
+        decision_edits = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM decision_edit_log ORDER BY edited_at DESC, id DESC"
+            ).fetchall()
+        ]
+        macro_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT economy_code, reference_year, schema_version, payload_json,
+                       fetched_at, stored_at, expires_at
+                FROM macro_snapshots
+                ORDER BY reference_year DESC, economy_code
+                """
+            ).fetchall()
+        ]
+        company_research = list_company_research(conn)
+        security_dossiers: list[dict[str, Any]] = []
+        for dossier in list_security_dossiers(conn):
+            dossier_id = int(dossier["id"])
+            security_dossiers.append(
+                {
+                    **dossier,
+                    "versions": list_dossier_versions(conn, dossier_id),
+                    "kpi_definitions": list_kpi_definitions(conn, dossier_id),
+                    "kpi_observations": list_kpi_observations(conn, dossier_id),
+                }
+            )
+        active_universe = get_active_authoritative_universe(conn)
+        universe_history = list_authoritative_universe_snapshots(conn)
+        operating_record_types = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT record_type FROM investment_os_records ORDER BY record_type"
+            ).fetchall()
+        ]
+        operating_records = [
+            item
+            for record_type in operating_record_types
+            for item in list_current_records(conn, record_type)
+        ]
+        operating_aggregates = [
+            (str(row[0]), str(row[1]))
+            for row in conn.execute(
+                """
+                SELECT DISTINCT aggregate_type, aggregate_id
+                FROM investment_os_events
+                ORDER BY aggregate_type, aggregate_id
+                """
+            ).fetchall()
+        ]
+        operating_events = [
+            item
+            for aggregate_type, aggregate_id in operating_aggregates
+            for item in list_events(conn, aggregate_type, aggregate_id)
+        ]
+
+    settings = dict(settings_row) if settings_row else {}
+    decision_log: list[dict[str, Any]] = []
+    quant_snapshots: list[dict[str, Any]] = []
+    for row in raw_decision_rows:
+        item = dict(row)
+        raw_snapshot = item.pop("quant_snapshot_json", None)
+        quant_snapshot = _judge_json_value(raw_snapshot, {})
+        item["quant_snapshot"] = quant_snapshot
+        decision_log.append(item)
+        if isinstance(quant_snapshot, Mapping) and quant_snapshot:
+            quant_snapshots.append(
+                {
+                    "decision_id": item.get("id"),
+                    "ticker": item.get("ticker"),
+                    "decision_date": item.get("date"),
+                    "snapshot": dict(quant_snapshot),
+                }
+            )
+    macro_snapshots: list[dict[str, Any]] = []
+    for row in macro_rows:
+        item = dict(row)
+        payload = _judge_json_value(item.pop("payload_json", None), {})
+        item["payload"] = payload if isinstance(payload, Mapping) else {}
+        macro_snapshots.append(item)
+    tracker_positions = _settled_competition_positions(
+        [dict(row) for row in position_rows]
+    )
+    tracker_performance = calculate_portfolio_performance(
+        tracker_positions,
+        live_prices={},
+    )
+    compliance_checks = evaluate_compliance(settings, tracker_positions)
+
+    raw_pipeline_workspace = (
+        (pipeline_record or {}).get("payload", {})
+        if isinstance(pipeline_record, Mapping)
+        else {}
+    )
+    pipeline_workspace = (
+        raw_pipeline_workspace
+        if isinstance(raw_pipeline_workspace, Mapping)
+        else {}
+    )
+    try:
+        pipeline = build_live_portfolio_pipeline(
+            pipeline_workspace.get("snapshots", []),
+            pipeline_workspace.get(
+                "ledger",
+                {"reconciliations": [], "events": []},
+            ),
+            mandate=_strategy_payload(strategy_data.get("mandate_record")),
+            rulebook=_strategy_payload(strategy_data.get("strategy_record")),
+            expected_return_assumptions=pipeline_workspace.get(
+                "expected_return_assumptions",
+                {},
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        LOGGER.warning("Judge portfolio pipeline could not be built: %s", exc)
+        pipeline = {
+            "status": "unavailable",
+            "authority": "none",
+            "canonical_snapshot": None,
+            "reason_codes": ["invalid_pipeline_record"],
+        }
+
+    reconciliation_record = _judge_pipeline_reconciliation_record(
+        pipeline,
+        reconciliation_record,
+    )
+
+    raw_report_payload = (
+        (report_record or {}).get("payload", {})
+        if isinstance(report_record, Mapping)
+        else {}
+    )
+    report_payload = (
+        raw_report_payload
+        if isinstance(raw_report_payload, Mapping)
+        else {}
+    )
+    report_validation: dict[str, Any] = {}
+    if isinstance(report_payload, Mapping) and report_payload:
+        try:
+            report_validation = validate_report_workspace(report_payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            LOGGER.warning("Judge report validation could not be completed: %s", exc)
+            report_validation = {
+                "is_ready": False,
+                "issue_count": 1,
+                "issues": [
+                    {
+                        "code": "invalid_report_record",
+                        "message": "The saved report record could not be validated.",
+                    }
+                ],
+            }
+
+    readiness = build_competition_readiness(
+        mandate=strategy_data.get("mandate_record"),
+        strategy=strategy_data.get("strategy_record"),
+        theses=strategy_data.get("theses", []),
+        sources=sources,
+        catalysts=catalysts,
+        thesis_reviews=thesis_reviews,
+        red_team_reviews=red_team_reviews,
+        ai_usage=ai_usage,
+        investment_cases=investment_cases,
+        reconciliation=_strategy_payload(reconciliation_record),
+        report_workspace=report_payload,
+        qa_sessions=qa_rounds,
+        rules_snapshot=(rules_record or {}).get("payload", {}),
+    )
+    questions = build_pitch_question_bank(readiness)
+    app_record = {
+        "mandate_record": strategy_data.get("mandate_record"),
+        "collaboration": {
+            "tasks": tasks,
+            "subprojects": subprojects,
+            "subproject_files": subproject_files,
+            "files": file_register,
+            "chat": chat,
+            "mindmap": {
+                "nodes": mindmap_nodes,
+                "edges": mindmap_edges,
+            },
+        },
+        "strategy": {
+            "versions": strategy_data.get("strategy_versions", []),
+            "holding_theses": strategy_data.get("theses", []),
+            "approved_securities": strategy_data.get("approved_securities", []),
+            "authoritative_universe": active_universe,
+            "universe_history": universe_history,
+        },
+        "research": {
+            "company_research": company_research,
+            "sources": sources,
+            "catalysts": catalysts,
+            "thesis_reviews": thesis_reviews,
+            "macro_snapshots": macro_snapshots,
+            "ai_usage": ai_usage,
+            "red_team_reviews": red_team_reviews,
+            "security_dossiers": security_dossiers,
+        },
+        "governance": {
+            "decision_log": decision_log,
+            "decision_edits": decision_edits,
+            "decision_reviews": decision_reviews,
+        },
+        "operations": {
+            "tracker_positions": tracker_positions,
+            "tracker_performance": tracker_performance,
+            "pipeline_record": pipeline_record,
+            "pipeline": pipeline,
+            "reconciliation_record": reconciliation_record,
+            "quant_runs": _load_shared_quant_run_records(),
+            "quant_snapshots": quant_snapshots,
+            "analytical_records": operating_records,
+            "operating_events": operating_events,
+            "report_record": report_record,
+            "report_validation": report_validation,
+            "qa_workspace": qa_workspace,
+            "qa_rounds": qa_rounds,
+            "rules_record": rules_record,
+            "compliance_settings": settings,
+        },
+    }
+
+    return build_judge_view_model({
+        "mandate_record": strategy_data.get("mandate_record"),
+        "strategy_record": strategy_data.get("strategy_record"),
+        "theses": strategy_data.get("theses", []),
+        "approved_securities": strategy_data.get("approved_securities", []),
+        "readiness": readiness,
+        "sources": sources,
+        "catalysts": catalysts,
+        "thesis_reviews": thesis_reviews,
+        "red_team_reviews": red_team_reviews,
+        "ai_usage": ai_usage,
+        "investment_cases": investment_cases,
+        "qa_rounds": qa_rounds,
+        "reconciliation_record": reconciliation_record,
+        "report_record": report_record,
+        "report_validation": report_validation,
+        "rules_record": rules_record,
+        "pipeline": pipeline,
+        "tracker_performance": tracker_performance,
+        "compliance_checks": compliance_checks,
+        "questions": questions,
+        "app_record": app_record,
+    })
+
+
+def _render_judge_view(profile: Mapping[str, Any]) -> None:
+    """Render the isolated read-only evaluation surface."""
+    from ui.judge_view import render_judge_view
+
+    render_judge_view(profile, _load_judge_view_data())
+
+
 def _render_competition_readiness(profile: dict[str, str | int]) -> None:
     from src.portfolio_tracker.competition_audit import (
         append_ai_usage,
@@ -12894,6 +13455,10 @@ def render_wharton_cockpit() -> None:
     # network round trip and table audit from the first interaction.
     init_db()
     _render_header(profile)
+
+    if _is_judge_profile(profile):
+        _render_judge_view(profile)
+        return
 
     # Fetch result from state if available.
     result = st.session_state.get(QUANT_RESULT_KEY, {})

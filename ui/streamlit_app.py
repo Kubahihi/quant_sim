@@ -39,10 +39,25 @@ def _run_quant_platform() -> None:
     run_module("ui.quant_platform", run_name="ui.__quant_platform_streamlit_run__")
 
 
+def _judge_session_active() -> bool:
+    profile = st.session_state.get("wharton_user_profile_v2")
+    return bool(
+        isinstance(profile, dict)
+        and str(profile.get("username") or "").strip() == "judge"
+    )
+
+
 # The analytical workspace deliberately remains a normal Python module.  When
 # it is selected, delegate before configuring or drawing this lightweight
 # launcher so there is only one page shell in the current run.
-if st.session_state.get("quant_sim_workspace_route") == "Quant Platform":
+_JUDGE_SESSION_ACTIVE = _judge_session_active()
+if _JUDGE_SESSION_ACTIVE:
+    st.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
+
+if (
+    not _JUDGE_SESSION_ACTIVE
+    and st.session_state.get("quant_sim_workspace_route") == "Quant Platform"
+):
     _run_quant_platform()
     st.stop()
 
@@ -127,12 +142,17 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown('<div class="qp-eyebrow">Workspace</div>', unsafe_allow_html=True)
-    app_route = st.radio(
-        "Choose workspace",
-        options=["Wharton Cockpit", "Quant Platform"],
-        key="quant_sim_workspace_route",
-        label_visibility="collapsed",
-    )
+    if _JUDGE_SESSION_ACTIVE:
+        app_route = "Wharton Cockpit"
+        st.markdown("**Judge View**")
+        st.caption("Read-only competition record")
+    else:
+        app_route = st.radio(
+            "Choose workspace",
+            options=["Wharton Cockpit", "Quant Platform"],
+            key="quant_sim_workspace_route",
+            label_visibility="collapsed",
+        )
     st.button(
         "Hide navigation",
         key="quant_hide_sidebar",
@@ -142,7 +162,13 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    is_dark = st.toggle("Dark Mode", key="quant_manual_dark_mode")
+    if _JUDGE_SESSION_ACTIVE:
+        # Keep the external evaluation surface visually deterministic and do
+        # not expose workspace display controls beyond navigation visibility.
+        st.session_state["quant_manual_dark_mode"] = False
+        is_dark = False
+    else:
+        is_dark = st.toggle("Dark Mode", key="quant_manual_dark_mode")
     if is_dark:
         st.markdown(
             """
@@ -226,7 +252,8 @@ if app_route == "Wharton Cockpit":
 
     _RUNTIME_TRACE.mark("wharton_import")
     render_wharton_cockpit()
-    _render_runtime_diagnostics(route=app_route, stage="wharton_ready")
+    if not _JUDGE_SESSION_ACTIVE:
+        _render_runtime_diagnostics(route=app_route, stage="wharton_ready")
     st.stop()
 
 # A route change is reflected in Session State before the next script run. This

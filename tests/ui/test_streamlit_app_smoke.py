@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 
 
 APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "streamlit_app.py"
+QUANT_APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "quant_platform.py"
 
 
 def _enable_test_auto_login(monkeypatch) -> None:
@@ -138,6 +139,76 @@ def test_streamlit_app_defaults_to_wharton_cockpit(monkeypatch):
 
     assert len(at.exception) == 0
     assert any("Wharton Cockpit" in item.value for item in at.markdown)
+    assert not any(item.value == "Workspace Hub" for item in at.subheader)
+
+
+def test_judge_session_is_forced_to_isolated_wharton_view(monkeypatch):
+    from ui.pages import wharton_dash
+
+    profile = {
+        "id": 5,
+        "username": "judge",
+        "role": "Judge",
+        "primary_module": "Judge View",
+    }
+    monkeypatch.setattr(wharton_dash, "init_db", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_get_current_profile", lambda: profile)
+    monkeypatch.setattr(wharton_dash, "_render_header", lambda profile: None)
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_judge_view",
+        lambda profile: st.markdown("JUDGE_VIEW_SENTINEL"),
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_cockpit_navigation",
+        lambda *args, **kwargs: pytest.fail("judge reached team navigation"),
+    )
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.session_state["quant_sim_workspace_route"] = "Quant Platform"
+    at.session_state["wharton_user_profile_v2"] = profile
+    at.run(timeout=60)
+
+    assert len(at.exception) == 0
+    assert at.session_state["quant_sim_workspace_route"] == "Wharton Cockpit"
+    assert any(item.value == "JUDGE_VIEW_SENTINEL" for item in at.markdown)
+    assert not any(item.label == "Choose workspace" for item in at.radio)
+    assert not any(item.value == "Workspace Hub" for item in at.subheader)
+
+
+def test_direct_quant_entrypoint_keeps_judge_in_read_only_view(monkeypatch):
+    from ui.pages import wharton_dash
+
+    profile = {
+        "id": 5,
+        "username": "judge",
+        "role": "Judge",
+        "primary_module": "Judge View",
+    }
+    monkeypatch.setattr(wharton_dash, "init_db", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_get_current_profile", lambda: profile)
+    monkeypatch.setattr(wharton_dash, "_render_header", lambda profile: None)
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_judge_view",
+        lambda profile: st.markdown("DIRECT_JUDGE_VIEW_SENTINEL"),
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_cockpit_navigation",
+        lambda *args, **kwargs: pytest.fail("judge reached team navigation"),
+    )
+
+    at = AppTest.from_file(str(QUANT_APP_PATH))
+    at.session_state["quant_sim_workspace_route"] = "Quant Platform"
+    at.session_state["wharton_user_profile_v2"] = profile
+    at.run(timeout=60)
+
+    assert len(at.exception) == 0
+    assert at.session_state["quant_sim_workspace_route"] == "Wharton Cockpit"
+    assert any(item.value == "DIRECT_JUDGE_VIEW_SENTINEL" for item in at.markdown)
+    assert not any(item.label == "Choose workspace" for item in at.radio)
     assert not any(item.value == "Workspace Hub" for item in at.subheader)
 
 

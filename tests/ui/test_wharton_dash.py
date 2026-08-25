@@ -357,6 +357,11 @@ def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-te
             password,
         ),
     )
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_judge_credential",
+        lambda *args, **kwargs: None,
+    )
     return db_path
 
 
@@ -579,6 +584,249 @@ def test_production_initialization_accepts_shared_legacy_password(monkeypatch, t
         profile = wharton_dash.authenticate_user(username, "wharton123")
         assert profile is not None
         assert profile["username"] == username
+
+
+def test_dedicated_judge_login_is_seeded_without_joining_team_roster(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = _configure_temp_wharton(
+        monkeypatch,
+        tmp_path,
+        password="shared-team-password",
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_judge_credential",
+        lambda *args, **kwargs: "distinct-judge-password",
+    )
+
+    wharton_dash.init_db()
+
+    with sqlite3.connect(db_path) as connection:
+        login_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT username FROM wharton_users ORDER BY username"
+            )
+        }
+    assert login_names == {
+        *(user["username"] for user in wharton_dash.DEFAULT_USERS),
+        "judge",
+    }
+    assert "judge" not in {
+        user["username"] for user in wharton_dash.DEFAULT_USERS
+    }
+    assert [user["username"] for user in wharton_dash._fetch_users()] == [
+        "Jakub",
+        "Lukáš",
+        "Martin",
+        "Matěj",
+    ]
+
+    judge_profile = wharton_dash.authenticate_user(
+        "judge",
+        "distinct-judge-password",
+    )
+    assert judge_profile is not None
+    assert judge_profile["primary_module"] == "Judge View"
+    assert wharton_dash.authenticate_user("judge", "shared-team-password") is None
+    assert wharton_dash.authenticate_user("Jakub", "distinct-judge-password") is None
+
+
+def test_active_judge_session_is_revoked_when_dedicated_secret_is_removed(
+    monkeypatch,
+    tmp_path,
+):
+    _configure_temp_wharton(
+        monkeypatch,
+        tmp_path,
+        password="shared-team-password",
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_judge_credential",
+        lambda *args, **kwargs: "distinct-judge-password",
+    )
+    wharton_dash.init_db()
+    profile = wharton_dash.authenticate_user("judge", "distinct-judge-password")
+    assert profile is not None
+    wharton_dash.st.session_state[wharton_dash.USER_PROFILE_KEY] = profile
+
+    assert wharton_dash._get_current_profile() == profile
+
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_judge_credential",
+        lambda *args, **kwargs: None,
+    )
+    assert wharton_dash._get_current_profile() is None
+    assert wharton_dash.USER_PROFILE_KEY not in wharton_dash.st.session_state
+
+
+def test_active_judge_session_is_revoked_when_database_account_disappears(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = _configure_temp_wharton(
+        monkeypatch,
+        tmp_path,
+        password="shared-team-password",
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "resolve_wharton_judge_credential",
+        lambda *args, **kwargs: "distinct-judge-password",
+    )
+    wharton_dash.init_db()
+    profile = wharton_dash.authenticate_user("judge", "distinct-judge-password")
+    assert profile is not None
+    wharton_dash.st.session_state[wharton_dash.USER_PROFILE_KEY] = profile
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DELETE FROM wharton_users WHERE username = ?", ("judge",))
+
+    assert wharton_dash._get_current_profile() is None
+    assert wharton_dash.USER_PROFILE_KEY not in wharton_dash.st.session_state
+
+
+def test_judge_profile_bypasses_all_team_navigation_and_renderers(monkeypatch):
+    calls: list[str] = []
+    profile = {
+        "id": 5,
+        "username": "judge",
+        "role": "Judge",
+        "primary_module": "Judge View",
+    }
+    monkeypatch.setattr(wharton_dash, "_inject_cockpit_styles", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_get_current_profile", lambda: profile)
+    monkeypatch.setattr(wharton_dash, "init_db", lambda: calls.append("init"))
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_header",
+        lambda current: calls.append(f"header:{current['username']}"),
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_judge_view",
+        lambda current: calls.append(f"judge:{current['username']}"),
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_cockpit_navigation",
+        lambda *args, **kwargs: pytest.fail("judge reached team navigation"),
+    )
+
+    wharton_dash.render_wharton_cockpit()
+
+    assert calls == ["init", "header:judge", "judge:judge"]
+
+
+def test_only_exact_judge_username_receives_judge_view():
+    assert wharton_dash._is_judge_profile({"username": "judge"}) is True
+    assert wharton_dash._is_judge_profile({"username": "Judge"}) is False
+    assert wharton_dash._is_judge_profile({"username": "Jakub"}) is False
+    assert wharton_dash._is_judge_profile(None) is False
+
+
+def test_judge_reconciliation_uses_authoritative_pipeline_gate():
+    record = wharton_dash._judge_pipeline_reconciliation_record(
+        {
+            "canonical_snapshot": {
+                "snapshot_id": "wins-7",
+                "observed_at": "2026-08-23T15:00:00Z",
+            },
+            "reconciliation_gate": {
+                "ready": True,
+                "status": "ready",
+                "blockers": [],
+                "latest_reconciliation_id": "recon-7",
+                "wins_snapshot_id": "wins-7",
+                "open_exception_count": 0,
+                "signed_off_at": "2026-08-23T15:10:00Z",
+            },
+        },
+        {
+            "payload": {
+                "status": "blocked",
+                "reconciliation_id": "obsolete-record",
+            }
+        },
+    )
+
+    assert record["payload"] == {
+        "status": "reconciled",
+        "ready": True,
+        "reconciliation_id": "recon-7",
+        "wins_snapshot_id": "wins-7",
+        "open_exception_count": 0,
+        "blockers": [],
+        "as_of": "2026-08-23T15:10:00Z",
+        "source": "portfolio_pipeline_reconciliation_gate",
+    }
+
+
+def test_judge_reconciliation_preserves_pipeline_exceptions_and_no_record_state():
+    blocked = wharton_dash._judge_pipeline_reconciliation_record(
+        {
+            "reconciliation_gate": {
+                "ready": False,
+                "blockers": ["open_exceptions"],
+                "latest_reconciliation_id": "recon-8",
+                "wins_snapshot_id": "wins-8",
+                "open_exception_count": 2,
+            }
+        },
+        None,
+    )
+    no_record = wharton_dash._judge_pipeline_reconciliation_record(
+        {
+            "reconciliation_gate": {
+                "ready": False,
+                "blockers": ["no_reconciliation"],
+                "latest_reconciliation_id": None,
+            }
+        },
+        {"payload": {"status": "clean", "reconciliation_id": "stale-legacy"}},
+    )
+
+    assert blocked["payload"]["status"] == "blocked"
+    assert blocked["payload"]["open_exception_count"] == 2
+    assert blocked["payload"]["blockers"] == ["open_exceptions"]
+    assert no_record == {}
+
+
+def test_team_profile_never_renders_judge_view(monkeypatch):
+    rendered: list[str] = []
+    profile = {
+        "id": 1,
+        "username": "Jakub",
+        "role": "Co-Captain",
+        "primary_module": "Quant Engine",
+    }
+    monkeypatch.setattr(wharton_dash, "_inject_cockpit_styles", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_get_current_profile", lambda: profile)
+    monkeypatch.setattr(wharton_dash, "init_db", lambda: None)
+    monkeypatch.setattr(wharton_dash, "_render_header", lambda current: None)
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_judge_view",
+        lambda current: pytest.fail("team profile reached Judge View"),
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_cockpit_navigation",
+        lambda current, labels: "Overview & Tasks",
+    )
+    monkeypatch.setattr(
+        wharton_dash,
+        "_render_overview_action_center",
+        lambda current: rendered.append(current["username"]),
+    )
+
+    wharton_dash.render_wharton_cockpit()
+
+    assert rendered == ["Jakub"]
 
 
 def test_team_roster_is_alphabetical_and_captains_keep_their_roles(monkeypatch, tmp_path):

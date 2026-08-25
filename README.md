@@ -131,6 +131,7 @@ streamlit run ui/streamlit_app.py
 ```toml
 QUANT_SIM_ENV = "production"
 WHARTON_SHARED_PASSWORD = "replace-with-the-shared-password"
+WHARTON_JUDGE_PASSWORD = "replace-with-a-distinct-judge-password"
 
 TURSO_DATABASE_URL = "libsql://your-database.turso.io"
 TURSO_AUTH_TOKEN = "your-turso-auth-token"
@@ -157,6 +158,11 @@ Lokalni development pouziva
 jednotliva hesla z `[wharton_users]` a chybejici ucty muze doplnit hodnotou
 `WHARTON_PASSWORD`. Heslo musi mit 10–72 UTF-8 bajtu. Po zmene prihlasovacich
 udaju aplikaci restartujte, aby se aktualizovaly ulozene otisky hesel.
+
+`WHARTON_JUDGE_PASSWORD` zapne samostatny ucet `judge` a jeho read-only Judge
+View. Toto heslo nema zadny fallback na tymove heslo a aplikace odmitne
+konfiguraci, pokud jsou shodna. Ucet `judge` neni soucasti tymoveho rosteru,
+hlasovani, schvalovani ani prirazovani ukolu.
 
 4. Nastavte hlavni soubor na `ui/streamlit_app.py` a nasadte aplikaci. Po prvnim spusteni se vytvori sdilena databazova struktura a aktualizuji se role zakladnich uzivatelu.
 
