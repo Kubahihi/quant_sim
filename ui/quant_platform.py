@@ -64,6 +64,25 @@ st.set_page_config(
 )
 inject_dashboard_styles()
 
+
+def _wharton_judge_session_active() -> bool:
+    profile = st.session_state.get("wharton_user_profile_v2")
+    return bool(
+        isinstance(profile, dict)
+        and str(profile.get("username") or "").strip() == "judge"
+    )
+
+
+# This module is also a supported direct Streamlit entrypoint. Keep the same
+# judge isolation here as in the lightweight launcher so no alternate URL can
+# expose the analytical workspace to the external read-only account.
+if _wharton_judge_session_active():
+    st.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
+    from ui.pages.wharton_dash import render_wharton_cockpit
+
+    render_wharton_cockpit()
+    st.stop()
+
 SIDEBAR_HIDDEN_KEY = "quant_workspace_sidebar_hidden"
 if SIDEBAR_HIDDEN_KEY not in st.session_state:
     st.session_state[SIDEBAR_HIDDEN_KEY] = False
