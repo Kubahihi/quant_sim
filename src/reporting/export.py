@@ -219,11 +219,16 @@ def generate_pdf_report(
         robustness = report_payload.get("robustness", {})
         if robustness:
             metrics_rob = robustness.get("metrics", {})
+            dsr_value = metrics_rob.get("dsr")
+            dsr_label = f"{float(dsr_value):.2%}" if dsr_value is not None else "Not calculated"
             robustness_lines = [
                 f"Probabilistic Sharpe Ratio (PSR): {metrics_rob.get('psr', 0.0):.2%}",
-                f"Deflated Sharpe Ratio (DSR): {metrics_rob.get('dsr', 0.0):.2%}",
-                f"Walk-Forward OOS Sharpe: {metrics_rob.get('oos_sharpe', 0.0):.3f}",
-                f"Walk-Forward OOS Return (Ann): {metrics_rob.get('oos_annualized_return', 0.0):.2%}",
+                f"Deflated Sharpe Ratio (DSR): {dsr_label}",
+                f"Evaluation-segment Sharpe: {metrics_rob.get('evaluation_sharpe', 0.0):.3f}",
+                f"Evaluation-segment Return (Ann): {metrics_rob.get('evaluation_annualized_return', 0.0):.2%}",
+                f"Strategy refit performed: {bool(robustness.get('strategy_refit_performed', False))}",
+                f"Supports strategy OOS claim: {bool(robustness.get('supports_strategy_oos_claim', False))}",
+                f"Scope: {robustness.get('scope', '-')}",
                 "",
                 "PSR Interpretation:",
                 metrics_rob.get('psr_interpretation', '-'),

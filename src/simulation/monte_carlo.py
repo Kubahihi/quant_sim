@@ -27,12 +27,14 @@ def _validate_simulation_inputs(
             raise ValueError(f"{name} must be finite.")
     if current_value <= 0:
         raise ValueError("current_value must be positive.")
+    if expected_return <= -1.0:
+        raise ValueError("expected_return must be greater than -100%.")
     if volatility < 0:
         raise ValueError("volatility must be non-negative.")
     if not isinstance(time_horizon, (int, np.integer)) or time_horizon <= 0:
         raise ValueError("time_horizon must be a positive integer.")
-    if not isinstance(n_simulations, (int, np.integer)) or n_simulations < 2:
-        raise ValueError("n_simulations must be an integer of at least 2.")
+    if not isinstance(n_simulations, (int, np.integer)) or n_simulations < 100:
+        raise ValueError("n_simulations must be an integer of at least 100.")
 
 
 def _terminal_path_statistics(
@@ -53,6 +55,15 @@ def _terminal_path_statistics(
     percentile_5 = float(percentile_5)
     tail_5 = final_values[final_values <= percentile_5]
     expected_shortfall_value_95 = float(np.mean(tail_5)) if tail_5.size else percentile_5
+    expected_shortfall_standard_error = (
+        float(np.std(tail_5, ddof=1) / np.sqrt(tail_5.size))
+        if tail_5.size > 1
+        else 0.0
+    )
+    probability_of_loss = float(np.mean(final_values < current_value))
+    probability_of_loss_se = float(
+        np.sqrt(probability_of_loss * (1.0 - probability_of_loss) / n_simulations)
+    )
     return {
         "mean": mean,
         "median": float(percentile_50),
@@ -63,14 +74,19 @@ def _terminal_path_statistics(
         "percentile_25": float(percentile_25),
         "percentile_75": float(percentile_75),
         "percentile_95": float(percentile_95),
-        "probability_of_loss": float(np.mean(final_values < current_value)),
+        "probability_of_loss": probability_of_loss,
+        "probability_of_loss_standard_error": probability_of_loss_se,
         "value_at_risk_95_loss": float(current_value - percentile_5),
         "expected_shortfall_95_loss": float(current_value - expected_shortfall_value_95),
         "expected_shortfall_95_value": expected_shortfall_value_95,
+        # Conditional on the estimated 5% threshold.  This is a Monte Carlo
+        # sampling diagnostic, not a parameter-risk or full quantile-error CI.
+        "expected_shortfall_95_standard_error": expected_shortfall_standard_error,
+        "tail_observations_95": int(tail_5.size),
         "standard_error_mean": standard_error,
         "relative_standard_error_mean": float(standard_error / abs(mean)) if mean else 0.0,
         "mean_ci_95": (
-            float(mean - 1.96 * standard_error),
+            float(max(0.0, mean - 1.96 * standard_error)),
             float(mean + 1.96 * standard_error),
         ),
     }
@@ -86,8 +102,9 @@ def run_monte_carlo_simulation(
 ) -> Tuple[np.ndarray, dict]:
     """Simulate portfolio values with geometric Brownian motion.
 
-    ``expected_return`` is the annualized arithmetic drift and ``volatility``
-    is annualized standard deviation.  The returned diagnostics quantify
+    ``expected_return`` is an effective annual simple return (for example,
+    ``0.08`` means an 8% one-year expected wealth increase) and ``volatility``
+    is annualized standard deviation. The returned diagnostics quantify
     Monte Carlo sampling error; they do not quantify parameter or model risk.
 
     A local random generator is used so a seeded run is reproducible without
@@ -102,7 +119,8 @@ def run_monte_carlo_simulation(
     )
 
     dt = 1.0 / TRADING_DAYS
-    drift = (float(expected_return) - 0.5 * float(volatility) ** 2) * dt
+    continuous_drift = float(np.log1p(expected_return))
+    drift = (continuous_drift - 0.5 * float(volatility) ** 2) * dt
     diffusion = float(volatility) * np.sqrt(dt)
 
     rng = np.random.default_rng(random_seed)
@@ -120,7 +138,7 @@ def run_monte_carlo_simulation(
     final_values = price_paths[-1]
 
     horizon_years = float(time_horizon) / TRADING_DAYS
-    analytic_mean = float(current_value * np.exp(expected_return * horizon_years))
+    analytic_mean = float(current_value * np.exp(continuous_drift * horizon_years))
 
     terminal_statistics = _terminal_path_statistics(final_values, current_value, int(n_simulations))
     statistics = {
@@ -129,6 +147,7 @@ def run_monte_carlo_simulation(
         "mean_convergence_gap": float((terminal_statistics["mean"] - analytic_mean) / analytic_mean) if analytic_mean else 0.0,
         "model": "geometric_brownian_motion",
         "expected_return_input": float(expected_return),
+        "continuous_drift": continuous_drift,
         "volatility_input": float(volatility),
         "time_horizon": int(time_horizon),
         "n_simulations": int(n_simulations),
@@ -183,6 +202,10 @@ def run_advanced_monte_carlo_simulation(
 ) -> Tuple[np.ndarray, dict]:
     """Simulate portfolio values with Merton jump diffusion.
 
+    ``expected_return`` has the same effective annual simple-return meaning as
+    in :func:`run_monte_carlo_simulation`. The jump compensator preserves that
+    unconditional expected wealth drift under the model.
+
     A local random generator is used so seeded advanced simulations are
     reproducible without mutating NumPy's process-wide random state.
     """
@@ -210,8 +233,9 @@ def run_advanced_monte_carlo_simulation(
     dt = 1.0 / TRADING_DAYS
     rng = np.random.default_rng(random_seed)
     
+    continuous_drift = float(np.log1p(expected_return))
     jump_compensator = jump_intensity * (np.exp(jump_mean + 0.5 * jump_volatility ** 2) - 1)
-    drift = (expected_return - 0.5 * volatility ** 2 - jump_compensator) * dt
+    drift = (continuous_drift - 0.5 * volatility ** 2 - jump_compensator) * dt
     diffusion = volatility * np.sqrt(dt)
     
     # The output buffer doubles as the diffusion-shock and log-return buffer.
@@ -242,7 +266,7 @@ def run_advanced_monte_carlo_simulation(
     
     final_values = price_paths[-1]
     horizon_years = float(time_horizon) / TRADING_DAYS
-    analytic_mean = float(current_value * np.exp(expected_return * horizon_years))
+    analytic_mean = float(current_value * np.exp(continuous_drift * horizon_years))
     
     terminal_statistics = _terminal_path_statistics(final_values, float(current_value), simulations)
     statistics = {
@@ -251,6 +275,7 @@ def run_advanced_monte_carlo_simulation(
         "mean_convergence_gap": float((terminal_statistics["mean"] - analytic_mean) / analytic_mean) if analytic_mean else 0.0,
         "model": "merton_jump_diffusion",
         "expected_return_input": float(expected_return),
+        "continuous_drift": continuous_drift,
         "volatility_input": float(volatility),
         "jump_intensity_input": float(jump_intensity),
         "jump_mean_input": float(jump_mean),
@@ -263,6 +288,7 @@ def run_advanced_monte_carlo_simulation(
             "constant annual drift, volatility, and jump parameters",
             "independent normally distributed diffusion shocks",
             "Poisson jump arrivals with normally distributed jump sizes",
+            "jump risk is a stress overlay; the supplied diffusion volatility is not de-jumped",
             "no liquidity constraints, taxes, transaction costs, or stochastic volatility",
         ],
     }

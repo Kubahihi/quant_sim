@@ -59,6 +59,40 @@ def test_walk_forward_is_causal_and_charges_costs():
     )
 
 
+def test_walk_forward_applies_rebalance_cost_multiplicatively():
+    returns = _sample_returns(periods=180, assets=3)
+    result = run_optimization_walk_forward(
+        returns,
+        optimizer="minimum_variance",
+        train_periods=100,
+        rebalance_periods=20,
+        initial_weights=[1.0, 0.0, 0.0],
+        max_weight=0.70,
+        transaction_cost_bps=25.0,
+    )
+
+    first_rebalance = result["transaction_costs"].index[0]
+    cost = float(result["transaction_costs"].loc[first_rebalance])
+    gross = float(result["gross_returns"].loc[first_rebalance])
+    assert cost > 0.0
+    assert result["net_returns"].loc[first_rebalance] == pytest.approx(
+        (1.0 - cost) * (1.0 + gross) - 1.0,
+        abs=1e-14,
+    )
+
+
+def test_performance_drawdown_includes_initial_wealth_peak():
+    returns = pd.Series([-0.20, 0.10])
+    metrics = walk_forward_module._performance_metrics(
+        returns,
+        risk_free_rate=0.0,
+        turnover=pd.Series(dtype=float),
+        transaction_costs=pd.Series(dtype=float),
+    )
+
+    assert metrics["max_drawdown"] == pytest.approx(-0.20)
+
+
 def test_walk_forward_reports_equal_weight_baseline_and_valid_windows():
     returns = _sample_returns(periods=300, assets=3)
     result = run_optimization_walk_forward(
@@ -93,6 +127,23 @@ def test_walk_forward_rejects_invalid_configuration():
             train_periods=40,
             strategy={"long_only": True},
         )
+    with pytest.raises(ValueError, match="expected_return_model"):
+        run_optimization_walk_forward(
+            returns,
+            optimizer="maximum_utility",
+            train_periods=40,
+            expected_return_model="oracle",
+        )
+    with pytest.raises(ValueError, match="risk_free_rate"):
+        run_optimization_walk_forward(
+            returns,
+            train_periods=40,
+            risk_free_rate=np.nan,
+        )
+    invalid_returns = returns.copy()
+    invalid_returns.iloc[0, 0] = -1.0
+    with pytest.raises(ValueError, match="greater than -1"):
+        run_optimization_walk_forward(invalid_returns, train_periods=40)
 
 
 @pytest.mark.parametrize("objective", ["maximum_utility", "minimum_cvar"])
@@ -182,7 +233,7 @@ def test_walk_forward_black_litterman_estimates_each_window_once(
     monkeypatch: pytest.MonkeyPatch,
 ):
     returns = _sample_returns(periods=180, assets=4)
-    calls = {"clean": 0, "black_litterman": 0}
+    calls = {"clean": 0, "black_litterman": 0, "risk_free_rates": []}
     original_clean = estimators_module.clean_returns
     original_black_litterman = (
         walk_forward_module.estimate_black_litterman_inputs
@@ -194,6 +245,7 @@ def test_walk_forward_black_litterman_estimates_each_window_once(
 
     def counted_black_litterman(frame: pd.DataFrame, **kwargs):
         calls["black_litterman"] += 1
+        calls["risk_free_rates"].append(kwargs.get("risk_free_rate"))
         return original_black_litterman(frame, **kwargs)
 
     monkeypatch.setattr(estimators_module, "clean_returns", counted_clean)
@@ -217,3 +269,8 @@ def test_walk_forward_black_litterman_estimates_each_window_once(
     window_count = len(result["windows"])
     assert calls["black_litterman"] == window_count
     assert calls["clean"] == window_count + 1
+    assert calls["risk_free_rates"] == [pytest.approx(0.03)] * window_count
+    assert result["causal"] is False
+    assert result["out_of_sample"] is False
+    assert "historical_replay_static_views" in result["validation_type"]
+    assert any("Static Black-Litterman views" in item for item in result["warnings"])

@@ -81,12 +81,16 @@ def _performance_metrics(
     total_return = float(wealth.iloc[-1] - 1.0)
     annualized_return = float((1.0 + total_return) ** (TRADING_DAYS / len(clean)) - 1.0)
     volatility = float(clean.std(ddof=1) * np.sqrt(TRADING_DAYS)) if len(clean) > 1 else 0.0
+    periodic_rf = float(np.expm1(np.log1p(float(risk_free_rate)) / TRADING_DAYS))
     sharpe_ratio = (
-        (float(clean.mean()) * TRADING_DAYS - float(risk_free_rate)) / volatility
+        float((clean - periodic_rf).mean() / clean.std(ddof=1) * np.sqrt(TRADING_DAYS))
         if volatility > 0
         else 0.0
     )
-    drawdown = wealth / wealth.cummax() - 1.0
+    # The capital immediately before the first observed return is a real peak.
+    # Omitting it reports zero drawdown when the very first period loses money.
+    running_peak = wealth.cummax().clip(lower=1.0)
+    drawdown = wealth / running_peak - 1.0
     return {
         "observations": float(len(clean)),
         "total_return": total_return,
@@ -97,6 +101,17 @@ def _performance_metrics(
         "total_turnover": float(turnover.sum()),
         "transaction_cost_drag": float(transaction_costs.sum()),
     }
+
+
+def _net_of_rebalance_cost(gross_return: float, cost_drag: float) -> float:
+    """Apply a pre-return proportional cost to wealth exactly."""
+    gross = float(gross_return)
+    cost = float(cost_drag)
+    if not np.isfinite(gross):
+        raise ValueError("gross portfolio return must be finite.")
+    if not np.isfinite(cost) or not 0.0 <= cost < 1.0:
+        raise ValueError("transaction cost drag must be finite and below 100%.")
+    return float((1.0 - cost) * (1.0 + gross) - 1.0)
 
 
 def run_optimization_walk_forward(
@@ -131,16 +146,24 @@ def run_optimization_walk_forward(
     market_impact_bps: float = 0.0,
     max_adv_participation: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Causally re-estimate, optimize, and apply weights in rolling OOS windows."""
+    """Re-estimate, optimize, and apply weights in rolling evaluation windows."""
     method = str(optimizer).strip().lower()
     if method not in SUPPORTED_OPTIMIZERS:
         raise ValueError(
             f"optimizer must be one of {sorted(SUPPORTED_OPTIMIZERS)}."
         )
+    return_model = str(expected_return_model).strip().lower()
+    if return_model not in {"shrunk_historical", "black_litterman"}:
+        raise ValueError(
+            "expected_return_model must be 'shrunk_historical' or 'black_litterman'."
+        )
+    static_black_litterman_views = bool(
+        return_model == "black_litterman" and dict(black_litterman_views or {})
+    )
     if method == "maximum_sharpe" and (
         strategy is not None
         or turnover_limit is not None
-        or str(expected_return_model).strip().lower() == "black_litterman"
+        or return_model == "black_litterman"
         or average_daily_dollar_volume is not None
         or float(half_spread_bps) > 0
         or float(market_impact_bps) > 0
@@ -157,6 +180,18 @@ def run_optimization_walk_forward(
     transaction_cost_rate = float(transaction_cost_bps) / 10_000.0
     if not np.isfinite(transaction_cost_rate) or transaction_cost_rate < 0:
         raise ValueError("transaction_cost_bps must be non-negative.")
+    resolved_risk_free_rate = float(risk_free_rate)
+    if (
+        not np.isfinite(resolved_risk_free_rate)
+        or resolved_risk_free_rate <= -1.0
+    ):
+        raise ValueError("risk_free_rate must be finite and greater than -1.")
+    resolved_view_confidence = float(black_litterman_confidence)
+    if (
+        not np.isfinite(resolved_view_confidence)
+        or not 0.0 < resolved_view_confidence <= 1.0
+    ):
+        raise ValueError("black_litterman_confidence must be in (0, 1].")
 
     if not isinstance(membership_lag_periods, int) or membership_lag_periods < 1:
         raise ValueError("membership_lag_periods must be a positive integer.")
@@ -176,6 +211,9 @@ def run_optimization_walk_forward(
         clean = clean_returns(returns)
     if not clean.index.is_monotonic_increasing or clean.index.has_duplicates:
         raise ValueError("returns index must be unique and increasing.")
+    finite_returns = clean.to_numpy(dtype=float)
+    if np.any(finite_returns[np.isfinite(finite_returns)] <= -1.0):
+        raise ValueError("asset returns must be greater than -1.")
     if len(clean) <= train_periods:
         raise ValueError("returns must extend beyond the training window.")
 
@@ -305,7 +343,7 @@ def run_optimization_walk_forward(
             and turnover_limit is None
             and not has_liquidity_model
         )
-        if not use_legacy_optimizer and str(expected_return_model) == "black_litterman":
+        if not use_legacy_optimizer and return_model == "black_litterman":
             views = {
                 symbol: value
                 for symbol, value in dict(black_litterman_views or {}).items()
@@ -316,9 +354,10 @@ def run_optimization_walk_forward(
                 market_weights=active_current,
                 views=views,
                 view_confidences={
-                    symbol: float(black_litterman_confidence)
+                    symbol: resolved_view_confidence
                     for symbol in views
                 },
+                risk_free_rate=resolved_risk_free_rate,
                 risk_aversion=risk_aversion,
                 covariance_shrinkage=covariance_shrinkage,
                 return_shrinkage=return_shrinkage,
@@ -507,11 +546,13 @@ def run_optimization_walk_forward(
                 equal_weights, daily_asset_returns
             )
             optimized_gross[date] = gross_return
-            optimized_net[date] = gross_return - (
-                transaction_cost if position == test_start else 0.0
+            optimized_net[date] = _net_of_rebalance_cost(
+                gross_return,
+                transaction_cost if position == test_start else 0.0,
             )
-            equal_weight_net[date] = equal_return - (
-                equal_transaction_cost if position == test_start else 0.0
+            equal_weight_net[date] = _net_of_rebalance_cost(
+                equal_return,
+                equal_transaction_cost if position == test_start else 0.0,
             )
 
     gross_series = pd.Series(optimized_gross, dtype=float, name="gross_return")
@@ -527,27 +568,52 @@ def run_optimization_walk_forward(
     )
     history = pd.DataFrame(weights_history).set_index("date")
 
+    causal = not static_black_litterman_views
+    if static_black_litterman_views:
+        validation_type = (
+            "point_in_time_rolling_reoptimization_historical_replay_static_views"
+            if point_in_time
+            else "rolling_reoptimization_historical_replay_static_views"
+        )
+    else:
+        validation_type = (
+            "point_in_time_rolling_reoptimization_out_of_sample"
+            if point_in_time
+            else "rolling_reoptimization_out_of_sample"
+        )
+    warnings: list[str] = []
+    if not point_in_time:
+        warnings.append(
+            "Universe membership was not supplied point-in-time; results may contain survivorship bias."
+        )
+    if static_black_litterman_views:
+        warnings.append(
+            "Static Black-Litterman views were reused across historical windows without "
+            "point-in-time view timestamps; treat this as a historical replay, not causal "
+            "out-of-sample evidence."
+        )
+
     return {
         "success": bool(windows) and all(
             bool(window["optimizer_success"]) for window in windows
         ),
-        "validation_type": (
-            "point_in_time_rolling_reoptimization_out_of_sample"
-            if point_in_time
-            else "rolling_reoptimization_out_of_sample"
+        "validation_type": validation_type,
+        "causal": causal,
+        "out_of_sample": causal,
+        "black_litterman_view_provenance": (
+            "static_unverified" if static_black_litterman_views else None
         ),
-        "causal": True,
         "point_in_time_universe": point_in_time,
         "survivorship_bias_controlled": point_in_time,
         "membership_lag_periods": membership_lag_periods if point_in_time else None,
-        "warnings": (
-            []
-            if point_in_time
-            else [
-                "Universe membership was not supplied point-in-time; results may contain survivorship bias."
-            ]
-        ),
+        "warnings": warnings,
         "optimizer": method,
+        "transaction_cost_bps": float(transaction_cost_bps),
+        "transaction_cost_model_configured": bool(
+            float(transaction_cost_bps) > 0.0
+            or float(half_spread_bps) > 0.0
+            or float(market_impact_bps) > 0.0
+        ),
         "train_periods": train_periods,
         "rebalance_periods": rebalance_periods,
         "symbols": [str(column) for column in clean.columns],

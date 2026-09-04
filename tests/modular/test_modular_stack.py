@@ -10,6 +10,7 @@ import pytest
 import src.analytics.modular.news as news_module
 from src.analytics.advanced.runner import run_advanced_models_with_bundle
 from src.analytics.modular.backtest import (
+    _equity_and_drawdown,
     deterministic_signal_backtest,
     walk_forward_baseline_backtest,
 )
@@ -153,17 +154,28 @@ def test_interface_consistency_models_and_signals():
         assert hasattr(item, "direction")
 
 
-def test_no_lookahead_and_deterministic_backtest():
+def test_deterministic_backtest_requires_explicit_ex_ante_signal_provenance():
     series = _sample_returns()
     result_a = deterministic_signal_backtest(series, composite_signal=0.3, risk_signal=0.2, confidence=0.7)
     result_b = deterministic_signal_backtest(series, composite_signal=0.3, risk_signal=0.2, confidence=0.7)
 
-    assert result_a["lookahead_safe"] is True
-    assert result_b["lookahead_safe"] is True
+    assert result_a["lookahead_safe"] is False
+    assert result_b["lookahead_safe"] is False
+    assert result_a["validation_type"] == "illustrative_fixed_signal_replay"
     pd.testing.assert_series_equal(result_a["equity_curve"], result_b["equity_curve"])
 
     # first strategy return must be zero due to lagged position (no look-ahead)
     assert float(result_a["strategy_returns"].iloc[0]) == 0.0
+
+    attested = deterministic_signal_backtest(
+        series,
+        composite_signal=0.3,
+        risk_signal=0.2,
+        confidence=0.7,
+        signals_known_before_evaluation=True,
+    )
+    assert attested["lookahead_safe"] is True
+    assert attested["validation_type"] == "ex_ante_signal_replay"
 
 
 def test_walk_forward_baseline_is_causal_and_reports_complete_metrics():
@@ -188,6 +200,69 @@ def test_walk_forward_baseline_is_causal_and_reports_complete_metrics():
         "directional_hit_rate",
         "transaction_cost_drag",
     }.issubset(original["metrics"])
+
+
+@pytest.mark.parametrize(
+    "invalid_returns",
+    [
+        pd.Series([0.01, np.nan]),
+        pd.Series([0.01, np.inf]),
+        pd.Series([0.01, -1.0]),
+        pd.Series([0.01, 0.02], index=[1, 1]),
+        pd.Series([0.01, 0.02], index=[2, 1]),
+    ],
+)
+@pytest.mark.parametrize(
+    "backtest",
+    [
+        lambda returns: deterministic_signal_backtest(returns, 0.2, 0.1, 0.8),
+        lambda returns: walk_forward_baseline_backtest(
+            returns,
+            short_window=2,
+            long_window=3,
+        ),
+    ],
+)
+def test_backtests_fail_closed_on_invalid_simple_returns(invalid_returns, backtest):
+    with pytest.raises(ValueError):
+        backtest(invalid_returns)
+
+
+def test_backtest_drawdown_includes_initial_wealth():
+    strategy_returns = pd.Series(
+        [-0.20],
+        index=pd.date_range("2024-01-01", periods=1, freq="D"),
+    )
+
+    equity_curve, drawdown = _equity_and_drawdown(strategy_returns)
+
+    assert equity_curve.tolist() == pytest.approx([0.8])
+    assert drawdown.tolist() == pytest.approx([-0.20])
+
+
+def test_walk_forward_transaction_costs_are_multiplicative():
+    returns = _sample_returns(n=20)
+    gross = walk_forward_baseline_backtest(
+        returns,
+        short_window=2,
+        long_window=4,
+        transaction_cost_bps=0.0,
+    )
+    net = walk_forward_baseline_backtest(
+        returns,
+        short_window=2,
+        long_window=4,
+        transaction_cost_bps=100.0,
+    )
+
+    turnover = net["position"].diff().abs().fillna(net["position"].abs())
+    cost_rates = turnover * 0.01
+    expected_net_returns = (1.0 + gross["strategy_returns"]) * (1.0 - cost_rates) - 1.0
+
+    pd.testing.assert_series_equal(net["strategy_returns"], expected_net_returns)
+    assert net["metrics"]["transaction_cost_drag"] == pytest.approx(
+        float((gross["strategy_returns"] - expected_net_returns).sum())
+    )
 
 
 def test_news_relevance_scoring_orders_items():

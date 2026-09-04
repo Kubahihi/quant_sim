@@ -987,9 +987,9 @@ def _compute_analysis(
     else:
         ai_review["available"] = True
 
-    # Geometric Brownian motion expects an arithmetic annual drift.  Keep CAGR
-    # for reporting, but do not silently use it as the GBM parameter.
-    expected_return = float(np.clip(portfolio_returns.mean() * 252.0, -0.90, 2.5))
+    # Both simulation engines accept an effective annual simple return.  Reuse
+    # the same geometrically annualized portfolio metric shown to the user.
+    expected_return = float(np.clip(metrics["annualized_return"], -0.90, 2.5))
     volatility = float(max(metrics["volatility"], 1e-6))
     price_paths, simulation_stats = run_monte_carlo_simulation(
         current_value=100000.0,

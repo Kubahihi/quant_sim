@@ -9,7 +9,10 @@ from src.analytics.model_validation import (
     moving_block_bootstrap_intervals,
 )
 from src.analytics.modular.backtest import walk_forward_baseline_backtest
-from src.simulation.monte_carlo import run_monte_carlo_simulation
+from src.simulation.monte_carlo import (
+    run_advanced_monte_carlo_simulation,
+    run_monte_carlo_simulation,
+)
 
 
 def _returns(n: int = 756) -> pd.Series:
@@ -27,6 +30,15 @@ def test_block_bootstrap_intervals_are_seeded_and_ordered():
     assert set(first) == {"annualized_return", "volatility", "sharpe_ratio", "var_95", "cvar_95"}
     for interval in first.values():
         assert interval["ci_low"] <= interval["ci_high"]
+
+
+def test_block_bootstrap_rejects_invalid_annual_risk_free_rate():
+    with np.testing.assert_raises_regex(ValueError, "greater than -100%"):
+        moving_block_bootstrap_intervals(
+            _returns(100),
+            risk_free_rate=-1.0,
+            n_bootstrap=100,
+        )
 
 
 def test_distribution_diagnostics_detect_fat_tails_without_scipy_dependency():
@@ -123,3 +135,80 @@ def test_failed_rolling_window_is_only_partial_accuracy_evidence():
     assert oos_gate["status"] == "warning"
     assert oos_gate["points"] == 10.0
     assert causal_check["status"] == "partial"
+
+
+def test_small_sample_bootstrap_is_not_awarded_full_uncertainty_credit():
+    report = build_model_validation_report(_returns(20), n_bootstrap=100)
+
+    gate = next(item for item in report["gates"] if item["gate"] == "Parameter uncertainty")
+    assert gate["status"] == "fail"
+    assert gate["points"] == 3.0
+
+
+def test_missing_tail_diagnostics_cannot_receive_full_simulation_credit():
+    report = build_model_validation_report(
+        _returns(504),
+        simulation_stats={
+            "model": "geometric_brownian_motion",
+            "relative_standard_error_mean": 0.001,
+            "random_seed": 7,
+        },
+        n_bootstrap=100,
+    )
+
+    gate = next(
+        item for item in report["gates"]
+        if item["gate"] == "Simulation convergence"
+    )
+    assert gate["status"] == "warning"
+    assert gate["points"] <= 8.0
+    assert "not reported" in gate["evidence"].lower()
+
+
+def test_merton_model_metadata_is_recognized_but_not_claimed_as_complete_validation():
+    series = _returns(504)
+    _, simulation = run_advanced_monte_carlo_simulation(
+        current_value=100_000.0,
+        expected_return=0.08,
+        volatility=0.20,
+        n_simulations=2_000,
+        random_seed=12,
+    )
+    report = build_model_validation_report(
+        series,
+        simulation_stats=simulation,
+        n_bootstrap=100,
+    )
+
+    gate = next(item for item in report["gates"] if item["gate"] == "Distribution/model risk")
+    assert gate["status"] == "warning"
+    assert gate["points"] > 0.0
+    assert "Merton" in gate["evidence"]
+    assert any(
+        "Merton jump diffusion" in item
+        for item in report["presentation_caveats"]
+    )
+    assert not any(
+        item.startswith("GBM") for item in report["presentation_caveats"]
+    )
+
+
+def test_zero_cost_placeholder_is_not_full_after_cost_evidence():
+    series = _returns(504)
+    report = build_model_validation_report(
+        series,
+        backtest={
+            "lookahead_safe": True,
+            "scope": "Causal baseline.",
+            "parameters": {"transaction_cost_bps": 0.0},
+        },
+        n_bootstrap=100,
+    )
+
+    check = next(
+        item
+        for item in report["accuracy_evidence"]["checks"]
+        if item["key"] == "after_costs"
+    )
+    assert check["status"] == "partial"
+    assert "zero" in check["evidence"].lower()

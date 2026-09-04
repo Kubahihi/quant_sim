@@ -16,6 +16,13 @@ import pandas as pd
 TRADING_DAYS = 252
 
 
+def _periodic_risk_free_rate(risk_free_rate: float) -> float:
+    annual_rate = float(risk_free_rate)
+    if not np.isfinite(annual_rate) or annual_rate <= -1.0:
+        raise ValueError("risk_free_rate must be finite and greater than -100%.")
+    return float(np.expm1(np.log1p(annual_rate) / TRADING_DAYS))
+
+
 def _clean_returns(returns: pd.Series) -> pd.Series:
     clean = pd.Series(returns).replace([np.inf, -np.inf], np.nan).dropna().astype(float)
     if bool((clean <= -1.0).any()):
@@ -30,7 +37,7 @@ def _point_metrics(values: np.ndarray, risk_free_rate: float) -> Dict[str, float
     log_growth = float(np.log1p(values).sum())
     annualized_return = float(np.expm1(log_growth * TRADING_DAYS / n))
     volatility = float(np.std(values, ddof=1) * np.sqrt(TRADING_DAYS)) if n > 1 else 0.0
-    daily_rf = float(np.expm1(np.log1p(risk_free_rate) / TRADING_DAYS)) if risk_free_rate > -1 else 0.0
+    daily_rf = _periodic_risk_free_rate(risk_free_rate)
     excess = values - daily_rf
     excess_std = float(np.std(excess, ddof=1)) if n > 1 else 0.0
     sharpe = float(np.mean(excess) / excess_std * np.sqrt(TRADING_DAYS)) if excess_std > 0 else 0.0
@@ -53,6 +60,7 @@ def moving_block_bootstrap_intervals(
     random_seed: int = 1729,
 ) -> Dict[str, Dict[str, float | str]]:
     """Estimate 95% intervals while retaining short-run return dependence."""
+    daily_rf = _periodic_risk_free_rate(risk_free_rate)
     clean = _clean_returns(returns)
     values = clean.to_numpy(dtype=float)
     n = int(values.size)
@@ -73,7 +81,6 @@ def moving_block_bootstrap_intervals(
     log_growth = np.log1p(samples).sum(axis=1)
     annualized_return = np.expm1(log_growth * TRADING_DAYS / n)
     volatility = np.std(samples, axis=1, ddof=1) * np.sqrt(TRADING_DAYS)
-    daily_rf = float(np.expm1(np.log1p(risk_free_rate) / TRADING_DAYS)) if risk_free_rate > -1 else 0.0
     excess = samples - daily_rf
     excess_std = np.std(excess, axis=1, ddof=1)
     sharpe = np.divide(
@@ -176,12 +183,27 @@ def _accuracy_evidence(
     causal_evidence = optimization_causal and has_optimization_windows or backtest_causal
 
     optimization_metrics = optimization_validation.get("metrics")
-    has_cost_model = bool(
+    has_cost_result = bool(
         isinstance(optimization_metrics, Mapping)
         and optimization_metrics.get("transaction_cost_drag") is not None
     ) or bool(
         isinstance(backtest.get("parameters"), Mapping)
         and backtest["parameters"].get("transaction_cost_bps") is not None
+    )
+    optimization_cost_drag = (
+        float(optimization_metrics.get("transaction_cost_drag") or 0.0)
+        if isinstance(optimization_metrics, Mapping)
+        else 0.0
+    )
+    backtest_cost_bps = (
+        float(backtest["parameters"].get("transaction_cost_bps") or 0.0)
+        if isinstance(backtest.get("parameters"), Mapping)
+        else 0.0
+    )
+    costs_calibrated_positive = bool(
+        optimization_validation.get("transaction_cost_model_configured")
+        or optimization_cost_drag > 0.0
+        or backtest_cost_bps > 0.0
     )
     has_comparator = bool(
         isinstance(optimization_validation.get("equal_weight_metrics"), Mapping)
@@ -221,10 +243,18 @@ def _accuracy_evidence(
         {
             "key": "after_costs",
             "label": "Transaction costs included",
-            "status": "pass" if has_cost_model else "gap",
+            "status": (
+                "pass"
+                if has_cost_result and costs_calibrated_positive
+                else "partial"
+                if has_cost_result
+                else "gap"
+            ),
             "evidence": (
                 "Reported results deduct configured turnover costs."
-                if has_cost_model
+                if has_cost_result and costs_calibrated_positive
+                else "After-cost fields exist, but the configured cost assumption is zero."
+                if has_cost_result
                 else "No after-cost result is attached."
             ),
         },
@@ -346,13 +376,40 @@ def build_model_validation_report(
         data_points, data_status = 2.0, "fail"
     gates.append(_gate("Historical depth", data_status, data_points, 20, f"{n} daily observations ({n / TRADING_DAYS:.1f} years)"))
 
-    interval_points = 20.0 if len(intervals) == 5 else 0.0
+    intervals_available = len(intervals) == 5
+    if not intervals_available:
+        interval_points, interval_status = 0.0, "fail"
+        interval_evidence = "At least 20 observations are required."
+    elif n >= 504:
+        interval_points, interval_status = 20.0, "pass"
+        interval_evidence = (
+            f"Moving-block bootstrap intervals are available from {n} observations; "
+            "the empirical 5% tail contains about " + str(max(1, int(np.floor(0.05 * n)))) + " observations."
+        )
+    elif n >= 252:
+        interval_points, interval_status = 14.0, "warning"
+        interval_evidence = (
+            f"Bootstrap intervals are available, but {n} observations provide only about "
+            f"{max(1, int(np.floor(0.05 * n)))} observations in a 5% empirical tail."
+        )
+    elif n >= 100:
+        interval_points, interval_status = 8.0, "warning"
+        interval_evidence = (
+            f"Bootstrap intervals are numerically available from {n} observations, but tail "
+            "risk estimates are data-thin and unstable."
+        )
+    else:
+        interval_points, interval_status = 3.0, "fail"
+        interval_evidence = (
+            f"Bootstrap intervals are numerically available from only {n} observations; "
+            "this is insufficient evidence for reliable parameter or 5% tail uncertainty."
+        )
     gates.append(_gate(
         "Parameter uncertainty",
-        "pass" if interval_points else "fail",
+        interval_status,
         interval_points,
         20,
-        "Moving-block bootstrap intervals available for return, risk, Sharpe, VaR and CVaR." if interval_points else "At least 20 observations are required.",
+        interval_evidence,
     ))
 
     relative_error = simulation.get("relative_standard_error_mean")
@@ -368,7 +425,55 @@ def build_model_validation_report(
             mc_points, mc_status = 8.0, "warning"
         else:
             mc_points, mc_status = 3.0, "fail"
-        mc_evidence = f"Terminal-mean Monte Carlo relative standard error: {relative_error:.2%}."
+        tail_observations_raw = simulation.get("tail_observations_95")
+        loss_probability_se_raw = simulation.get("probability_of_loss_standard_error")
+        tail_standard_error_raw = simulation.get(
+            "expected_shortfall_95_standard_error"
+        )
+        try:
+            tail_observations = int(tail_observations_raw)
+        except (TypeError, ValueError, OverflowError):
+            tail_observations = None
+        try:
+            loss_probability_se = float(loss_probability_se_raw)
+        except (TypeError, ValueError):
+            loss_probability_se = None
+        try:
+            tail_standard_error = float(tail_standard_error_raw)
+        except (TypeError, ValueError):
+            tail_standard_error = None
+
+        if tail_observations is None or tail_observations <= 0:
+            mc_points, mc_status = min(mc_points, 8.0), "warning"
+        elif tail_observations < 100:
+            mc_points, mc_status = min(mc_points, 5.0), "fail"
+        elif tail_observations < 250:
+            mc_points, mc_status = min(mc_points, 8.0), "warning"
+        if tail_standard_error is None or not np.isfinite(tail_standard_error):
+            mc_points, mc_status = min(mc_points, 8.0), "warning"
+        if loss_probability_se is None or not np.isfinite(loss_probability_se):
+            mc_points, mc_status = min(mc_points, 8.0), "warning"
+        tail_text = (
+            f" Tail sample: {tail_observations} paths."
+            if tail_observations is not None
+            else " Tail sample depth was not reported."
+        )
+        tail_se_text = (
+            f" Conditional expected-shortfall standard error: ${tail_standard_error:,.2f}."
+            if tail_standard_error is not None and np.isfinite(tail_standard_error)
+            else " Conditional expected-shortfall sampling error was not reported."
+        )
+        loss_se_text = (
+            f" Loss-probability standard error: {loss_probability_se:.2%}."
+            if loss_probability_se is not None and np.isfinite(loss_probability_se)
+            else " Loss-probability sampling error was not reported."
+        )
+        mc_evidence = (
+            f"Terminal-mean Monte Carlo relative standard error: {relative_error:.2%}."
+            + tail_text
+            + tail_se_text
+            + loss_se_text
+        )
     gates.append(_gate("Simulation convergence", mc_status, mc_points, 15, mc_evidence))
 
     rejects_normality = bool(distribution["normality_rejected_5pct"])
@@ -380,6 +485,13 @@ def build_model_validation_report(
             "GBM is a single-model scenario and historical returns reject normality; fat-tail model risk remains."
             if rejects_normality
             else "GBM remains a single-model scenario; normality is not rejected in this sample."
+        )
+    elif model_name == "merton_jump_diffusion":
+        distribution_points = 10.0 if rejects_normality else 9.0
+        distribution_status = "warning"
+        distribution_evidence = (
+            "Merton jump diffusion represents discontinuous tail events, but remains a single "
+            "parametric scenario; supplied diffusion volatility is not independently de-jumped."
         )
     else:
         distribution_points, distribution_status = 0.0, "fail"
@@ -462,10 +574,17 @@ def build_model_validation_report(
         band = "prototype"
         verdict = "Prototype evidence only; do not rely on point estimates for investment decisions."
 
+    model_caveat = (
+        "GBM does not model jumps, stochastic volatility, liquidity, taxes, or transaction costs."
+        if model_name == "geometric_brownian_motion"
+        else "Merton jump diffusion adds a parametric jump overlay but does not model stochastic volatility, liquidity, taxes, transaction costs, or parameter uncertainty."
+        if model_name == "merton_jump_diffusion"
+        else "The simulation model is not identified; model-risk coverage cannot be assessed."
+    )
     presentation_caveats = [
         "The methodology score is not predictive hit rate and is not a Wharton endorsement.",
         "Historical estimates are sensitive to the selected sample and market regime.",
-        "GBM does not model jumps, stochastic volatility, liquidity, taxes, or transaction costs.",
+        model_caveat,
     ]
     limitations = [*presentation_caveats]
     evidence_status = {

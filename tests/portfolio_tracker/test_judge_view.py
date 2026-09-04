@@ -30,6 +30,7 @@ def test_report_bound_reconciled_snapshot_has_highest_portfolio_authority():
                     "performance_attribution": {"portfolio_return": 0.08},
                 }
             },
+            "report_validation": {"is_ready": True, "issues": []},
             "pipeline": {
                 "authority": "wins_reconciled",
                 "canonical_snapshot": {
@@ -56,6 +57,51 @@ def test_report_bound_reconciled_snapshot_has_highest_portfolio_authority():
     assert portfolio["positions"][0]["weight_pct"] == pytest.approx(70.0)
     assert portfolio["total_return_pct"] == pytest.approx(8.0)
     assert portfolio["equity"] is None
+
+
+def test_self_asserted_report_reconciliation_cannot_override_wins_without_validation():
+    model = build_judge_view_model(
+        {
+            "report_record": {
+                "payload": {
+                    "portfolio_snapshot": {
+                        "snapshot_id": "self-asserted",
+                        "reconciled": True,
+                        "positions": [{"ticker": "BAD", "market_value": 500_000}],
+                    }
+                }
+            },
+            "pipeline": {
+                "authority": "wins_reconciled",
+                "canonical_snapshot": {
+                    "snapshot_id": "wins-authoritative",
+                    "payload": {
+                        "positions": [{"ticker": "GOOD", "market_value": 500_000}],
+                        "total_value": 500_000,
+                    },
+                },
+            },
+        }
+    )
+
+    assert model["portfolio"]["source_tier"] == "wins_reconciled"
+    assert model["portfolio"]["snapshot_id"] == "wins-authoritative"
+
+
+def test_one_rules_acknowledgement_is_not_inferred_to_mean_everyone_acknowledged():
+    model = build_judge_view_model(
+        {
+            "rules_record": {
+                "payload": {
+                    "version": "v1",
+                    "acknowledged_by": ["one-team-member"],
+                }
+            }
+        }
+    )
+
+    assert model["integrity"]["rules"]["acknowledged_count"] == 1
+    assert model["integrity"]["rules"]["all_acknowledged"] is False
 
 
 def test_wins_canonical_snapshot_beats_tracker_when_report_snapshot_is_not_reconciled():

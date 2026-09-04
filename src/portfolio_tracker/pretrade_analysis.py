@@ -11,8 +11,9 @@ Turnover convention
 -------------------
 ``incremental_turnover`` is gross proposed trade notional divided by pre-trade
 portfolio equity.  It is not the one-way/half-turnover convention used by some
-institutional reports, and it is kept separate from historical turnover unless
-the caller explicitly supplies a historical ``current_turnover`` value.
+institutional reports. The rule is evaluated for the proposed rebalance itself;
+historical turnover is not added to it. A cumulative-since-inception control
+requires a complete execution ledger and is a separate quantity.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from copy import deepcopy
 import math
 from typing import Any
 
+from .bond_analytics import is_individual_bond, quote_value_usd
 from .strategy_alignment import analyze_strategy_alignment
 from .wharton_competition import (
     INITIAL_CAPITAL_USD,
@@ -33,6 +35,28 @@ TURNOVER_DEFINITION = "gross proposed trade notional / pre-trade equity"
 _BUY_ACTIONS = {"buy", "add", "purchase"}
 _SELL_ACTIONS = {"sell", "trim", "reduce"}
 _EPSILON = 1e-9
+_BOND_TERM_FIELDS = (
+    "bond_instrument_type",
+    "bond_category",
+    "isin",
+    "cusip",
+    "face_value",
+    "coupon_rate",
+    "coupon_frequency",
+    "maturity_date",
+    "next_coupon_date",
+    "accrued_interest",
+    "entry_accrued_interest",
+    "entry_fx_rate_to_usd",
+    "fx_rate_to_usd",
+    "currency",
+    "callable",
+    "call_date",
+    "call_price",
+    "credit_rating",
+    "yield_to_maturity",
+    "spread_bps",
+)
 
 
 def _finite_number(value: Any) -> float | None:
@@ -43,6 +67,14 @@ def _finite_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _turnover_fraction(value: Any) -> float | None:
+    """Return an uncapped turnover fraction; 1.0 explicitly means 100%."""
+    number = _finite_number(value)
+    if number is None or number < 0.0:
+        return None
+    return number
 
 
 def _normal_ticker(value: Any) -> str:
@@ -242,7 +274,9 @@ def build_competition_strategy_snapshot(
         quantity = sum(_positive_quantity(row) for row in lots)
         market_value = sum(float(row.get("current_value") or 0.0) for row in lots)
         cost_value = sum(float(row.get("cost") or 0.0) for row in lots)
-        current_price = market_value / quantity if quantity > 0 else 0.0
+        current_price = _weighted_price(lots, "current_price")
+        if current_price is None:
+            current_price = market_value / quantity if quantity > 0 else 0.0
         sources = sorted({str(row.get("price_source") or "unknown") for row in lots})
         price_source = sources[0] if len(sources) == 1 else "mixed"
         thesis_record = thesis_by_ticker.get(ticker, {})
@@ -378,6 +412,128 @@ def _existing_security_type(
     return "Stock"
 
 
+def _trade_position_context(
+    positions: Sequence[Mapping[str, Any]],
+    trade: Mapping[str, Any],
+    *,
+    ticker: str,
+    quantity: float,
+    security_type: str,
+    action: str,
+) -> dict[str, Any]:
+    """Build the instrument context used for quote-aware trade valuation."""
+    context: dict[str, Any] = {}
+    for row in positions:
+        if _is_open(row) and _normal_ticker(row.get("ticker")) == ticker:
+            context.update(deepcopy(dict(row)))
+            break
+    context.update(deepcopy(dict(trade)))
+    context.update(
+        {
+            "ticker": ticker,
+            "quantity": quantity,
+            "security_type": security_type,
+        }
+    )
+    if is_individual_bond(context):
+        if action == "sell":
+            context["exit_accrued_interest"] = trade.get(
+                "exit_accrued_interest",
+                trade.get("accrued_interest", context.get("accrued_interest", 0.0)),
+            )
+            context["exit_fx_rate_to_usd"] = trade.get(
+                "exit_fx_rate_to_usd",
+                trade.get("fx_rate_to_usd", context.get("fx_rate_to_usd", 1.0)),
+            )
+        else:
+            context["entry_accrued_interest"] = trade.get(
+                "entry_accrued_interest",
+                trade.get("accrued_interest", context.get("accrued_interest", 0.0)),
+            )
+            context["entry_fx_rate_to_usd"] = trade.get(
+                "entry_fx_rate_to_usd",
+                trade.get("fx_rate_to_usd", context.get("fx_rate_to_usd", 1.0)),
+            )
+    return context
+
+
+def _trade_notional(
+    context: Mapping[str, Any],
+    price: float,
+    *,
+    action: str,
+) -> float:
+    """Return USD trade value under the instrument's native quote convention."""
+    if not is_individual_bond(context):
+        return _positive_quantity(context) * price
+    if action == "sell":
+        accrued = context.get("exit_accrued_interest", context.get("accrued_interest"))
+        fx_rate = context.get("exit_fx_rate_to_usd", context.get("fx_rate_to_usd"))
+    else:
+        accrued = context.get("entry_accrued_interest", context.get("accrued_interest"))
+        fx_rate = context.get("entry_fx_rate_to_usd", context.get("fx_rate_to_usd"))
+    return quote_value_usd(
+        context,
+        price,
+        accrued_interest=accrued,
+        fx_rate_to_usd=fx_rate or 1.0,
+    )
+
+
+def _fifo_sell_notional(
+    positions: Sequence[Mapping[str, Any]],
+    trade: Mapping[str, Any],
+    *,
+    ticker: str,
+    quantity: float,
+    price: float,
+) -> float:
+    """Value a sale from the exact FIFO lots that it consumes.
+
+    Individual bonds can share a ticker while having different face values,
+    accrued interest, currencies, or FX rates.  Valuing the whole order from
+    the first lot therefore does not necessarily reconcile to the resulting
+    closed-lot ledger.  Each consumed slice is valued under its own terms.
+    """
+    remaining = float(quantity)
+    total = 0.0
+    for lot_index in _fifo_open_indices(positions, ticker):
+        if remaining <= _EPSILON:
+            break
+        lot = positions[lot_index]
+        consumed = min(_positive_quantity(lot), remaining)
+        if consumed <= 0:
+            continue
+        lot_security_type = str(lot.get("security_type") or "Stock").strip() or "Stock"
+        context = _trade_position_context(
+            [lot],
+            trade,
+            ticker=ticker,
+            quantity=consumed,
+            security_type=lot_security_type,
+            action="sell",
+        )
+        # Existing lot terms are authoritative for a sale.  The proposal may
+        # override only the execution-date accrued interest and FX fields,
+        # which _trade_position_context stores separately as exit values.
+        for field in _BOND_TERM_FIELDS:
+            if lot.get(field) not in (None, ""):
+                context[field] = deepcopy(lot.get(field))
+        context["quantity"] = consumed
+        context["security_type"] = lot_security_type
+        context["exit_accrued_interest"] = trade.get(
+            "exit_accrued_interest",
+            trade.get("accrued_interest", lot.get("accrued_interest", 0.0)),
+        )
+        context["exit_fx_rate_to_usd"] = trade.get(
+            "exit_fx_rate_to_usd",
+            trade.get("fx_rate_to_usd", lot.get("fx_rate_to_usd", 1.0)),
+        )
+        total += _trade_notional(context, price, action="sell")
+        remaining -= consumed
+    return total
+
+
 def _fifo_open_indices(
     positions: Sequence[Mapping[str, Any]],
     ticker: str,
@@ -416,23 +572,33 @@ def _apply_buy(
     quantity: float,
     price: float,
     security_type: str,
+    instrument_context: Mapping[str, Any],
 ) -> None:
-    positions.append(
-        {
-            "id": f"pretrade-buy-{trade_index}",
-            "ticker": ticker,
-            "security_type": security_type,
-            "quantity": quantity,
-            "entry_price": price,
-            "entry_date": str(trade.get("trade_date") or trade.get("date") or "pretrade"),
-            "opened_by": "pretrade",
-            "opened_at": "pretrade",
-            "last_price": price,
-            "notes": str(trade.get("notes") or "Proposed trade"),
-            "status": "open",
-            "_pretrade_sequence": trade_index,
-        }
-    )
+    row = {
+        "id": f"pretrade-buy-{trade_index}",
+        "ticker": ticker,
+        "security_type": security_type,
+        "quantity": quantity,
+        "entry_price": price,
+        "entry_date": str(trade.get("trade_date") or trade.get("date") or "pretrade"),
+        "opened_by": "pretrade",
+        "opened_at": "pretrade",
+        "last_price": price,
+        "notes": str(trade.get("notes") or "Proposed trade"),
+        "status": "open",
+        "_pretrade_sequence": trade_index,
+    }
+    for field in _BOND_TERM_FIELDS:
+        if instrument_context.get(field) not in (None, ""):
+            row[field] = deepcopy(instrument_context.get(field))
+    if is_individual_bond(row):
+        row["entry_accrued_interest"] = instrument_context.get(
+            "entry_accrued_interest", 0.0
+        )
+        row["entry_fx_rate_to_usd"] = instrument_context.get(
+            "entry_fx_rate_to_usd", 1.0
+        )
+    positions.append(row)
 
 
 def _apply_fifo_sell(
@@ -459,6 +625,15 @@ def _apply_fifo_sell(
             lot["exit_price"] = price
             lot["exit_date"] = trade_date
             lot["closed_by"] = "pretrade"
+            if is_individual_bond(lot):
+                lot["exit_accrued_interest"] = trade.get(
+                    "exit_accrued_interest",
+                    trade.get("accrued_interest", lot.get("accrued_interest", 0.0)),
+                )
+                lot["exit_fx_rate_to_usd"] = trade.get(
+                    "exit_fx_rate_to_usd",
+                    trade.get("fx_rate_to_usd", lot.get("fx_rate_to_usd", 1.0)),
+                )
         else:
             lot["quantity"] = lot_quantity - consumed
             split_number += 1
@@ -474,6 +649,15 @@ def _apply_fifo_sell(
                     "_pretrade_sequence": trade_index,
                 }
             )
+            if is_individual_bond(closed):
+                closed["exit_accrued_interest"] = trade.get(
+                    "exit_accrued_interest",
+                    trade.get("accrued_interest", closed.get("accrued_interest", 0.0)),
+                )
+                closed["exit_fx_rate_to_usd"] = trade.get(
+                    "exit_fx_rate_to_usd",
+                    trade.get("fx_rate_to_usd", closed.get("fx_rate_to_usd", 1.0)),
+                )
             closed_splits.append(closed)
         remaining -= consumed
     positions.extend(closed_splits)
@@ -607,11 +791,44 @@ def simulate_trade_plan(
                     )
                 )
 
-        notional = (
-            float(quantity) * float(price)
-            if quantity is not None and quantity > 0 and price is not None and price > 0
+        security_type = str(
+            raw_trade.get("security_type")
+            or _existing_security_type(working, ticker)
+            or "Stock"
+        ).strip() or "Stock"
+        trade_context = (
+            _trade_position_context(
+                working,
+                raw_trade,
+                ticker=ticker,
+                quantity=float(quantity),
+                security_type=security_type,
+                action=action,
+            )
+            if ticker and quantity is not None and quantity > 0
             else None
         )
+        if (
+            action == "sell"
+            and ticker
+            and quantity is not None
+            and quantity > 0
+            and price is not None
+            and price > 0
+        ):
+            notional = _fifo_sell_notional(
+                working,
+                raw_trade,
+                ticker=ticker,
+                quantity=float(quantity),
+                price=float(price),
+            )
+        else:
+            notional = (
+                _trade_notional(trade_context, float(price), action=action)
+                if trade_context is not None and price is not None and price > 0
+                else None
+            )
         if notional is not None and action:
             gross_notional += notional
 
@@ -645,11 +862,6 @@ def simulate_trade_plan(
                     )
                 )
 
-        security_type = str(
-            raw_trade.get("security_type")
-            or _existing_security_type(working, ticker)
-            or "Stock"
-        ).strip() or "Stock"
         if not row_blockers and notional is not None and quantity is not None and price is not None:
             if action == "buy":
                 _apply_buy(
@@ -660,6 +872,7 @@ def simulate_trade_plan(
                     quantity=quantity,
                     price=price,
                     security_type=security_type,
+                    instrument_context=trade_context,
                 )
                 running_cash -= notional
             else:
@@ -703,13 +916,50 @@ def simulate_trade_plan(
             }
         )
 
-    plan_valid = not blockers
     projected_positions = _clean_internal_positions(working)
-    after_positions = projected_positions if plan_valid else deepcopy(before_positions)
-    after_performance = calculate_portfolio_performance(
-        after_positions,
+    projected_performance = calculate_portfolio_performance(
+        projected_positions,
         prices,
         initial_capital=float(initial_capital),
+    )
+    recomputed_projected_cash = _true_cash(projected_performance)
+    cash_reconciliation_difference = running_cash - recomputed_projected_cash
+    cash_tolerance = max(
+        1e-6,
+        1e-9 * max(abs(running_cash), abs(recomputed_projected_cash), 1.0),
+    )
+    cash_reconciled = abs(cash_reconciliation_difference) <= cash_tolerance
+    checks.append(
+        {
+            "code": "cash_reconciliation",
+            "passed": cash_reconciled,
+            "message": (
+                "The sequential cash ledger reconciles to the projected position ledger."
+                if cash_reconciled
+                else "The sequential cash ledger does not reconcile to the projected position ledger."
+            ),
+            "trade_index": None,
+        }
+    )
+    if not cash_reconciled:
+        blockers.append(
+            _blocker(
+                "cash_reconciliation_failed",
+                "Projected cash does not reconcile to the resulting position ledger.",
+                trade_index=0,
+                subject="Trade plan",
+                actual=running_cash,
+                limit=recomputed_projected_cash,
+                scope="plan",
+            )
+        )
+
+    plan_valid = not blockers
+    after_positions = projected_positions if plan_valid else deepcopy(before_positions)
+    after_performance = (
+        projected_performance
+        if plan_valid
+        else deepcopy(before_performance)
     )
     after_cash = _true_cash(after_performance)
     incremental_turnover = gross_notional / before_equity if before_equity > 0 else None
@@ -727,7 +977,11 @@ def simulate_trade_plan(
         "before_performance": deepcopy(before_performance),
         "after_performance": deepcopy(after_performance),
         "before_cash_value": before_cash,
-        "projected_cash_value": running_cash,
+        "projected_performance": deepcopy(projected_performance),
+        "projected_cash_value": recomputed_projected_cash,
+        "cash_ledger_projection_value": running_cash,
+        "cash_reconciliation_difference": cash_reconciliation_difference,
+        "cash_reconciled": cash_reconciled,
         "after_cash_value": after_cash,
         "gross_proposed_notional": gross_notional,
         "validated_notional": validated_notional,
@@ -954,15 +1208,29 @@ def analyze_pretrade_impact(
 
     before_strategy = deepcopy(dict(strategy or {}))
     after_strategy = deepcopy(dict(strategy or {}))
-    supplied_turnover = _finite_number(current_turnover)
-    stored_turnover = _finite_number(before_strategy.get("current_turnover"))
+    stated_turnover_definition = str(
+        before_strategy.get("turnover_definition") or ""
+    ).strip()
+    turnover_definition_compatible = (
+        not stated_turnover_definition
+        or _normal_key(stated_turnover_definition) == _normal_key(TURNOVER_DEFINITION)
+    )
+    supplied_turnover = _turnover_fraction(current_turnover)
+    stored_turnover = _turnover_fraction(before_strategy.get("current_turnover"))
     base_turnover = supplied_turnover if supplied_turnover is not None else stored_turnover
-    if base_turnover is not None:
+    if base_turnover is not None and turnover_definition_compatible:
         before_strategy["current_turnover"] = max(0.0, base_turnover)
-        incremental = simulation.get("incremental_turnover")
-        after_strategy["current_turnover"] = max(0.0, base_turnover) + (
-            float(incremental or 0.0) if simulation["plan_valid"] else 0.0
-        )
+    else:
+        before_strategy.pop("current_turnover", None)
+    incremental = simulation.get("incremental_turnover")
+    if (
+        turnover_definition_compatible
+        and simulation["plan_valid"]
+        and incremental is not None
+    ):
+        after_strategy["current_turnover"] = float(incremental)
+    else:
+        after_strategy.pop("current_turnover", None)
 
     before_alignment = analyze_strategy_alignment(
         before_snapshot["holdings"],
@@ -978,6 +1246,48 @@ def analyze_pretrade_impact(
         cash_value=after_snapshot["cash_value"],
         portfolio_value=after_snapshot["portfolio_value"],
     )
+
+    max_turnover = before_alignment.get("strategy", {}).get("max_turnover")
+    incremental_turnover = simulation.get("incremental_turnover")
+    projected_turnover = (
+        float(incremental_turnover)
+        if incremental_turnover is not None
+        and turnover_definition_compatible
+        and simulation["plan_valid"]
+        else None
+    )
+    if max_turnover is None:
+        turnover_status = "not_configured"
+    elif not simulation["plan_valid"]:
+        turnover_status = "not_applied"
+    elif not turnover_definition_compatible:
+        turnover_status = "definition_mismatch"
+    elif projected_turnover is not None and projected_turnover > float(max_turnover) + _EPSILON:
+        turnover_status = "limit_exceeded"
+    else:
+        turnover_status = "within_limit"
+    turnover_assessment = {
+        "status": turnover_status,
+        "definition": TURNOVER_DEFINITION,
+        "unit": "fraction of pre-trade portfolio equity (1.0 = 100%)",
+        "stated_limit_definition": stated_turnover_definition or TURNOVER_DEFINITION,
+        "definition_compatible": turnover_definition_compatible,
+        "baseline_available": base_turnover is not None and turnover_definition_compatible,
+        "baseline_turnover": (
+            base_turnover if base_turnover is not None and turnover_definition_compatible else None
+        ),
+        "incremental_turnover": incremental_turnover,
+        "minimum_projected_turnover": (
+            float(incremental_turnover or 0.0) if simulation["plan_valid"] else None
+        ),
+        "projected_turnover": projected_turnover,
+        "limit": max_turnover,
+        "minimum_exceeds_limit": bool(
+            max_turnover is not None
+            and simulation["plan_valid"]
+            and float(incremental_turnover or 0.0) > float(max_turnover) + _EPSILON
+        ),
+    }
 
     violation_changes = _compare_violations(before_alignment, after_alignment)
     goal_changes = _allocation_changes(
@@ -1027,11 +1337,15 @@ def analyze_pretrade_impact(
 
     plan_valid = bool(simulation["plan_valid"])
     alignment_worsened = deltas["alignment_score"] < -1e-9
+    turnover_needs_review = turnover_status in {
+        "definition_mismatch",
+        "limit_exceeded",
+    }
     status = (
         "blocked"
         if not plan_valid
         else "review"
-        if violation_changes["new"] or alignment_worsened
+        if violation_changes["new"] or alignment_worsened or turnover_needs_review
         else "pass"
     )
     top_warnings = (
@@ -1039,6 +1353,21 @@ def analyze_pretrade_impact(
         + deepcopy(after_snapshot.get("warnings", []))
         + deepcopy(after_alignment.get("warnings", []))
     )
+    if max_turnover is not None and plan_valid and not turnover_definition_compatible:
+        top_warnings.append(
+            {
+                "code": "turnover_definition_mismatch",
+                "severity": "medium",
+                "scope": "plan",
+                "subject": "Turnover limit",
+                "message": (
+                    "The supplied turnover baseline was not combined with the proposal because "
+                    "its stated convention differs from the pre-trade convention."
+                ),
+                "actual": stated_turnover_definition,
+                "limit": TURNOVER_DEFINITION,
+            }
+        )
 
     return {
         "status": status,
@@ -1050,6 +1379,7 @@ def analyze_pretrade_impact(
         "gross_proposed_notional": simulation["gross_proposed_notional"],
         "incremental_turnover": simulation["incremental_turnover"],
         "turnover_definition": TURNOVER_DEFINITION,
+        "turnover_assessment": turnover_assessment,
         "before": {
             "snapshot": before_snapshot,
             "alignment": before_alignment,

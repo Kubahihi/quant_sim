@@ -3,6 +3,15 @@ import numpy as np
 from typing import Optional
 
 
+def _periodic_risk_free_rate(risk_free_rate: float, periods_per_year: int) -> float:
+    """Convert an effective annual risk-free rate to an effective period rate."""
+    if periods_per_year <= 0:
+        raise ValueError("periods_per_year must be positive.")
+    if not np.isfinite(risk_free_rate) or risk_free_rate <= -1.0:
+        raise ValueError("risk_free_rate must be finite and greater than -100%.")
+    return float(np.expm1(np.log1p(risk_free_rate) / periods_per_year))
+
+
 def calculate_volatility(
     returns: pd.Series,
     periods_per_year: int = 252,
@@ -22,8 +31,8 @@ def calculate_sharpe_ratio(
     risk_free_rate: float = 0.03,
     periods_per_year: int = 252,
 ) -> float:
-    """Calculate Sharpe ratio"""
-    excess_returns = returns - risk_free_rate / periods_per_year
+    """Calculate annualized Sharpe ratio from periodic arithmetic excess returns."""
+    excess_returns = returns - _periodic_risk_free_rate(risk_free_rate, periods_per_year)
     
     if excess_returns.std() == 0:
         return 0.0
@@ -37,27 +46,27 @@ def calculate_sortino_ratio(
     risk_free_rate: float = 0.03,
     periods_per_year: int = 252,
 ) -> float:
-    """Calculate Sortino ratio (uses downside deviation)"""
-    excess_returns = returns - risk_free_rate / periods_per_year
-    
-    downside_returns = excess_returns[excess_returns < 0]
-    
-    if len(downside_returns) == 0:
+    """Calculate annualized Sortino ratio using target downside deviation.
+
+    Downside deviation is the root mean square of ``min(excess, 0)`` over all
+    observations, so the frequency of losses remains part of the risk measure.
+    """
+    excess_returns = returns - _periodic_risk_free_rate(risk_free_rate, periods_per_year)
+    downside_deviation = float(np.sqrt(np.mean(np.square(np.minimum(excess_returns, 0.0)))))
+
+    if not np.isfinite(downside_deviation) or np.isclose(downside_deviation, 0.0):
         return 0.0
-    
-    downside_std = downside_returns.std()
-    
-    if downside_std == 0:
-        return 0.0
-    
-    sortino = excess_returns.mean() / downside_std * np.sqrt(periods_per_year)
+
+    sortino = excess_returns.mean() / downside_deviation * np.sqrt(periods_per_year)
     return float(sortino)
 
 
 def calculate_max_drawdown(returns: pd.Series) -> float:
-    """Calculate maximum drawdown"""
+    """Calculate maximum drawdown, including loss from initial wealth."""
+    if returns.empty:
+        return 0.0
     cumulative = (1 + returns).cumprod()
-    running_max = cumulative.cummax()
+    running_max = cumulative.cummax().clip(lower=1.0)
     drawdown = (cumulative - running_max) / running_max
     
     return float(drawdown.min())
@@ -120,9 +129,9 @@ def calculate_parametric_cvar(
 
 
 def calculate_drawdown_series(returns: pd.Series) -> pd.Series:
-    """Calculate drawdown series over time"""
+    """Calculate drawdown series relative to initial wealth and later peaks."""
     cumulative = (1 + returns).cumprod()
-    running_max = cumulative.cummax()
+    running_max = cumulative.cummax().clip(lower=1.0)
     drawdown = (cumulative - running_max) / running_max
     return drawdown
 
@@ -143,7 +152,7 @@ def calculate_rolling_sharpe(
     periods_per_year: int = 252,
 ) -> pd.Series:
     """Calculate rolling annualized Sharpe ratio"""
-    daily_rf = risk_free_rate / periods_per_year
+    daily_rf = _periodic_risk_free_rate(risk_free_rate, periods_per_year)
     excess_returns = returns - daily_rf
     roll_mean = excess_returns.rolling(window=window).mean()
     roll_std = excess_returns.rolling(window=window).std()

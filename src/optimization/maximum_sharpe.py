@@ -5,7 +5,7 @@ from typing import Any, Optional
 from loguru import logger
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy.optimize import linprog, minimize
 
 from .constraints import build_weight_bounds, validate_weight_solution
 from .estimators import (
@@ -14,6 +14,100 @@ from .estimators import (
     PortfolioEstimates,
     resolve_portfolio_estimates,
 )
+
+
+def _risk_free_rate(value: float) -> float:
+    """Normalize the annual effective risk-free rate used by Sharpe ratios."""
+    try:
+        rate = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("risk_free_rate must be a finite number greater than -100%.") from exc
+    if not np.isfinite(rate) or rate <= -1.0:
+        raise ValueError("risk_free_rate must be a finite number greater than -100%.")
+    return rate
+
+
+def _zero_variance_candidate(
+    estimates: PortfolioEstimates,
+    bounds: list[tuple[float, float]],
+) -> tuple[np.ndarray, float] | None:
+    """Find a feasible all-deterministic allocation, if the mandate permits one.
+
+    A declared cash proxy has exactly zero estimated variance.  It must be
+    considered explicitly because a smooth Sharpe objective cannot represent
+    the zero-over-zero Sharpe of an allocation earning exactly the risk-free
+    rate.  Without this candidate, SLSQP can incorrectly return a negative
+    Sharpe risky mix even though a zero-Sharpe cash allocation is feasible.
+    """
+    deterministic_names = set(estimates.deterministic_assets)
+    deterministic_indices = np.asarray(
+        [
+            index
+            for index, symbol in enumerate(estimates.symbols)
+            if symbol in deterministic_names
+        ],
+        dtype=int,
+    )
+    if deterministic_indices.size == 0:
+        return None
+
+    deterministic_bounds = [bounds[index] for index in deterministic_indices]
+    result = linprog(
+        c=-estimates.mean_returns[deterministic_indices],
+        A_eq=np.ones((1, deterministic_indices.size), dtype=float),
+        b_eq=np.array([1.0], dtype=float),
+        bounds=deterministic_bounds,
+        method="highs",
+    )
+    if not result.success or result.x is None:
+        return None
+
+    weights = np.zeros(len(estimates.symbols), dtype=float)
+    weights[deterministic_indices] = np.asarray(result.x, dtype=float)
+    weights = validate_weight_solution(weights, bounds)
+    expected_return = float(weights @ estimates.mean_returns)
+    return weights, expected_return
+
+
+def _optimization_result(
+    *,
+    estimates: PortfolioEstimates,
+    success: bool,
+    message: str,
+    weights: np.ndarray | None = None,
+    risk_free_rate: float | None = None,
+) -> dict[str, Any]:
+    """Build one consistent public optimizer result."""
+    if not success or weights is None:
+        return {
+            "weights": np.array([], dtype=float),
+            "symbols": list(estimates.symbols),
+            "expected_return": float("nan"),
+            "volatility": float("nan"),
+            "sharpe_ratio": float("nan"),
+            "success": False,
+            "message": message,
+            "estimation": estimates.metadata(),
+        }
+
+    expected_return = float(weights @ estimates.mean_returns)
+    variance = float(weights @ estimates.covariance @ weights)
+    volatility = float(np.sqrt(max(variance, 0.0)))
+    sharpe_ratio = (
+        (expected_return - float(risk_free_rate)) / volatility
+        if volatility > 0.0
+        else 0.0
+    )
+    return {
+        "weights": weights,
+        "symbols": list(estimates.symbols),
+        "expected_return": expected_return,
+        "volatility": volatility,
+        "sharpe_ratio": float(sharpe_ratio),
+        "success": True,
+        "message": message,
+        "estimation": estimates.metadata(),
+    }
 
 
 def optimize_maximum_sharpe(
@@ -35,12 +129,27 @@ def optimize_maximum_sharpe(
     n_assets = len(estimates.symbols)
     mean_returns = estimates.mean_returns
     covariance = estimates.covariance
-    risk_free = float(risk_free_rate)
+    risk_free = _risk_free_rate(risk_free_rate)
     bounds = build_weight_bounds(
         n_assets,
         allow_short=allow_short,
         max_weight=max_weight,
     )
+
+    deterministic_candidate = _zero_variance_candidate(estimates, bounds)
+    rate_tolerance = 1e-10 * max(1.0, abs(risk_free))
+    if deterministic_candidate is not None:
+        _, deterministic_return = deterministic_candidate
+        if deterministic_return > risk_free + rate_tolerance:
+            return _optimization_result(
+                estimates=estimates,
+                success=False,
+                message=(
+                    "A feasible zero-volatility allocation has an expected return above "
+                    "risk_free_rate, so its finite maximum Sharpe ratio is undefined. "
+                    "Align the risk-free rate with the cash proxy before optimizing."
+                ),
+            )
 
     def negative_sharpe(weights: np.ndarray) -> float:
         expected_return = float(weights @ mean_returns)
@@ -79,45 +188,56 @@ def optimize_maximum_sharpe(
 
     if not result.success:
         logger.warning(f"Maximum-Sharpe optimization failed: {result.message}")
-        return {
-            "weights": np.array([], dtype=float),
-            "symbols": list(estimates.symbols),
-            "expected_return": float("nan"),
-            "volatility": float("nan"),
-            "sharpe_ratio": float("nan"),
-            "success": False,
-            "message": str(result.message),
-            "estimation": estimates.metadata(),
-        }
+        if (
+            deterministic_candidate is not None
+            and abs(deterministic_candidate[1] - risk_free) <= rate_tolerance
+        ):
+            return _optimization_result(
+                estimates=estimates,
+                success=True,
+                message=(
+                    "Feasible zero-volatility allocation selected after the numerical "
+                    "tangent-portfolio solve did not converge."
+                ),
+                weights=deterministic_candidate[0],
+                risk_free_rate=risk_free,
+            )
+        return _optimization_result(
+            estimates=estimates,
+            success=False,
+            message=str(result.message),
+        )
 
     try:
         optimal_weights = validate_weight_solution(result.x, bounds)
     except ValueError as exc:
         logger.warning(f"Maximum-Sharpe solution rejected: {exc}")
-        return {
-            "weights": np.array([], dtype=float),
-            "symbols": list(estimates.symbols),
-            "expected_return": float("nan"),
-            "volatility": float("nan"),
-            "sharpe_ratio": float("nan"),
-            "success": False,
-            "message": str(exc),
-            "estimation": estimates.metadata(),
-        }
+        return _optimization_result(
+            estimates=estimates,
+            success=False,
+            message=str(exc),
+        )
 
-    expected_return = float(optimal_weights @ mean_returns)
-    variance = float(optimal_weights @ covariance @ optimal_weights)
-    volatility = float(np.sqrt(max(variance, 0.0)))
-    sharpe_ratio = (
-        (expected_return - risk_free) / volatility if volatility > 0 else 0.0
+    candidate = _optimization_result(
+        estimates=estimates,
+        success=True,
+        message=str(result.message),
+        weights=optimal_weights,
+        risk_free_rate=risk_free,
     )
-    return {
-        "weights": optimal_weights,
-        "symbols": list(estimates.symbols),
-        "expected_return": expected_return,
-        "volatility": volatility,
-        "sharpe_ratio": float(sharpe_ratio),
-        "success": True,
-        "message": str(result.message),
-        "estimation": estimates.metadata(),
-    }
+    if (
+        deterministic_candidate is not None
+        and abs(deterministic_candidate[1] - risk_free) <= rate_tolerance
+        and float(candidate["sharpe_ratio"]) < 0.0
+    ):
+        return _optimization_result(
+            estimates=estimates,
+            success=True,
+            message=(
+                "Feasible zero-volatility allocation selected over a negative-Sharpe "
+                "risky allocation."
+            ),
+            weights=deterministic_candidate[0],
+            risk_free_rate=risk_free,
+        )
+    return candidate

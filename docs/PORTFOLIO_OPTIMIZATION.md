@@ -23,8 +23,21 @@ asset-by-asset pseudoinverses.
 The dashboard constructs this bundle once per return matrix and passes the
 same immutable object to minimum variance, maximum Sharpe, the efficient
 frontier, portfolio sampling and cost-aware rebalancing. Reuse is accepted
-only when asset names and their order match exactly; otherwise the run fails
-rather than risking a silent weight/data misalignment.
+only when the cleaned index, asset names, order, and every return value match
+exactly; otherwise the run fails rather than leaking a full-sample estimate
+into a training fold or silently misaligning data.
+
+Exactly constant columns such as synthetic cash retain their own annualized
+return and zero covariance. They are excluded from cross-sectional mean and
+covariance shrinkage, which would otherwise invent risky-asset volatility for
+cash.
+
+Maximum-Sharpe optimization also evaluates a feasible all-deterministic
+allocation explicitly. If that allocation earns the selected risk-free rate,
+it is preferred to a negative-Sharpe risky mix. If it earns more than the
+selected risk-free rate, the ratio is mathematically unbounded, so QuantSim
+stops the run and asks for the cash proxy and risk-free-rate assumptions to be
+aligned rather than reporting a misleading finite Sharpe value.
 
 ## Streamlit execution model
 
@@ -148,14 +161,19 @@ lot-level plan, while both target versions remain visible.
 Black-Litterman expected returns are available with explicit absolute views and
 per-view confidence. The Wharton UI labels current portfolio weights as a
 neutral reference when it uses them; they are not presented as market-cap
-weights.
+weights. Reverse-optimized `delta * covariance * weight` returns are excess
+returns; the selected risk-free rate is added to the prior before it is combined
+with absolute total-return views, so downstream Sharpe calculations subtract
+the risk-free rate exactly once.
 
 ## Rolling out-of-sample validation
 
 `run_optimization_walk_forward` performs a causal rolling evaluation for the
 selected construction objective. The convex objectives retain Strategy
 Rulebook constraints in every estimation window; Black-Litterman inputs are
-also recomputed from that window rather than reused from the full sample:
+also recomputed from that window rather than reused from the full sample.
+Static present-day Black-Litterman views are explicitly labelled a historical
+replay rather than causal OOS evidence:
 
 1. estimate inputs using only the preceding training observations;
 2. calculate a new target allocation;
@@ -173,6 +191,10 @@ net returns, turnover, cost breakdown, return, volatility, Sharpe ratio and
 maximum drawdown. This validates the allocation process; it does not guarantee
 future performance. The equal-weight portfolio is a neutral comparator and is
 not asserted to satisfy the mandate.
+
+Rebalance turnover uses the full L1 weight change: gross buys plus gross sells
+divided by pre-trade equity. It is not the one-way/half-turnover convention.
+Costs are applied multiplicatively to wealth before the period return.
 
 An optional point-in-time membership table removes the specific current-universe
 shortcut. Membership is lagged by one observation, forward-filled, and never

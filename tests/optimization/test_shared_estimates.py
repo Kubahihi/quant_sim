@@ -164,6 +164,128 @@ def test_precomputed_estimates_preserve_results_and_reject_misalignment():
         )
 
 
+def test_precomputed_estimates_reject_same_symbols_from_a_different_sample():
+    returns = _sample_returns(periods=180, assets=4)
+    full_sample_estimates = estimate_portfolio_inputs(returns)
+
+    with pytest.raises(ValueError, match="exact cleaned returns index and values"):
+        optimize_minimum_variance(
+            returns.iloc[:-20],
+            portfolio_estimates=full_sample_estimates,
+        )
+
+    revised = returns.copy()
+    revised.iloc[0, 0] += 0.01
+    with pytest.raises(ValueError, match="exact cleaned returns index and values"):
+        optimize_minimum_variance(
+            revised,
+            portfolio_estimates=full_sample_estimates,
+        )
+
+
+def test_precomputed_estimates_accept_the_same_raw_sample_after_cleaning():
+    returns = _sample_returns(periods=180, assets=4)
+    returns.iloc[3, 0] = np.nan
+    returns.iloc[9, 2] = np.inf
+    estimates = estimate_portfolio_inputs(returns)
+
+    result = optimize_minimum_variance(
+        returns,
+        portfolio_estimates=estimates,
+    )
+
+    assert result["success"] is True
+
+
+def test_deterministic_cash_is_not_shrunk_toward_risky_assets():
+    returns = _sample_returns(periods=260, assets=3)
+    returns["CASH"] = np.expm1(np.log1p(0.03) / 252.0)
+
+    estimates = estimate_portfolio_inputs(
+        returns,
+        covariance_shrinkage=0.90,
+        return_shrinkage=0.90,
+    )
+    cash_index = list(estimates.symbols).index("CASH")
+
+    assert estimates.mean_returns[cash_index] == pytest.approx(0.03)
+    assert estimates.sample_mean_returns[cash_index] == pytest.approx(0.03)
+    np.testing.assert_array_equal(estimates.covariance[cash_index], 0.0)
+    np.testing.assert_array_equal(estimates.covariance[:, cash_index], 0.0)
+    np.testing.assert_array_equal(estimates.sample_covariance[cash_index], 0.0)
+    assert estimates.metadata()["deterministic_assets"] == ["CASH"]
+
+
+def test_maximum_sharpe_uses_feasible_cash_instead_of_negative_risky_mix():
+    periodic_cash_return = np.expm1(np.log1p(0.03) / 252.0)
+    returns = pd.DataFrame(
+        {
+            "RISK": np.tile([-0.010, 0.005], 180),
+            "CASH": np.full(360, periodic_cash_return),
+        }
+    )
+
+    result = optimize_maximum_sharpe(returns, risk_free_rate=0.03)
+
+    assert result["success"] is True
+    np.testing.assert_allclose(result["weights"], [0.0, 1.0], atol=1e-10)
+    assert result["expected_return"] == pytest.approx(0.03)
+    assert result["volatility"] == pytest.approx(0.0)
+    assert result["sharpe_ratio"] == pytest.approx(0.0)
+    assert "zero-volatility" in result["message"]
+
+
+def test_maximum_sharpe_rejects_infinite_cash_proxy_sharpe_ratio():
+    periodic_cash_return = np.expm1(np.log1p(0.04) / 252.0)
+    returns = pd.DataFrame(
+        {
+            "RISK": np.tile([-0.010, 0.005], 180),
+            "CASH": np.full(360, periodic_cash_return),
+        }
+    )
+
+    result = optimize_maximum_sharpe(returns, risk_free_rate=0.03)
+
+    assert result["success"] is False
+    assert "zero-volatility" in result["message"]
+    assert "undefined" in result["message"]
+
+
+def test_unexplained_constant_risky_asset_fails_closed():
+    returns = _sample_returns(periods=260, assets=3)
+    returns["STALE_RISKY_TICKER"] = 0.0
+
+    with pytest.raises(
+        ValueError,
+        match="Constant return columns are not assumed risk-free.*STALE_RISKY_TICKER",
+    ):
+        estimate_portfolio_inputs(returns)
+
+
+def test_custom_constant_cash_proxy_requires_explicit_opt_in():
+    returns = _sample_returns(periods=260, assets=3)
+    periodic_cash_return = np.expm1(np.log1p(0.025) / 252.0)
+    returns["TREASURY_PROXY"] = periodic_cash_return
+
+    estimates = estimate_portfolio_inputs(
+        returns,
+        deterministic_assets=["TREASURY_PROXY"],
+    )
+    cash_index = list(estimates.symbols).index("TREASURY_PROXY")
+
+    assert estimates.mean_returns[cash_index] == pytest.approx(0.025)
+    np.testing.assert_array_equal(estimates.covariance[cash_index], 0.0)
+    assert estimates.deterministic_assets == ("TREASURY_PROXY",)
+
+
+def test_static_estimator_rejects_impossible_simple_returns():
+    returns = _sample_returns(periods=40, assets=2)
+    returns.iloc[3, 0] = -1.0
+
+    with pytest.raises(ValueError, match="greater than -100%"):
+        estimate_portfolio_inputs(returns)
+
+
 def test_frontier_starts_at_global_minimum_variance_and_uses_supplied_rate():
     returns = _sample_returns()
     risk_free_rate = 0.0175
@@ -264,6 +386,44 @@ def test_black_litterman_view_space_solve_matches_precision_space_reference(
     )
 
     np.testing.assert_allclose(optimized.mean_returns, reference, rtol=1e-8, atol=1e-10)
+
+
+def test_black_litterman_prior_is_total_return_and_views_are_absolute():
+    returns = _sample_returns(periods=320, assets=4)
+    market_weights = np.full(returns.shape[1], 1.0 / returns.shape[1])
+    risk_free_rate = 0.035
+    risk_aversion = 2.75
+
+    prior = estimate_black_litterman_inputs(
+        returns,
+        market_weights=market_weights,
+        risk_free_rate=risk_free_rate,
+        risk_aversion=risk_aversion,
+    )
+    expected_excess = risk_aversion * prior.covariance @ market_weights
+    np.testing.assert_allclose(
+        prior.mean_returns,
+        risk_free_rate + expected_excess,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    details = prior.expected_return_details
+    assert details["risk_free_rate"] == pytest.approx(risk_free_rate)
+    np.testing.assert_allclose(
+        list(details["equilibrium_excess_returns"].values()),
+        expected_excess,
+    )
+
+    absolute_view = 0.05
+    posterior = estimate_black_litterman_inputs(
+        returns,
+        market_weights=market_weights,
+        views={"A0": absolute_view},
+        view_confidences={"A0": 1.0},
+        risk_free_rate=risk_free_rate,
+        risk_aversion=risk_aversion,
+    )
+    assert posterior.mean_returns[0] == pytest.approx(absolute_view, abs=1e-8)
 
 
 def test_portfolio_cloud_variance_matches_direct_quadratic_form():

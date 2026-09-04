@@ -486,6 +486,8 @@ def _portfolio_model(
 
     if (
         report_snapshot
+        and "is_ready" in validation
+        and _boolean(validation.get("is_ready"))
         and _boolean(report_snapshot.get("reconciled"))
         and _first_text(report_snapshot, "snapshot_id")
         and "portfolio_snapshot_hash" not in validation_issue_codes
@@ -1193,7 +1195,6 @@ def _integrity_model(
             ),
             "all_acknowledged": (
                 _boolean(rules.get("all_acknowledged"))
-                or bool(rules.get("acknowledged_by"))
                 if rules_available
                 else None
             ),
@@ -1482,9 +1483,10 @@ def _app_record_model(
 def build_judge_view_model(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Build a stable, non-mutating judge projection from heterogeneous records.
 
-    Portfolio authority is strict: a reconciled snapshot attached to the report
-    wins, followed by the canonical reconciled WInS pipeline snapshot.  The team
-    tracker is only a provisional fallback and is labelled as such.
+    Portfolio authority is strict: a reconciled snapshot attached to a report
+    wins only after explicit report validation succeeds, followed by the
+    canonical reconciled WInS pipeline snapshot. The team tracker is only a
+    provisional fallback and is labelled as such.
     """
     source = _mapping(raw)
     report_payload = _payload(source.get("report_record", source.get("report_workspace")))

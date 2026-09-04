@@ -9,6 +9,7 @@ from src.data.fetchers.yahoo_fetcher import YahooFetcher
 from src.optimization import optimize_minimum_variance, optimize_maximum_sharpe
 from src.simulation import run_monte_carlo_simulation
 from src.analytics.correlation import calculate_correlation_matrix
+from src.analytics.returns import calculate_annualized_return
 
 
 def main() -> int:
@@ -65,7 +66,7 @@ def main() -> int:
     equal_weights = np.ones(returns.shape[1]) / returns.shape[1]
     portfolio_return = (returns * equal_weights).sum(axis=1)
     
-    ann_return = portfolio_return.mean() * 252
+    ann_return = calculate_annualized_return(portfolio_return)
     ann_vol = portfolio_return.std() * np.sqrt(252)
     
     price_paths, stats = run_monte_carlo_simulation(

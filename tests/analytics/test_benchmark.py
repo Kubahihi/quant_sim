@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.analytics import (
     calculate_active_risk_metrics,
@@ -9,6 +10,7 @@ from src.analytics import (
     calculate_risk_contribution,
     calculate_portfolio_daily_returns,
 )
+from src.analytics.portfolio_metrics import build_portfolio_timeseries
 
 
 def _build_sample_asset_returns() -> pd.DataFrame:
@@ -46,6 +48,29 @@ def test_active_risk_metrics_are_computed_when_benchmark_is_available():
     assert np.isfinite(float(metrics["information_ratio"]))
     assert np.isfinite(float(metrics["up_capture"]))
     assert np.isfinite(float(metrics["down_capture"]))
+
+    active = portfolio_returns - benchmark_returns
+    assert np.isclose(
+        float(metrics["active_return_annualized"]),
+        float(active.mean() * 252),
+    )
+    expected_ir = float(active.mean() * 252 / (active.std() * np.sqrt(252)))
+    assert np.isclose(float(metrics["information_ratio"]), expected_ir)
+
+
+def test_portfolio_returns_reject_missing_values_instead_of_treating_them_as_zero():
+    returns = _build_sample_asset_returns()
+    returns.loc[returns.index[0], "AAA"] = np.nan
+
+    with np.testing.assert_raises_regex(ValueError, "finite values"):
+        calculate_portfolio_daily_returns(returns, np.array([0.6, 0.4]))
+
+
+def test_portfolio_timeseries_drawdown_includes_initial_value_peak():
+    result = build_portfolio_timeseries(pd.Series([-0.20, 0.10]), initial_value=100.0)
+
+    assert result["value"].tolist() == pytest.approx([80.0, 88.0])
+    assert result["drawdown"].tolist() == pytest.approx([-0.20, -0.12])
 
 
 def test_active_risk_metrics_gracefully_handle_missing_overlap():
