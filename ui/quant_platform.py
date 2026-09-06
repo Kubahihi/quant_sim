@@ -497,7 +497,11 @@ def _align_prices_and_weights(
     if not available_tickers:
         raise ValueError("No valid market data was fetched for the selected tickers.")
 
-    aligned_prices = prices[available_tickers].dropna(how="all")
+    from src.data.price_alignment import align_daily_prices
+    aligned_prices = align_daily_prices(prices[available_tickers])
+    filled_count = aligned_prices.attrs.get("forward_filled_observations", 0)
+    if filled_count:
+        warnings.append(f"Forward-filled {filled_count} prices across short market-calendar gaps (maximum 3 sessions / 7 days).")
     if aligned_prices.empty:
         raise ValueError("Fetched data is empty after alignment.")
 
@@ -987,9 +991,9 @@ def _compute_analysis(
     else:
         ai_review["available"] = True
 
-    # Geometric Brownian motion expects an arithmetic annual drift.  Keep CAGR
-    # for reporting, but do not silently use it as the GBM parameter.
-    expected_return = float(np.clip(portfolio_returns.mean() * 252.0, -0.90, 2.5))
+    # Both simulation engines accept an effective annual simple return.  Reuse
+    # the same geometrically annualized portfolio metric shown to the user.
+    expected_return = float(np.clip(metrics["annualized_return"], -0.90, 2.5))
     volatility = float(max(metrics["volatility"], 1e-6))
     price_paths, simulation_stats = run_monte_carlo_simulation(
         current_value=100000.0,
@@ -1173,6 +1177,7 @@ def _compute_analysis(
     portfolio_timeseries = build_portfolio_timeseries(portfolio_returns, initial_value=100.0)
 
     quant_stack = run_quant_stack(
+        user_id=user_id,
         portfolio_returns=portfolio_returns,
         returns_df=returns,
         config={

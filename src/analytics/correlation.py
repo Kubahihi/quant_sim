@@ -23,8 +23,15 @@ def calculate_beta(
     market_returns: pd.Series,
 ) -> float:
     """Calculate beta vs market"""
-    covariance = asset_returns.cov(market_returns)
-    market_variance = market_returns.var()
+    aligned = pd.concat(
+        [asset_returns.rename("asset"), market_returns.rename("market")], axis=1
+    ).dropna(how="any")
+    if len(aligned) < 2:
+        return 0.0
+    if not np.isfinite(aligned.to_numpy(dtype=float)).all():
+        raise ValueError("Return series must contain only finite values.")
+    covariance = aligned["asset"].cov(aligned["market"])
+    market_variance = aligned["market"].var()
     
     if market_variance == 0:
         return 0.0
@@ -38,15 +45,24 @@ def calculate_alpha(
     risk_free_rate: float = 0.03,
     periods_per_year: int = 252,
 ) -> float:
-    """Calculate Jensen's alpha"""
-    from .returns import calculate_annualized_return
-    
-    beta = calculate_beta(asset_returns, market_returns)
-    
-    asset_ann_return = calculate_annualized_return(asset_returns, periods_per_year)
-    market_ann_return = calculate_annualized_return(market_returns, periods_per_year)
-    
-    expected_return = risk_free_rate + beta * (market_ann_return - risk_free_rate)
-    alpha = asset_ann_return - expected_return
-    
-    return float(alpha)
+    """Calculate arithmetic annualized Jensen alpha from periodic excess returns."""
+    if periods_per_year <= 0:
+        raise ValueError("periods_per_year must be positive.")
+    if not np.isfinite(risk_free_rate) or risk_free_rate <= -1.0:
+        raise ValueError("risk_free_rate must be finite and greater than -100%.")
+
+    aligned = pd.concat(
+        [asset_returns.rename("asset"), market_returns.rename("market")], axis=1
+    ).dropna(how="any")
+    if aligned.shape[0] < 2:
+        return 0.0
+
+    asset = aligned["asset"].astype(float)
+    market = aligned["market"].astype(float)
+    if not np.isfinite(asset.to_numpy()).all() or not np.isfinite(market.to_numpy()).all():
+        raise ValueError("Return series must contain only finite values.")
+
+    periodic_rf = float(np.expm1(np.log1p(risk_free_rate) / periods_per_year))
+    beta = calculate_beta(asset, market)
+    alpha_periodic = (asset - periodic_rf).mean() - beta * (market - periodic_rf).mean()
+    return float(alpha_periodic * periods_per_year)

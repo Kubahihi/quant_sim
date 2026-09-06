@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+import re
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -22,6 +23,50 @@ def _present(value: Any) -> bool:
     if isinstance(value, (list, tuple, set, dict)):
         return bool(value)
     return True
+
+
+_MEASURABLE_SELECTION_TEXT = re.compile(
+    r"(?:[<>]=?|\b(?:above|below|at least|at most|no more than|minimum|maximum|"
+    r"positive|negative|top quartile|bottom quartile)\b|\d)",
+    flags=re.IGNORECASE,
+)
+
+
+def _measurable_selection_value(value: Any) -> bool:
+    """Return whether a selection criterion contains an observable pass/fail rule."""
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip() and _MEASURABLE_SELECTION_TEXT.search(value))
+    if isinstance(value, Mapping):
+        keys = {str(key).strip().casefold() for key in value}
+        threshold_keys = {
+            "threshold", "minimum", "maximum", "min", "max", "operator",
+            "criterion", "test", "target", "value",
+        }
+        if keys & threshold_keys and any(
+            _present(value.get(key))
+            for key in value
+            if str(key).strip().casefold() in threshold_keys
+        ):
+            return True
+        return any(_measurable_selection_value(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_measurable_selection_value(item) for item in value)
+    return False
+
+
+def _has_measurable_selection_rules(strategy: Mapping[str, Any]) -> bool:
+    for field in ("selection_rules", "selection_factors", "selection_process"):
+        value = strategy.get(field)
+        if isinstance(value, Mapping):
+            if any(_measurable_selection_value(item) for item in value.values()):
+                return True
+        elif _measurable_selection_value(value):
+            return True
+    return False
 
 
 def _assessment(checks: Sequence[tuple[str, str, bool]]) -> dict[str, Any]:
@@ -129,10 +174,22 @@ def assess_strategy_constitution(mandate_record: Any, strategy_record: Any) -> d
             len(behavior_answers) >= 10 and len(behavior_actions) >= 3 and _present(behavior.get("decision_protocol")),
         ),
         ("thesis", "One-sentence strategy thesis", any(_present(strategy.get(key)) for key in ("thesis", "strategy_thesis", "one_sentence_thesis"))),
-        ("selection", "Security-selection rules", any(_present(strategy.get(key)) for key in ("process", "selection_process", "selection_factors"))),
+        (
+            "selection",
+            "Measurable security-selection rules",
+            _has_measurable_selection_rules(strategy),
+        ),
         ("sizing", "Position and sector sizing rules", float(strategy.get("max_position_weight") or 0) > 0 and float(strategy.get("max_sector_weight") or 0) > 0),
-        ("sell", "Sell / thesis-break discipline", any(_present(strategy.get(key)) for key in ("process", "sell_discipline", "sell_rules"))),
-        ("rebalance", "Rebalancing and drift rules", any(_present(strategy.get(key)) for key in ("rebalance_policy", "drift_limit", "max_goal_drift", "max_sector_drift"))),
+        (
+            "sell",
+            "Explicit sell / thesis-break discipline",
+            any(_present(strategy.get(key)) for key in ("sell_discipline", "sell_rules")),
+        ),
+        (
+            "rebalance",
+            "Explicit rebalancing policy",
+            _present(strategy.get("rebalance_policy")),
+        ),
     ]
     return _assessment(checks)
 

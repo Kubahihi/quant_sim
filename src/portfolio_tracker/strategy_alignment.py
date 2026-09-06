@@ -95,6 +95,16 @@ def _optional_weight(value: Any) -> float | None:
     return _weight(value)
 
 
+def _optional_turnover(value: Any) -> float | None:
+    """Return an uncapped turnover fraction (1.0 means 100%)."""
+    if value is None or value == "":
+        return None
+    number = _finite_number(value, math.nan)
+    if not math.isfinite(number) or number < 0.0:
+        return None
+    return number
+
+
 def _normal_key(value: Any) -> str:
     return " ".join(str(value or "").strip().casefold().split())
 
@@ -354,6 +364,12 @@ def normalize_strategy_rulebook(
         "require_approved",
         "min_beta",
         "max_beta",
+        "selection_rules",
+        "selection_factors",
+        "selection_process",
+        "sell_discipline",
+        "sell_rules",
+        "rebalance_policy",
     )
     configured.extend(field for field in recognised_fields if field in raw)
     if normalised_mandate["liquidity_need_pct"] > 0:
@@ -416,6 +432,9 @@ def normalize_strategy_rulebook(
         if isinstance(score_weights_raw, Mapping):
             value = max(0.0, _finite_number(score_weights_raw.get(component), default))
         score_weights[component] = value
+    if sum(score_weights.values()) <= 0:
+        score_weights = dict(DEFAULT_SCORE_WEIGHTS)
+        warnings.append("All score weights were zero; default score weights were applied.")
 
     min_beta = _optional_number(raw.get("min_beta"))
     max_beta = _optional_number(raw.get("max_beta"))
@@ -426,6 +445,12 @@ def normalize_strategy_rulebook(
     return {
         "name": _display_name(raw.get("name"), "Investment strategy"),
         "thesis": str(raw.get("thesis") or "").strip(),
+        "selection_rules": deepcopy(raw.get("selection_rules")),
+        "selection_factors": deepcopy(raw.get("selection_factors")),
+        "selection_process": str(raw.get("selection_process") or "").strip(),
+        "sell_discipline": str(raw.get("sell_discipline") or "").strip(),
+        "sell_rules": deepcopy(raw.get("sell_rules")),
+        "rebalance_policy": str(raw.get("rebalance_policy") or "").strip(),
         "max_position_weight": _weight(raw.get("max_position_weight", 1.0)),
         "max_sector_weight": _weight(raw.get("max_sector_weight", 1.0)),
         "min_cash_weight": min_cash,
@@ -433,8 +458,8 @@ def normalize_strategy_rulebook(
         "target_holdings": target_holdings,
         "min_holdings": min_holdings,
         "max_holdings": max_holdings,
-        "max_turnover": _optional_weight(raw.get("max_turnover")),
-        "current_turnover": _optional_weight(raw.get("current_turnover")),
+        "max_turnover": _optional_turnover(raw.get("max_turnover")),
+        "current_turnover": _optional_turnover(raw.get("current_turnover")),
         "max_goal_drift": _weight(raw.get("max_goal_drift", 0.10)),
         "max_sector_drift": _weight(raw.get("max_sector_drift", 0.10)),
         "sector_targets": sector_targets,
@@ -1324,19 +1349,35 @@ def analyze_strategy_alignment(
     max_beta = normalised_strategy["max_beta"]
     portfolio_rule_checks: list[dict[str, Any]] = []
     if (min_beta is not None or max_beta is not None) and weighted_beta is None:
-        warnings.append(
+        portfolio_rule_checks.append(
+            _check(
+                "portfolio_beta_available",
+                False,
+                "Portfolio beta data is available for the configured beta rule.",
+            )
+        )
+        violations.append(
             _issue(
                 "beta_not_available",
-                "A portfolio beta rule is configured, but no holding beta data is available.",
-                severity="low",
+                "A portfolio beta rule is configured, but no holding beta data is available; "
+                "compliance cannot be established.",
+                severity="high",
                 scope="input",
             )
         )
     elif (min_beta is not None or max_beta is not None) and beta_coverage < 0.90:
-        warnings.append(
+        portfolio_rule_checks.append(
+            _check(
+                "portfolio_beta_coverage",
+                False,
+                "Portfolio beta covers at least 90% of invested value.",
+            )
+        )
+        violations.append(
             _issue(
                 "beta_coverage_low",
-                f"Portfolio beta covers only {beta_coverage:.1%} of invested value.",
+                f"Portfolio beta covers only {beta_coverage:.1%} of invested value; "
+                "the configured beta rule is not fully verifiable.",
                 severity="medium",
                 scope="input",
                 actual=beta_coverage,
@@ -1382,11 +1423,19 @@ def analyze_strategy_alignment(
     current_turnover = normalised_strategy["current_turnover"]
     if max_turnover is not None:
         if current_turnover is None:
+            portfolio_rule_checks.append(
+                _check(
+                    "turnover_available",
+                    False,
+                    "Turnover is supplied under the rulebook's stated measurement convention.",
+                )
+            )
             warnings.append(
                 _issue(
                     "turnover_not_available",
-                    "A turnover limit is configured, but current_turnover was not supplied.",
-                    severity="low",
+                    "A turnover limit is configured, but current_turnover was not supplied; "
+                    "compliance is unknown.",
+                    severity="medium",
                     scope="input",
                     limit=max_turnover,
                 )
@@ -1504,7 +1553,18 @@ def analyze_strategy_alignment(
         if name == "holding_rules":
             components[name]["portfolio_checks"] = portfolio_rule_checks
         weighted_score += score * effective_weight
-    alignment_score = weighted_score if applicable_weight > 0 else 100.0
+    assessment_status = "assessed" if applicable_weight > 0 else "not_assessable"
+    alignment_score = weighted_score if applicable_weight > 0 else 0.0
+    if assessment_status == "not_assessable":
+        warnings.append(
+            _issue(
+                "alignment_not_assessable",
+                "No scored strategy rule is applicable to the supplied portfolio; "
+                "alignment has not been established.",
+                severity="medium",
+                scope="input",
+            )
+        )
 
     severity_order = {"high": 0, "medium": 1, "low": 2}
     violations.sort(
@@ -1527,7 +1587,12 @@ def analyze_strategy_alignment(
     return {
         "alignment_score": alignment_score,
         "score": alignment_score,
-        "rating": _rating(alignment_score),
+        "rating": (
+            _rating(alignment_score)
+            if assessment_status == "assessed"
+            else "Not assessable"
+        ),
+        "assessment_status": assessment_status,
         "scoring_coverage": scoring_coverage,
         "mandate": normalised_mandate,
         "strategy": normalised_strategy,

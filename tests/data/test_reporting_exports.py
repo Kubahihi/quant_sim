@@ -58,6 +58,19 @@ def _sample_report_payload() -> dict:
         "simulation_percentiles": pd.DataFrame(
             {"p5": [95_000, 96_200], "p50": [100_000, 103_000], "p95": [106_000, 110_000]}
         ),
+        "robustness": {
+            "strategy_refit_performed": False,
+            "supports_strategy_oos_claim": False,
+            "scope": "Fixed-return rolling segmentation only.",
+            "metrics": {
+                "psr": 0.75,
+                "dsr": None,
+                "evaluation_sharpe": 0.5,
+                "evaluation_annualized_return": 0.07,
+                "psr_interpretation": "Illustrative stability diagnostic.",
+                "dsr_interpretation": "Not calculated without genuine trials.",
+            },
+        },
         "ai_review": {
             "summary": "Healthy risk/reward balance.",
             "risks": "Equity drawdown sensitivity.",

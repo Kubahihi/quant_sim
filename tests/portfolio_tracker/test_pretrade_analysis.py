@@ -319,6 +319,116 @@ def test_turnover_is_gross_notional_over_pretrade_equity():
     assert result["turnover_definition"] == TURNOVER_DEFINITION
 
 
+def test_individual_bond_buy_uses_par_quote_and_reconciles_projected_cash():
+    result = simulate_trade_plan(
+        [],
+        [{
+            "ticker": "BOND1",
+            "action": "buy",
+            "quantity": 1,
+            "price": 100,
+            "security_type": "Bond",
+            "bond_instrument_type": "individual",
+            "face_value": 1_000,
+            "coupon_rate": 0.05,
+            "maturity_date": "2030-12-31",
+        }],
+        initial_capital=1_000,
+    )
+
+    assert result["plan_valid"] is True
+    assert result["trades"][0]["notional"] == pytest.approx(1_000)
+    assert result["gross_proposed_notional"] == pytest.approx(1_000)
+    assert result["projected_cash_value"] == pytest.approx(0)
+    assert result["after_cash_value"] == pytest.approx(0)
+    bond = result["after_positions"][0]
+    assert bond["face_value"] == pytest.approx(1_000)
+    assert bond["maturity_date"] == "2030-12-31"
+    snapshot = build_competition_strategy_snapshot(
+        result["after_positions"], initial_capital=1_000
+    )
+    assert snapshot["holdings"][0]["market_value"] == pytest.approx(1_000)
+    assert snapshot["holdings"][0]["current_price"] == pytest.approx(100)
+
+
+def test_individual_bond_partial_sell_preserves_terms_and_reconciles_cash():
+    positions = [{
+        "id": 1,
+        "ticker": "BOND1",
+        "status": "open",
+        "quantity": 2,
+        "entry_price": 99,
+        "last_price": 99,
+        "security_type": "Bond",
+        "bond_instrument_type": "individual",
+        "face_value": 1_000,
+        "coupon_rate": 0.05,
+        "maturity_date": "2030-12-31",
+    }]
+
+    result = simulate_trade_plan(
+        positions,
+        [{"ticker": "BOND1", "action": "sell", "quantity": 1, "price": 100}],
+        initial_capital=2_000,
+    )
+
+    assert result["plan_valid"] is True
+    assert result["trades"][0]["notional"] == pytest.approx(1_000)
+    assert result["projected_cash_value"] == pytest.approx(1_020)
+    assert result["after_cash_value"] == pytest.approx(1_020)
+    closed = next(item for item in result["after_positions"] if item["status"] == "closed")
+    assert closed["face_value"] == pytest.approx(1_000)
+    assert closed["coupon_rate"] == pytest.approx(0.05)
+    assert closed["maturity_date"] == "2030-12-31"
+    assert closed["exit_price"] == pytest.approx(100)
+
+
+def test_individual_bond_fifo_sell_values_each_consumed_lot_and_reconciles_cash():
+    positions = [
+        {
+            "id": 1,
+            "ticker": "BOND1",
+            "status": "open",
+            "entry_date": "2025-01-01",
+            "quantity": 1,
+            "entry_price": 100,
+            "last_price": 100,
+            "security_type": "Bond",
+            "bond_instrument_type": "individual",
+            "face_value": 1_000,
+            "maturity_date": "2030-12-31",
+        },
+        {
+            "id": 2,
+            "ticker": "BOND1",
+            "status": "open",
+            "entry_date": "2025-02-01",
+            "quantity": 1,
+            "entry_price": 100,
+            "last_price": 100,
+            "security_type": "Bond",
+            "bond_instrument_type": "individual",
+            "face_value": 2_000,
+            "maturity_date": "2031-12-31",
+        },
+    ]
+
+    result = simulate_trade_plan(
+        positions,
+        [{"ticker": "BOND1", "action": "sell", "quantity": 2, "price": 100}],
+        initial_capital=500_000,
+    )
+
+    assert result["plan_valid"] is True
+    assert result["trades"][0]["notional"] == pytest.approx(3_000)
+    assert result["gross_proposed_notional"] == pytest.approx(3_000)
+    assert result["projected_cash_value"] == pytest.approx(500_000)
+    assert result["after_cash_value"] == pytest.approx(500_000)
+    assert result["cash_ledger_projection_value"] == pytest.approx(500_000)
+    assert result["cash_reconciliation_difference"] == pytest.approx(0)
+    assert result["cash_reconciled"] is True
+
+
 def test_pretrade_analysis_reports_new_position_limit_violation_and_weight_delta():
     positions = [
         {
@@ -421,7 +531,7 @@ def test_goal_and_sector_drift_comparison_uses_before_after_allocations():
     assert result["status"] == "pass"
 
 
-def test_incremental_turnover_is_added_only_when_baseline_is_explicit():
+def test_rebalance_turnover_is_not_added_to_a_historical_baseline():
     result = analyze_pretrade_impact(
         [],
         [{"ticker": "AAA", "action": "buy", "quantity": 1, "price": 100}],
@@ -437,9 +547,53 @@ def test_incremental_turnover_is_added_only_when_baseline_is_explicit():
     )
 
     assert result["incremental_turnover"] == pytest.approx(0.10)
+    assert result["turnover_assessment"]["projected_turnover"] == pytest.approx(0.10)
+    assert result["turnover_assessment"]["status"] == "within_limit"
+    assert "turnover_limit_exceeded" not in {
+        item["code"] for item in result["violation_changes"]["new"]
+    }
+
+
+def test_proposed_rebalance_over_limit_requires_review_without_a_baseline():
+    result = analyze_pretrade_impact(
+        [],
+        [{"ticker": "AAA", "action": "buy", "quantity": 2, "price": 100}],
+        {},
+        {
+            "max_turnover": 0.10,
+            "min_cash_weight": 0.0,
+            "max_cash_weight": 1.0,
+        },
+        theses=_theses(),
+        initial_capital=1_000,
+    )
+
+    assert result["status"] == "review"
+    assert result["turnover_assessment"]["status"] == "limit_exceeded"
+    assert result["turnover_assessment"]["minimum_exceeds_limit"] is True
+    assert result["turnover_assessment"]["projected_turnover"] == pytest.approx(0.20)
+    assert result["turnover_assessment"]["unit"] == (
+        "fraction of pre-trade portfolio equity (1.0 = 100%)"
+    )
     assert "turnover_limit_exceeded" in {
         item["code"] for item in result["violation_changes"]["new"]
     }
+
+
+def test_turnover_fraction_above_one_is_not_mistaken_for_a_percentage():
+    result = analyze_pretrade_impact(
+        [],
+        [{"ticker": "AAA", "action": "buy", "quantity": 1, "price": 100}],
+        {},
+        {"max_turnover": 0.10},
+        theses=_theses(),
+        initial_capital=1_000,
+        current_turnover=1.5,
+    )
+
+    assert result["turnover_assessment"]["baseline_turnover"] == pytest.approx(1.5)
+    assert result["turnover_assessment"]["projected_turnover"] == pytest.approx(0.10)
+    assert result["turnover_assessment"]["status"] == "within_limit"
 
 
 def test_blocked_pretrade_analysis_keeps_before_and_after_identical():

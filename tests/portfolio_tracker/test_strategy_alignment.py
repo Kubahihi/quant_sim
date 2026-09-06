@@ -215,14 +215,76 @@ def test_supplied_portfolio_value_infers_cash_and_weight_based_values():
     assert result["holdings"][0]["market_value"] == pytest.approx(600)
 
 
-def test_empty_inputs_have_a_stable_neutral_result():
+def test_empty_inputs_are_not_misreported_as_excellent_alignment():
     result = analyze_strategy_alignment([], {}, {})
 
-    assert result["alignment_score"] == pytest.approx(100)
+    assert result["alignment_score"] == pytest.approx(0)
+    assert result["rating"] == "Not assessable"
+    assert result["assessment_status"] == "not_assessable"
+    assert result["scoring_coverage"] == pytest.approx(0)
+    assert any(item["code"] == "alignment_not_assessable" for item in result["warnings"])
     assert result["portfolio_summary"]["effective_holdings"] == 0
     assert result["goal_allocation"] == []
     assert result["sector_allocation"] == []
     assert result["holdings"] == []
+
+
+def test_all_zero_score_weights_fall_back_instead_of_erasing_violations():
+    result = analyze_strategy_alignment(
+        [{"ticker": "AAA", "market_value": 500, "thesis_status": "active"}],
+        {},
+        {
+            "max_position_weight": 0.40,
+            "score_weights": {name: 0 for name in (
+                "goal_allocation", "sector_alignment", "concentration", "cash", "holding_rules"
+            )},
+        },
+        portfolio_value=1_000,
+    )
+
+    assert any(item["code"] == "position_limit_exceeded" for item in result["violations"])
+    assert result["alignment_score"] < 100
+    assert result["assessment_status"] == "assessed"
+    assert any(
+        "default score weights" in message
+        for message in result["strategy"]["normalization_warnings"]
+    )
+
+
+def test_configured_beta_limit_fails_closed_when_beta_is_missing():
+    result = analyze_strategy_alignment(
+        [{"ticker": "AAA", "market_value": 100, "thesis_status": "active"}],
+        {},
+        {"max_beta": 1.0},
+    )
+
+    assert result["alignment_score"] < 100
+    assert any(item["code"] == "beta_not_available" for item in result["violations"])
+    beta_check = next(
+        item for item in result["portfolio_rule_checks"]
+        if item["code"] == "portfolio_beta_available"
+    )
+    assert beta_check["passed"] is False
+
+
+def test_rulebook_preserves_explicit_selection_sell_and_rebalance_rules():
+    strategy = normalize_strategy_rulebook(
+        {
+            "selection_rules": {"ROIC": ">= 15%"},
+            "sell_discipline": "Sell when ROIC falls below 10%.",
+            "rebalance_policy": "Review quarterly; rebalance above 3% drift.",
+        }
+    )
+
+    assert strategy["selection_rules"] == {"ROIC": ">= 15%"}
+    assert strategy["sell_discipline"].startswith("Sell")
+    assert strategy["rebalance_policy"].startswith("Review")
+
+
+def test_turnover_over_one_is_preserved_as_more_than_one_hundred_percent():
+    strategy = normalize_strategy_rulebook({"max_turnover": 1.5})
+
+    assert strategy["max_turnover"] == pytest.approx(1.5)
 
 
 def test_duplicate_ticker_lots_are_one_position_for_concentration_and_limits():

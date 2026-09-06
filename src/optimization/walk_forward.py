@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
 from .constraints import build_weight_bounds
+from .constraint_sets import build_constraint_set
 from .estimators import (
     DEFAULT_COVARIANCE_SHRINKAGE,
     DEFAULT_RETURN_SHRINKAGE,
@@ -81,12 +83,16 @@ def _performance_metrics(
     total_return = float(wealth.iloc[-1] - 1.0)
     annualized_return = float((1.0 + total_return) ** (TRADING_DAYS / len(clean)) - 1.0)
     volatility = float(clean.std(ddof=1) * np.sqrt(TRADING_DAYS)) if len(clean) > 1 else 0.0
+    periodic_rf = float(np.expm1(np.log1p(float(risk_free_rate)) / TRADING_DAYS))
     sharpe_ratio = (
-        (float(clean.mean()) * TRADING_DAYS - float(risk_free_rate)) / volatility
+        float((clean - periodic_rf).mean() / clean.std(ddof=1) * np.sqrt(TRADING_DAYS))
         if volatility > 0
         else 0.0
     )
-    drawdown = wealth / wealth.cummax() - 1.0
+    # The capital immediately before the first observed return is a real peak.
+    # Omitting it reports zero drawdown when the very first period loses money.
+    running_peak = wealth.cummax().clip(lower=1.0)
+    drawdown = wealth / running_peak - 1.0
     return {
         "observations": float(len(clean)),
         "total_return": total_return,
@@ -97,6 +103,33 @@ def _performance_metrics(
         "total_turnover": float(turnover.sum()),
         "transaction_cost_drag": float(transaction_costs.sum()),
     }
+
+
+def _net_of_rebalance_cost(gross_return: float, cost_drag: float) -> float:
+    """Apply a pre-return proportional cost to wealth exactly."""
+    gross = float(gross_return)
+    cost = float(cost_drag)
+    if not np.isfinite(gross):
+        raise ValueError("gross portfolio return must be finite.")
+    if not np.isfinite(cost) or not 0.0 <= cost < 1.0:
+        raise ValueError("transaction cost drag must be finite and below 100%.")
+    return float((1.0 - cost) * (1.0 + gross) - 1.0)
+
+
+def _liquidity_failures(trades, symbols, capital, adv, limit, *, require_adv=False):
+    """Check actual orders, including forced departures, against the same NAV."""
+    if limit is None and not require_adv:
+        return []
+    failures = []
+    for index, symbol in enumerate(symbols):
+        notional = abs(float(trades[index])) * capital
+        if notional <= 1e-8:
+            continue
+        value = float((adv or {}).get(symbol, np.nan))
+        if (not np.isfinite(value) or value <= 0
+                or (limit is not None and notional / value > limit + 1e-7)):
+            failures.append(symbol)
+    return failures
 
 
 def run_optimization_walk_forward(
@@ -131,16 +164,24 @@ def run_optimization_walk_forward(
     market_impact_bps: float = 0.0,
     max_adv_participation: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Causally re-estimate, optimize, and apply weights in rolling OOS windows."""
+    """Re-estimate, optimize, and apply weights in rolling evaluation windows."""
     method = str(optimizer).strip().lower()
     if method not in SUPPORTED_OPTIMIZERS:
         raise ValueError(
             f"optimizer must be one of {sorted(SUPPORTED_OPTIMIZERS)}."
         )
+    return_model = str(expected_return_model).strip().lower()
+    if return_model not in {"shrunk_historical", "black_litterman"}:
+        raise ValueError(
+            "expected_return_model must be 'shrunk_historical' or 'black_litterman'."
+        )
+    static_black_litterman_views = bool(
+        return_model == "black_litterman" and dict(black_litterman_views or {})
+    )
     if method == "maximum_sharpe" and (
         strategy is not None
         or turnover_limit is not None
-        or str(expected_return_model).strip().lower() == "black_litterman"
+        or return_model == "black_litterman"
         or average_daily_dollar_volume is not None
         or float(half_spread_bps) > 0
         or float(market_impact_bps) > 0
@@ -157,10 +198,23 @@ def run_optimization_walk_forward(
     transaction_cost_rate = float(transaction_cost_bps) / 10_000.0
     if not np.isfinite(transaction_cost_rate) or transaction_cost_rate < 0:
         raise ValueError("transaction_cost_bps must be non-negative.")
+    resolved_risk_free_rate = float(risk_free_rate)
+    if (
+        not np.isfinite(resolved_risk_free_rate)
+        or resolved_risk_free_rate <= -1.0
+    ):
+        raise ValueError("risk_free_rate must be finite and greater than -1.")
+    resolved_view_confidence = float(black_litterman_confidence)
+    if (
+        not np.isfinite(resolved_view_confidence)
+        or not 0.0 < resolved_view_confidence <= 1.0
+    ):
+        raise ValueError("black_litterman_confidence must be in (0, 1].")
 
     if not isinstance(membership_lag_periods, int) or membership_lag_periods < 1:
         raise ValueError("membership_lag_periods must be a positive integer.")
     capital = float(portfolio_value)
+    equal_capital = capital
     if not np.isfinite(capital) or capital <= 0:
         raise ValueError("portfolio_value must be positive.")
     point_in_time = universe_membership is not None
@@ -176,6 +230,9 @@ def run_optimization_walk_forward(
         clean = clean_returns(returns)
     if not clean.index.is_monotonic_increasing or clean.index.has_duplicates:
         raise ValueError("returns index must be unique and increasing.")
+    finite_returns = clean.to_numpy(dtype=float)
+    if np.any(finite_returns[np.isfinite(finite_returns)] < -1.0):
+        raise ValueError("asset returns must be at least -1.")
     if len(clean) <= train_periods:
         raise ValueError("returns must extend beyond the training window.")
 
@@ -254,6 +311,10 @@ def run_optimization_walk_forward(
         else:
             membership_row = aligned_membership.iloc[membership_position].to_numpy(dtype=bool)
             active_indices = np.flatnonzero(membership_row).tolist()
+        # A total-loss observation is terminal for that security. Future
+        # rebalance windows must not buy it again, even if membership is stale.
+        extinct = (clean.iloc[:test_start] == -1.0).any().to_numpy(dtype=bool)
+        active_indices = [index for index in active_indices if not extinct[index]]
         if not active_indices:
             raise ValueError(
                 f"point-in-time universe has no active assets as of {clean.index[membership_position]}."
@@ -294,7 +355,7 @@ def run_optimization_walk_forward(
         elif constant_adv is not None:
             full_adv_snapshot = dict(constant_adv)
         active_adv = (
-            {symbol: float(full_adv_snapshot[symbol]) for symbol in active_symbols}
+            {symbol: float(full_adv_snapshot.get(symbol, np.nan)) for symbol in active_symbols}
             if full_adv_snapshot is not None
             else None
         )
@@ -305,7 +366,7 @@ def run_optimization_walk_forward(
             and turnover_limit is None
             and not has_liquidity_model
         )
-        if not use_legacy_optimizer and str(expected_return_model) == "black_litterman":
+        if not use_legacy_optimizer and return_model == "black_litterman":
             views = {
                 symbol: value
                 for symbol, value in dict(black_litterman_views or {}).items()
@@ -316,9 +377,10 @@ def run_optimization_walk_forward(
                 market_weights=active_current,
                 views=views,
                 view_confidences={
-                    symbol: float(black_litterman_confidence)
+                    symbol: resolved_view_confidence
                     for symbol in views
                 },
+                risk_free_rate=resolved_risk_free_rate,
                 risk_aversion=risk_aversion,
                 covariance_shrinkage=covariance_shrinkage,
                 return_shrinkage=return_shrinkage,
@@ -336,7 +398,17 @@ def run_optimization_walk_forward(
                 f"for: {', '.join(active_symbols)}."
             )
 
-        if use_legacy_optimizer:
+        departure_trades = -current_weights.copy()
+        departure_trades[active_indices] = 0.0
+        departure_turnover = float(np.abs(departure_trades).sum())
+        liquidity_failures = _liquidity_failures(
+            departure_trades, all_symbols, capital, full_adv_snapshot, max_adv_participation,
+            require_adv=float(market_impact_bps) > 0,
+        )
+        if liquidity_failures:
+            result = {"success": False, "status": "failed", "message":
+                      "Full-universe liquidity limit blocks rebalance for: " + ", ".join(liquidity_failures)}
+        elif use_legacy_optimizer:
             optimizer_fn = (
                 optimize_maximum_sharpe
                 if method == "maximum_sharpe"
@@ -369,8 +441,22 @@ def run_optimization_walk_forward(
                 if active_benchmark_total <= 0:
                     raise ValueError("active point-in-time benchmark has zero weight.")
                 active_benchmark = active_benchmark / active_benchmark_total
+            active_constraints = build_constraint_set(
+                active_symbols, strategy=strategy, asset_metadata=active_metadata,
+                current_weights=active_current, max_weight=max_weight, turnover_limit=turnover_limit,
+            )
+            remaining_turnover = active_constraints.turnover_limit
+            if remaining_turnover is not None:
+                remaining_turnover -= departure_turnover
+            # Departure sales are fixed at zero target weight. Their turnover
+            # consumes the same budget; survivor buys start from actual holdings.
+            active_constraints = replace(
+                active_constraints, current_weights=active_current_raw.copy(),
+                turnover_limit=remaining_turnover,
+            )
             result = optimize_portfolio(
                 training,
+                constraint_set=active_constraints,
                 objective=method,
                 strategy=strategy,
                 asset_metadata=active_metadata,
@@ -422,6 +508,19 @@ def run_optimization_walk_forward(
             target_weights = current_weights.copy()
             turnover = 0.0
 
+        # The reduced active universe excludes forced sales. Validate the
+        # actual full-universe order, including departures, before accepting it.
+        if optimizer_success:
+            liquidity_failures = _liquidity_failures(
+                target_weights - current_weights, all_symbols, capital, full_adv_snapshot,
+                max_adv_participation, require_adv=float(market_impact_bps) > 0,
+            )
+            if liquidity_failures:
+                optimizer_success = False
+                result["message"] = "Full-universe liquidity limit blocks rebalance for: " + ", ".join(liquidity_failures)
+                target_weights = current_weights.copy()
+                turnover = 0.0
+
         transaction_cost_model = estimate_trade_costs(
             target_weights - current_weights,
             all_symbols,
@@ -435,11 +534,17 @@ def run_optimization_walk_forward(
 
         equal_target = np.zeros(n_assets, dtype=float)
         equal_target[active_indices] = 1.0 / len(active_indices)
+        equal_liquidity_failures = _liquidity_failures(
+            equal_target - equal_weights, all_symbols, equal_capital, full_adv_snapshot,
+            max_adv_participation, require_adv=float(market_impact_bps) > 0,
+        )
+        if equal_liquidity_failures:
+            equal_target = equal_weights.copy()
         equal_turnover = float(np.sum(np.abs(equal_target - equal_weights)))
         equal_cost_model = estimate_trade_costs(
             equal_target - equal_weights,
             all_symbols,
-            portfolio_value=capital,
+            portfolio_value=equal_capital,
             transaction_cost_bps=transaction_cost_bps,
             half_spread_bps=half_spread_bps,
             market_impact_bps=market_impact_bps,
@@ -459,6 +564,10 @@ def run_optimization_walk_forward(
             },
         })
         windows.append({
+            "pre_trade_nav": capital,
+            "equal_weight_pre_trade_nav": equal_capital,
+            "liquidity_failures": liquidity_failures,
+            "equal_weight_liquidity_failures": equal_liquidity_failures,
             "train_start": clean.index[test_start - train_periods],
             "train_end": clean.index[test_start - 1],
             "test_start": decision_date,
@@ -507,12 +616,26 @@ def run_optimization_walk_forward(
                 equal_weights, daily_asset_returns
             )
             optimized_gross[date] = gross_return
-            optimized_net[date] = gross_return - (
-                transaction_cost if position == test_start else 0.0
+            optimized_net[date] = _net_of_rebalance_cost(
+                gross_return,
+                transaction_cost if position == test_start else 0.0,
             )
-            equal_weight_net[date] = equal_return - (
-                equal_transaction_cost if position == test_start else 0.0
+            equal_weight_net[date] = _net_of_rebalance_cost(
+                equal_return,
+                equal_transaction_cost if position == test_start else 0.0,
             )
+            capital *= 1.0 + optimized_net[date]
+            equal_capital *= 1.0 + equal_weight_net[date]
+            if capital <= 0.0 or equal_capital <= 0.0:
+                windows[-1]["test_end"] = date
+                break
+        windows[-1]["ending_nav"] = capital
+        windows[-1]["equal_weight_ending_nav"] = equal_capital
+        if capital <= 0.0 or equal_capital <= 0.0:
+            # Do not resurrect a bankrupt account at the next rebalance. The
+            # terminal -100% observation remains part of reported performance.
+            windows[-1]["message"] += " Evaluation ended after complete portfolio loss."
+            break
 
     gross_series = pd.Series(optimized_gross, dtype=float, name="gross_return")
     net_series = pd.Series(optimized_net, dtype=float, name="net_return")
@@ -527,27 +650,56 @@ def run_optimization_walk_forward(
     )
     history = pd.DataFrame(weights_history).set_index("date")
 
-    return {
-        "success": bool(windows) and all(
-            bool(window["optimizer_success"]) for window in windows
-        ),
-        "validation_type": (
+    causal = not static_black_litterman_views
+    if static_black_litterman_views:
+        validation_type = (
+            "point_in_time_rolling_reoptimization_historical_replay_static_views"
+            if point_in_time
+            else "rolling_reoptimization_historical_replay_static_views"
+        )
+    else:
+        validation_type = (
             "point_in_time_rolling_reoptimization_out_of_sample"
             if point_in_time
             else "rolling_reoptimization_out_of_sample"
+        )
+    warnings: list[str] = []
+    if not point_in_time:
+        warnings.append(
+            "Universe membership was not supplied point-in-time; results may contain survivorship bias."
+        )
+    if static_black_litterman_views:
+        warnings.append(
+            "Static Black-Litterman views were reused across historical windows without "
+            "point-in-time view timestamps; treat this as a historical replay, not causal "
+            "out-of-sample evidence."
+        )
+
+    evaluation_complete = len(net_series) == len(clean) - train_periods
+    if not evaluation_complete:
+        warnings.append("Evaluation stopped at complete loss of a strategy or comparator account.")
+    return {
+        "success": evaluation_complete and bool(windows) and all(
+            bool(window["optimizer_success"]) for window in windows
         ),
-        "causal": True,
+        "evaluation_complete": evaluation_complete,
+        "validation_type": validation_type,
+        "causal": causal,
+        "out_of_sample": causal,
+        "black_litterman_view_provenance": (
+            "static_unverified" if static_black_litterman_views else None
+        ),
         "point_in_time_universe": point_in_time,
         "survivorship_bias_controlled": point_in_time,
         "membership_lag_periods": membership_lag_periods if point_in_time else None,
-        "warnings": (
-            []
-            if point_in_time
-            else [
-                "Universe membership was not supplied point-in-time; results may contain survivorship bias."
-            ]
-        ),
+        "warnings": warnings,
         "optimizer": method,
+        "transaction_cost_bps": float(transaction_cost_bps),
+        "transaction_cost_model_configured": bool(
+            float(transaction_cost_bps) > 0.0
+            or float(half_spread_bps) > 0.0
+            or float(market_impact_bps) > 0.0
+        ),
         "train_periods": train_periods,
         "rebalance_periods": rebalance_periods,
         "symbols": [str(column) for column in clean.columns],

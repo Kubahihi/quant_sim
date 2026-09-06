@@ -5,6 +5,7 @@ from typing import Any, Optional, Sequence
 from loguru import logger
 import numpy as np
 import pandas as pd
+from src.utils.rates import annual_effective_to_arithmetic
 from scipy.optimize import linprog, minimize
 
 from .constraints import build_weight_bounds, validate_weight_solution
@@ -44,6 +45,7 @@ def calculate_portfolio_statistics(
     cov_matrix: np.ndarray,
     risk_free_rate: float = 0.03,
     symbols: Optional[list[str]] = None,
+    trading_days: float = 252.0,
 ) -> dict[str, object]:
     """Calculate comparable metrics from an explicit set of portfolio inputs."""
     values = np.asarray(weights, dtype=float)
@@ -58,7 +60,7 @@ def calculate_portfolio_statistics(
     variance = float(values @ covariance @ values)
     portfolio_volatility = float(np.sqrt(max(variance, 0.0)))
     sharpe_ratio = (
-        (portfolio_return - float(risk_free_rate)) / portfolio_volatility
+        (portfolio_return - annual_effective_to_arithmetic(risk_free_rate, trading_days)) / portfolio_volatility
         if portfolio_volatility > 0
         else 0.0
     )
@@ -142,7 +144,7 @@ def sample_portfolio_cloud(
         np.clip(portfolio_variance, a_min=0.0, a_max=None)
     )
     sharpe_ratio = np.divide(
-        portfolio_returns - float(risk_free_rate),
+        portfolio_returns - annual_effective_to_arithmetic(risk_free_rate, estimates.trading_days),
         portfolio_volatility,
         out=np.zeros_like(portfolio_returns),
         where=portfolio_volatility > 0,
@@ -209,6 +211,7 @@ def calculate_efficient_frontier(
             covariance,
             risk_free_rate=risk_free_rate,
             symbols=symbols,
+            trading_days=estimates.trading_days,
         )
         return [{
             "weights": weights,
@@ -398,6 +401,7 @@ def calculate_efficient_frontier(
             covariance,
             risk_free_rate=risk_free_rate,
             symbols=symbols,
+            trading_days=estimates.trading_days,
         )
         frontier_points.append({
             "weights": weights,

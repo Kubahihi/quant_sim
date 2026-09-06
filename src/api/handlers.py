@@ -7,10 +7,8 @@ and returns a standardized APIResponse.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-import json
 import math
 
 import numpy as np
@@ -54,19 +52,10 @@ def _default_watchlist() -> list[str]:
 
 def _latest_run_universe_tickers(user_id: Optional[int]) -> list[str]:
     """Extract tickers from the latest run history universe snapshot."""
-    project_root = Path(__file__).resolve().parents[2]
-    history_dir = (
-        project_root / "data" / "users" / str(user_id) / "run_history"
-        if user_id is not None
-        else project_root / "data" / "run_history"
-    )
+    from src.analytics.modular.history import list_run_records
 
-    if not history_dir.exists():
-        return []
-
-    for file_path in sorted(history_dir.glob("*.json"), reverse=True):
+    for payload in list_run_records(user_id=user_id, limit=50):
         try:
-            payload = json.loads(file_path.read_text(encoding="utf-8"))
             universe = payload.get("universe", [])
             if not isinstance(universe, list):
                 continue
@@ -773,16 +762,28 @@ def handle_overview(user: Optional[dict[str, Any]] = None) -> APIResponse:
         
         trades = load_trade_book(user_id=user_id)
         open_trades = open_trade_rows(trades)
-        closed_trades = historical_trade_rows(trades)
-        
-        # Calculate win rate
-        winning_trades = [t for t in closed_trades if t.realized_pnl and t.realized_pnl > 0]
-        win_rate = _clean_float((len(winning_trades) / len(closed_trades)) * 100) if closed_trades else 0.0
+        closed_trades = [
+            trade for trade in historical_trade_rows(trades)
+            if trade.status == "closed" and trade.exit_date is not None
+        ]
+        closed_trades.sort(key=lambda trade: trade.exit_date, reverse=True)
+        today = datetime.now(timezone.utc).date()
+        cutoff = today - timedelta(days=29)
+        recent_closed_trades = [
+            trade for trade in closed_trades if cutoff <= trade.exit_date <= today
+        ]
+
+        # Calculate win rate over the same 30-calendar-day window as the count.
+        winning_trades = [t for t in recent_closed_trades if t.realized_pnl and t.realized_pnl > 0]
+        win_rate = _clean_float((len(winning_trades) / len(recent_closed_trades)) * 100) if recent_closed_trades else 0.0
         
         trading_data = {
             "open_trades": len(open_trades),
-            "closed_trades_30d": len(closed_trades),  # Simplified - would filter by date
+            "closed_trades_30d": len(recent_closed_trades),
             "win_rate": win_rate,
+            "window_days": 30,
+            "window_start": cutoff.isoformat(),
+            "window_end": today.isoformat(),
         }
         
         # Market overview
@@ -800,7 +801,7 @@ def handle_overview(user: Optional[dict[str, Any]] = None) -> APIResponse:
         recent_activity = []
         
         # Add recent closed trades
-        for trade in closed_trades[:5]:
+        for trade in [trade for trade in closed_trades if trade.exit_date <= today][:10]:
             recent_activity.append({
                 "type": "trade_closed",
                 "ticker": trade.ticker,

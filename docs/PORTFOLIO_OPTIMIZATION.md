@@ -15,6 +15,12 @@ This makes minimum variance, maximum Sharpe, the efficient frontier, sampled
 portfolios and cost-aware rebalancing directly comparable. The metadata is
 included in every optimization result.
 
+Means use annualized **arithmetic** simple-return units (`N * mean(r)`) for all
+assets, including cash. The supplied risk-free rate is annual **effective** and
+is converted to `N * expm1(log1p(rf) / N)` before comparison with these means.
+Historical CAGR and the Monte Carlo expected wealth-growth input remain
+effective annual returns; they must not be substituted for an arithmetic mean.
+
 Already-numeric return matrices use a vectorized finite-row mask; mixed or text
 inputs retain the stricter coercion path. Black-Litterman views are updated in
 view space, so a small set of views requires a small linear solve instead of two
@@ -23,8 +29,21 @@ asset-by-asset pseudoinverses.
 The dashboard constructs this bundle once per return matrix and passes the
 same immutable object to minimum variance, maximum Sharpe, the efficient
 frontier, portfolio sampling and cost-aware rebalancing. Reuse is accepted
-only when asset names and their order match exactly; otherwise the run fails
-rather than risking a silent weight/data misalignment.
+only when the cleaned index, asset names, order, and every return value match
+exactly; otherwise the run fails rather than leaking a full-sample estimate
+into a training fold or silently misaligning data.
+
+Exactly constant columns such as synthetic cash retain their own annualized
+return and zero covariance. They are excluded from cross-sectional mean and
+covariance shrinkage, which would otherwise invent risky-asset volatility for
+cash.
+
+Maximum-Sharpe optimization also evaluates a feasible all-deterministic
+allocation explicitly. If that allocation earns the selected risk-free rate,
+it is preferred to a negative-Sharpe risky mix. If it earns more than the
+selected risk-free rate, the ratio is mathematically unbounded, so QuantSim
+stops the run and asks for the cash proxy and risk-free-rate assumptions to be
+aligned rather than reporting a misleading finite Sharpe value.
 
 ## Streamlit execution model
 
@@ -65,6 +84,10 @@ maximum position weight and, for rebalancing, maximum turnover. An infeasible
 position cap raises a clear input error. Solver output is checked for finite
 weights, full investment and bound residuals before it can be returned as a
 recommendation. A failed or invalid solution contains no target weights.
+
+If the maximum-Sharpe solver fails but a feasible cash allocation exists, the
+result still has `success=False` and `status="fallback_feasible"`. Its separate
+`fallback_weights` are diagnostic, not a verified optimum or trade recommendation.
 
 The dashboards may raise a position cap to the minimum feasible value before
 calling the optimizer. When this happens, the requested and effective limits
@@ -115,6 +138,26 @@ trades while enforcing:
 - minimum/maximum executed holding counts;
 - optional tax-lot selection.
 
+The final post-cost holdings, including residual cash, are checked again against
+the supplied mandate (asset/sector weights, cash bounds, beta and eligibility).
+When the optimizer imposes a volatility ceiling, the execution plan verifies it
+again using the same annualized covariance and actual post-cost weights.
+Executed notional determines turnover. A holding-count reduction or lot rounding
+that violates the mandate returns `success=False`; the UI does not display it as
+an executable recommendation. The algorithm does not claim an integer optimum.
+Minimum order value is rechecked after the cash/fee affordability adjustment.
+Missing ADV blocks a requested participation limit or nonzero market-impact
+estimate. The UI requires explicit disabling of the execution model for an
+exploratory run without liquidity data, including walk-forward validation.
+
+Walk-forward execution uses separate evolving NAVs for the strategy and the
+equal-weight comparator. Fixed departure sales consume the same turnover budget
+as survivor purchases, which start from actual pre-trade holdings. A liquidity
+failure cancels that account's whole rebalance and carries its existing positions
+forward. A security that records a -100% return cannot be bought again. Complete
+loss of either account ends the comparison at that observation and marks an
+unfinished evaluation explicitly with `evaluation_complete=False`.
+
 Tax lots are sold in ascending estimated tax per share. This harvests the most
 valuable losses first and then chooses the lowest estimated-tax gains using the
 configured short- and long-term rates. The output retains each selected lot,
@@ -148,14 +191,19 @@ lot-level plan, while both target versions remain visible.
 Black-Litterman expected returns are available with explicit absolute views and
 per-view confidence. The Wharton UI labels current portfolio weights as a
 neutral reference when it uses them; they are not presented as market-cap
-weights.
+weights. Reverse-optimized `delta * covariance * weight` returns are excess
+returns; the selected risk-free rate is added to the prior before it is combined
+with absolute total-return views, so downstream Sharpe calculations subtract
+the risk-free rate exactly once.
 
 ## Rolling out-of-sample validation
 
 `run_optimization_walk_forward` performs a causal rolling evaluation for the
 selected construction objective. The convex objectives retain Strategy
 Rulebook constraints in every estimation window; Black-Litterman inputs are
-also recomputed from that window rather than reused from the full sample:
+also recomputed from that window rather than reused from the full sample.
+Static present-day Black-Litterman views are explicitly labelled a historical
+replay rather than causal OOS evidence:
 
 1. estimate inputs using only the preceding training observations;
 2. calculate a new target allocation;
@@ -173,6 +221,10 @@ net returns, turnover, cost breakdown, return, volatility, Sharpe ratio and
 maximum drawdown. This validates the allocation process; it does not guarantee
 future performance. The equal-weight portfolio is a neutral comparator and is
 not asserted to satisfy the mandate.
+
+Rebalance turnover uses the full L1 weight change: gross buys plus gross sells
+divided by pre-trade equity. It is not the one-way/half-turnover convention.
+Costs are applied multiplicatively to wealth before the period return.
 
 An optional point-in-time membership table removes the specific current-universe
 shortcut. Membership is lagged by one observation, forward-filled, and never

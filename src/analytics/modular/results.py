@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from src.utils.redaction import redact_sensitive_data, sanitize_run_config
 
 
 @dataclass
@@ -111,6 +112,9 @@ class RunRecord:
     news: Dict[str, Any]
     sentiment: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.config = sanitize_run_config(self.config)
+
     @staticmethod
     def now(run_id: str, **kwargs: Any) -> "RunRecord":
         return RunRecord(
@@ -120,4 +124,6 @@ class RunRecord:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = redact_sensitive_data(asdict(self))
+        result["config"] = sanitize_run_config(result["config"])
+        return result

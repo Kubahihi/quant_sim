@@ -21,6 +21,7 @@ def _empty_active_metrics(benchmark_ticker: str, reason: str = "") -> Dict[str, 
         "benchmark_annualized_return": 0.0,
         "active_return_total": 0.0,
         "active_return_annualized": 0.0,
+        "active_return_geometric_difference": 0.0,
         "tracking_error": 0.0,
         "information_ratio": 0.0,
         "beta_to_benchmark": 0.0,
@@ -94,7 +95,10 @@ def calculate_active_risk_metrics(
     portfolio_annualized_return = calculate_annualized_return(port, periods_per_year)
 
     active_return_total = portfolio_total_return - benchmark_total_return
-    active_return_annualized = portfolio_annualized_return - benchmark_annualized_return
+    # The standard information-ratio numerator is arithmetic annualized active
+    # return.  Keep the difference of CAGRs as a separate reporting quantity.
+    active_return_annualized = float(active_daily.mean() * periods_per_year)
+    active_return_geometric_difference = portfolio_annualized_return - benchmark_annualized_return
 
     tracking_error = float(active_daily.std() * np.sqrt(periods_per_year))
     information_ratio = (
@@ -123,6 +127,7 @@ def calculate_active_risk_metrics(
         "benchmark_annualized_return": benchmark_annualized_return,
         "active_return_total": float(active_return_total),
         "active_return_annualized": float(active_return_annualized),
+        "active_return_geometric_difference": float(active_return_geometric_difference),
         "tracking_error": tracking_error,
         "information_ratio": information_ratio,
         "beta_to_benchmark": beta_to_benchmark,

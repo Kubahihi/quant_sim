@@ -144,14 +144,38 @@ def calculate_wacc(
     }
 
 
-def prepare_dcf_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+def prepare_dcf_inputs(snapshot: Mapping[str, Any], *, financial_to_quote_rate: float | None = None) -> dict[str, Any]:
     """Normalize reported statements into an auditable FCFF starting point."""
     if not isinstance(snapshot, Mapping):
         raise TypeError("DCF snapshot must be a mapping.")
-    info = _info_from_snapshot(snapshot)
+    info = dict(_info_from_snapshot(snapshot))
     cash_flow = snapshot.get("cash_flow")
     income = snapshot.get("income_statement")
     warnings: list[str] = []
+    quote_currency = str(info.get("currency") or "").strip()
+    financial_currency = str(info.get("financialCurrency") or "").strip()
+    currency_errors: list[str] = []
+    fx_rate = 1.0
+    if quote_currency and financial_currency and quote_currency != financial_currency:
+        if financial_to_quote_rate is None:
+            currency_errors.append(
+                f"DCF blocked: statements are in {financial_currency}, quotes in {quote_currency}; "
+                "supply a verified financial_to_quote_rate (quote units per financial unit)."
+            )
+        elif _finite(financial_to_quote_rate) is None or float(financial_to_quote_rate) <= 0:
+            currency_errors.append("financial_to_quote_rate must be finite and positive.")
+        else:
+            fx_rate = float(financial_to_quote_rate)
+    elif financial_to_quote_rate is not None and financial_to_quote_rate != 1.0:
+        currency_errors.append("FX conversion requires two known, different currencies.")
+    if not quote_currency or not financial_currency:
+        currency_errors.append("DCF blocked: quote and financial currencies must both be known.")
+    if fx_rate != 1.0:
+        for key in ("freeCashflow", "interestExpense", "totalRevenue", "totalDebt", "totalCash"):
+            if _finite(info.get(key)) is not None:
+                info[key] = float(info[key]) * fx_rate
+        cash_flow = cash_flow * fx_rate if isinstance(cash_flow, pd.DataFrame) else cash_flow
+        income = income * fx_rate if isinstance(income, pd.DataFrame) else income
 
     revenue_series = _statement_series(income, "Total Revenue", "Operating Revenue", "Revenue")
     ebit_series = _statement_series(income, "Operating Income", "EBIT")
@@ -265,6 +289,8 @@ def prepare_dcf_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": DCF_SCHEMA_VERSION,
         "ticker": str(snapshot.get("ticker") or info.get("symbol") or "").upper(),
         "valuation_date": datetime.now(timezone.utc).date().isoformat(),
+        "currency": {"quote": quote_currency, "financial": financial_currency,
+                     "financial_to_quote_rate": fx_rate if not currency_errors else None},
         "reported": {
             "revenue": float(revenue or 0.0),
             "free_cash_flow": float(reported_fcf_ttm or 0.0),
@@ -288,6 +314,7 @@ def prepare_dcf_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             "quarterly_earnings_growth": _finite(info.get("earningsQuarterlyGrowth")),
         },
         "quality": {
+            "valuation_errors": currency_errors,
             "warnings": list(dict.fromkeys(warnings)),
             "statement_periods": len(history),
             "cash_flow_basis": cash_flow_basis,
@@ -340,7 +367,7 @@ def default_multistage_dcf_assumptions(inputs: Mapping[str, Any]) -> dict[str, A
 
 def _validate_assumptions(assumptions: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
-    finite_keys = ("starting_fcff", "initial_growth_rate", "discount_rate", "terminal_growth_rate", "shares_outstanding")
+    finite_keys = ("starting_fcff", "initial_growth_rate", "discount_rate", "terminal_growth_rate", "shares_outstanding", "cash", "debt", "current_price")
     for key in finite_keys:
         if _finite(assumptions.get(key)) is None:
             errors.append(f"{key} must be finite.")
@@ -364,7 +391,7 @@ def _validate_assumptions(assumptions: Mapping[str, Any]) -> list[str]:
         errors.append("WACC must exceed terminal growth by at least 2 percentage points.")
     try:
         near, fade = int(assumptions.get("near_term_years", 0)), int(assumptions.get("fade_years", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         near = fade = 0
     if near < 1 or near > 10 or fade < 1 or fade > 15 or near + fade > 20:
         errors.append("Forecast stages must total 2 to 20 years with at least one year per stage.")
@@ -377,7 +404,7 @@ def calculate_multistage_dcf(
 ) -> dict[str, Any]:
     """Value FCFF through a near-term stage and a smooth competitive fade."""
     base = {**default_multistage_dcf_assumptions(inputs), **dict(assumptions)}
-    errors = _validate_assumptions(base)
+    errors = list(inputs.get("quality", {}).get("valuation_errors", [])) + _validate_assumptions(base)
     if errors:
         return {"available": False, "schema_version": DCF_SCHEMA_VERSION, "error": " ".join(errors), "errors": errors}
     starting_fcff = float(base["starting_fcff"])
@@ -417,6 +444,10 @@ def calculate_multistage_dcf(
     current_price = float(base.get("current_price", 0.0))
     upside = fair_value / current_price - 1.0 if current_price > 0 else None
     terminal_share = terminal_present_value / enterprise_value if enterprise_value else 0.0
+    finite_outputs = (enterprise_value, equity_value, fair_value, terminal_value, terminal_share,
+                      pv_explicit, terminal_fcff, terminal_present_value)
+    if not all(np.isfinite(value) for value in finite_outputs) or (upside is not None and not np.isfinite(upside)):
+        return {"available": False, "schema_version": DCF_SCHEMA_VERSION, "error": "DCF produced non-finite values; check input scale.", "errors": ["Non-finite valuation."]}
     warnings = list(inputs.get("quality", {}).get("warnings", []))
     if terminal_share > 0.75:
         warnings.append("More than 75% of enterprise value comes from terminal value.")

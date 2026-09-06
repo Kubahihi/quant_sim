@@ -109,6 +109,13 @@ def test_goal_return_history_uses_complete_calendar_years() -> None:
     assert (annual > 0).all().all()
 
 
+def test_goal_return_history_does_not_treat_half_year_as_an_annual_scenario() -> None:
+    half_year = pd.bdate_range("2025-01-02", periods=126)
+    daily = pd.DataFrame({"AAA": np.full(len(half_year), 0.001)}, index=half_year)
+
+    assert wharton_dash._annual_goal_return_history(daily).empty
+
+
 def test_goal_candidates_are_aligned_and_normalized() -> None:
     result = {
         "tickers": ["BBB", "AAA"],
@@ -127,6 +134,62 @@ def test_goal_candidates_are_aligned_and_normalized() -> None:
     candidates = wharton_dash._goal_candidate_weights(result, ["AAA", "BBB"])
 
     assert candidates["Current strategy"].tolist() == [0.75, 0.25]
-    assert candidates["Max Sharpe"].tolist() == [0.6, 0.4]
+    assert candidates["Max Sharpe (in-sample exploratory)"].tolist() == [0.6, 0.4]
     assert not any(name.startswith("Mandate-aware") for name in candidates)
     assert all(np.isclose(weights.sum(), 1.0) for weights in candidates.values())
+
+
+def test_simulation_disclosure_uses_backend_model_contract() -> None:
+    disclosure = wharton_dash._simulation_disclosure({
+        "model": "geometric_brownian_motion",
+        "expected_return_input": 0.08,
+        "tail_observations_95": 500,
+        "assumptions": ["constant drift", "no transaction costs"],
+    })
+
+    assert disclosure == {
+        "model": "Geometric Brownian motion (GBM)",
+        "expected_return": "8.00%",
+        "tail_observations": "500",
+        "assumptions": ["constant drift", "no transaction costs"],
+    }
+
+
+def test_optimizer_validation_labels_static_view_replay_as_not_oos() -> None:
+    replay = wharton_dash._optimization_validation_presentation({
+        "causal": False,
+        "out_of_sample": False,
+        "validation_type": "rolling_reoptimization_historical_replay_static_views",
+        "transaction_cost_model_configured": False,
+    })
+    causal = wharton_dash._optimization_validation_presentation({
+        "causal": True,
+        "out_of_sample": True,
+        "transaction_cost_model_configured": True,
+    })
+
+    assert replay["causal_oos"] is False
+    assert "Not Causal OOS" in str(replay["heading"])
+    assert "historical replay" in str(replay["optimized_label"])
+    assert "before trading costs" in str(replay["caption"])
+    assert causal["causal_oos"] is True
+    assert "Out-of-Sample" in str(causal["heading"])
+    assert "OOS" in str(causal["optimized_label"])
+    assert "configured trading-cost model" in str(causal["caption"])
+
+
+def test_rulebook_selection_process_prefers_canonical_field_and_validates_factors() -> None:
+    assert wharton_dash._strategy_selection_process({
+        "selection_process": "Canonical process",
+        "process": "Legacy process",
+    }) == "Canonical process"
+    assert wharton_dash._strategy_selection_process({
+        "process": "Legacy process",
+    }) == "Legacy process"
+    assert wharton_dash._selection_factor_form_error([])
+    assert "Quality" in wharton_dash._selection_factor_form_error([
+        {"factor": "Quality", "weight": 1.0, "rule": ""},
+    ])
+    assert wharton_dash._selection_factor_form_error([
+        {"factor": "Quality", "weight": 1.0, "rule": "ROIC > 15%"},
+    ]) == ""

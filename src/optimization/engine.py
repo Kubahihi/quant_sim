@@ -6,6 +6,8 @@ import cvxpy as cp
 from loguru import logger
 import numpy as np
 import pandas as pd
+from src.analytics.tail_risk import empirical_expected_shortfall
+from src.utils.rates import annual_effective_to_arithmetic
 
 from .constraint_sets import (
     PortfolioConstraintSet,
@@ -347,7 +349,7 @@ def optimize_portfolio(
     variance = float(optimal_weights @ covariance @ optimal_weights)
     volatility = float(np.sqrt(max(variance, 0.0)))
     sharpe_ratio = (
-        (expected_return - float(risk_free_rate)) / volatility
+        (expected_return - annual_effective_to_arithmetic(risk_free_rate, estimates.trading_days)) / volatility
         if volatility > 0
         else 0.0
     )
@@ -392,9 +394,7 @@ def optimize_portfolio(
                 ),
             })
     daily_losses = -estimates.returns.to_numpy(dtype=float) @ optimal_weights
-    cutoff = float(np.quantile(daily_losses, confidence_for_metrics))
-    tail = daily_losses[daily_losses >= cutoff]
-    historical_cvar = float(np.mean(tail)) if tail.size else cutoff
+    historical_cvar = empirical_expected_shortfall(daily_losses, confidence_for_metrics)
     tracking_error = None
     if benchmark is not None:
         active = optimal_weights - benchmark

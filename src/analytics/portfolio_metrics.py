@@ -27,6 +27,10 @@ def calculate_portfolio_daily_returns(
     weights_array = np.asarray(weights, dtype=float)
     if weights_array.size != asset_returns.shape[1]:
         raise ValueError("Weights length must match number of return columns.")
+    if not np.isfinite(weights_array).all():
+        raise ValueError("Weights must contain only finite values.")
+    if not np.isfinite(asset_returns.to_numpy(dtype=float)).all():
+        raise ValueError("Asset returns must contain only finite values; clean missing data explicitly.")
 
     return (asset_returns * weights_array).sum(axis=1)
 
@@ -98,12 +102,14 @@ def build_portfolio_timeseries(
     initial_value: float = 100.0,
 ) -> pd.DataFrame:
     """Build indexed portfolio value and drawdown time series."""
+    if not np.isfinite(initial_value) or initial_value <= 0.0:
+        raise ValueError("initial_value must be finite and positive.")
     if portfolio_returns.empty:
         return pd.DataFrame(columns=["value", "cumulative_return", "drawdown"])
 
     cumulative_growth = (1 + portfolio_returns).cumprod()
     value = cumulative_growth * initial_value
-    running_max = value.cummax()
+    running_max = value.cummax().clip(lower=float(initial_value))
     drawdown = (value - running_max) / running_max
 
     return pd.DataFrame({

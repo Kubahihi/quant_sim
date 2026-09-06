@@ -5,11 +5,29 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from src.utils.rates import annual_effective_to_arithmetic
 
 
 TRADING_DAYS = 252.0
 DEFAULT_COVARIANCE_SHRINKAGE = 0.25
 DEFAULT_RETURN_SHRINKAGE = 0.50
+
+# These names are an explicit modelling convention in QuantSim, not an
+# inference from a flat price history.  A different constant-return asset must
+# be opted in through ``deterministic_assets``; otherwise the estimator fails
+# closed instead of turning a stale risky series into a zero-risk investment.
+_DECLARED_CASH_SYMBOLS = {
+    "CASH",
+    "USD",
+    "EUR",
+    "GBP",
+    "CZK",
+    "JPY",
+    "CHF",
+    "RISK FREE",
+    "RISK-FREE",
+    "RISK_FREE",
+}
 
 
 @dataclass(frozen=True)
@@ -29,6 +47,7 @@ class PortfolioEstimates:
     covariance_eigenvalue_floor: float
     expected_return_method: str = "shrunk_historical"
     expected_return_details: dict[str, Any] = field(default_factory=dict)
+    deterministic_assets: tuple[str, ...] = ()
 
     def metadata(self) -> dict[str, Any]:
         method = (
@@ -42,9 +61,11 @@ class PortfolioEstimates:
             "observations": self.observations,
             "assets": len(self.symbols),
             "trading_days": self.trading_days,
+            "return_convention": "annualized_arithmetic_simple_return",
             "covariance_shrinkage": self.covariance_shrinkage,
             "return_shrinkage": self.return_shrinkage,
             "covariance_eigenvalue_floor": self.covariance_eigenvalue_floor,
+            "deterministic_assets": list(self.deterministic_assets),
             "sample_expected_returns": {
                 symbol: float(value)
                 for symbol, value in zip(
@@ -84,7 +105,10 @@ def clean_returns(returns: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("returns are empty after cleaning.")
     if frame.shape[0] < 2:
         raise ValueError("returns must contain at least two observations.")
-    return frame.astype(float)
+    frame = frame.astype(float)
+    if bool((frame.to_numpy(dtype=float) < -1.0).any()):
+        raise ValueError("Simple returns must be at least -100%.")
+    return frame
 
 
 def _validate_shrinkage(value: float, name: str) -> float:
@@ -123,12 +147,91 @@ def _repair_covariance(covariance: np.ndarray) -> tuple[np.ndarray, float]:
     return (repaired + repaired.T) * 0.5, floor
 
 
+def _constant_column_mask(returns: pd.DataFrame) -> np.ndarray:
+    """Identify columns with no economically or numerically observable variation."""
+    values = returns.to_numpy(dtype=float)
+    reference = values[[0], :]
+    scale = np.maximum(np.max(np.abs(values), axis=0), 1.0)
+    tolerance = np.finfo(float).eps * scale * 16.0
+    return np.max(np.abs(values - reference), axis=0) <= tolerance
+
+
+def _deterministic_column_mask(
+    returns: pd.DataFrame,
+    deterministic_assets: Optional[Sequence[str]],
+) -> np.ndarray:
+    """Resolve explicitly declared, actually constant cash/risk-free columns.
+
+    Constancy alone is not evidence that an asset is risk-free: a suspended,
+    stale, or sparsely priced risky security can also have a flat return
+    history.  Project-standard cash labels count as an explicit declaration;
+    callers can opt in another label with ``deterministic_assets``.
+    """
+    symbols = tuple(str(column) for column in returns.columns)
+    symbol_lookup = {symbol.casefold(): symbol for symbol in symbols}
+    requested = {
+        str(symbol).strip().casefold()
+        for symbol in (deterministic_assets or ())
+        if str(symbol).strip()
+    }
+    unknown = sorted(
+        symbol for symbol in requested if symbol not in symbol_lookup
+    )
+    if unknown:
+        raise ValueError(
+            "deterministic_assets contains unknown return columns: "
+            + ", ".join(unknown)
+            + "."
+        )
+
+    conventionally_declared = {
+        symbol.casefold()
+        for symbol in symbols
+        if symbol.strip().upper() in _DECLARED_CASH_SYMBOLS
+    }
+    declared = requested | conventionally_declared
+    constant = _constant_column_mask(returns)
+    requested_mask = np.asarray(
+        [symbol.casefold() in requested for symbol in symbols],
+        dtype=bool,
+    )
+    declared_mask = np.asarray(
+        [symbol.casefold() in declared for symbol in symbols],
+        dtype=bool,
+    )
+
+    declared_but_variable = [
+        symbols[index]
+        for index in np.flatnonzero(requested_mask & ~constant)
+    ]
+    if declared_but_variable:
+        raise ValueError(
+            "Explicit deterministic_assets must have a constant periodic return: "
+            + ", ".join(declared_but_variable)
+            + "."
+        )
+
+    unexplained_constant = [
+        symbols[index]
+        for index in np.flatnonzero(constant & ~declared_mask)
+    ]
+    if unexplained_constant:
+        raise ValueError(
+            "Constant return columns are not assumed risk-free. Identify verified "
+            "cash/risk-free assets with deterministic_assets or repair stale data: "
+            + ", ".join(unexplained_constant)
+            + "."
+        )
+    return constant & declared_mask
+
+
 def estimate_portfolio_inputs(
     returns: pd.DataFrame,
     *,
     trading_days: float = TRADING_DAYS,
     covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
     return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
+    deterministic_assets: Optional[Sequence[str]] = None,
 ) -> PortfolioEstimates:
     """Estimate annualized portfolio inputs once using conservative defaults."""
     annualization = float(trading_days)
@@ -140,13 +243,41 @@ def estimate_portfolio_inputs(
     return_alpha = _validate_shrinkage(return_shrinkage, "return_shrinkage")
 
     clean = clean_returns(returns)
+    deterministic = _deterministic_column_mask(clean, deterministic_assets)
     sample_mean = clean.mean().to_numpy(dtype=float) * annualization
+    # Cash and risky assets must use the same arithmetic annualization. The
+    # effective annual risk-free input is converted separately before Sharpe.
     sample_covariance = clean.cov().to_numpy(dtype=float) * annualization
     sample_covariance = (sample_covariance + sample_covariance.T) * 0.5
 
-    mean_returns = _shrink_expected_returns(sample_mean, return_alpha)
-    covariance = _shrink_covariance(sample_covariance, covariance_alpha)
-    covariance, eigenvalue_floor = _repair_covariance(covariance)
+    # A synthetic cash/risk-free column is often represented by an exactly
+    # constant daily return. Shrinking it toward risky assets invents both
+    # return and volatility. Preserve deterministic columns and estimate only
+    # the stochastic block.
+    stochastic = ~deterministic
+    sample_covariance[deterministic, :] = 0.0
+    sample_covariance[:, deterministic] = 0.0
+
+    mean_returns = sample_mean.copy()
+    covariance = np.zeros_like(sample_covariance)
+    eigenvalue_floor = 0.0
+    if np.any(stochastic):
+        stochastic_indices = np.flatnonzero(stochastic)
+        mean_returns[stochastic] = _shrink_expected_returns(
+            sample_mean[stochastic], return_alpha
+        )
+        stochastic_covariance = sample_covariance[
+            np.ix_(stochastic_indices, stochastic_indices)
+        ]
+        stochastic_covariance = _shrink_covariance(
+            stochastic_covariance, covariance_alpha
+        )
+        stochastic_covariance, eigenvalue_floor = _repair_covariance(
+            stochastic_covariance
+        )
+        covariance[np.ix_(stochastic_indices, stochastic_indices)] = (
+            stochastic_covariance
+        )
 
     if not np.all(np.isfinite(mean_returns)) or not np.all(np.isfinite(covariance)):
         raise ValueError("portfolio estimates contain non-finite values.")
@@ -163,6 +294,9 @@ def estimate_portfolio_inputs(
         covariance_shrinkage=covariance_alpha,
         return_shrinkage=return_alpha,
         covariance_eigenvalue_floor=float(eigenvalue_floor),
+        deterministic_assets=tuple(
+            str(clean.columns[index]) for index in np.flatnonzero(deterministic)
+        ),
     )
 
 
@@ -173,15 +307,39 @@ def resolve_portfolio_estimates(
     covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
     return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
 ) -> PortfolioEstimates:
-    """Reuse precomputed inputs only when they exactly match the asset order."""
-    estimates = portfolio_estimates or estimate_portfolio_inputs(
-        returns,
-        covariance_shrinkage=covariance_shrinkage,
-        return_shrinkage=return_shrinkage,
-    )
-    input_symbols = tuple(str(column) for column in pd.DataFrame(returns).columns)
+    """Reuse precomputed inputs only for the exact cleaned return sample."""
+    if portfolio_estimates is None:
+        return estimate_portfolio_inputs(
+            returns,
+            covariance_shrinkage=covariance_shrinkage,
+            return_shrinkage=return_shrinkage,
+        )
+
+    estimates = portfolio_estimates
+    candidate = pd.DataFrame(returns)
+    input_symbols = tuple(str(column) for column in candidate.columns)
     if estimates.symbols != input_symbols:
         raise ValueError("portfolio_estimates symbols must match return columns in order.")
+
+    # The fast path avoids cleaning again when a caller passes the estimator's
+    # own complete-case frame. Otherwise compare against the same cleaning
+    # contract used to create the estimates. Matching symbols alone is unsafe:
+    # it can leak a full-sample estimate into a training fold.
+    cleaned = (
+        candidate if candidate.equals(estimates.returns) else clean_returns(candidate)
+    )
+    exact_match = (
+        cleaned.index.equals(estimates.returns.index)
+        and cleaned.columns.equals(estimates.returns.columns)
+        and np.array_equal(
+            cleaned.to_numpy(dtype=float),
+            estimates.returns.to_numpy(dtype=float),
+        )
+    )
+    if not exact_match:
+        raise ValueError(
+            "portfolio_estimates must match the exact cleaned returns index and values."
+        )
     return estimates
 
 
@@ -210,16 +368,25 @@ def estimate_black_litterman_inputs(
     market_weights: Sequence[float] | np.ndarray | Mapping[str, float],
     views: Optional[Mapping[str, float]] = None,
     view_confidences: Optional[Mapping[str, float]] = None,
+    risk_free_rate: float = 0.0,
     risk_aversion: float = 2.5,
     tau: float = 0.05,
     covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
     return_shrinkage: float = DEFAULT_RETURN_SHRINKAGE,
+    deterministic_assets: Optional[Sequence[str]] = None,
 ) -> PortfolioEstimates:
-    """Return shared covariance with Black-Litterman posterior expected returns."""
+    """Return Black-Litterman total returns from absolute total-return views.
+
+    Reverse optimization produces annualized arithmetic excess returns.
+    ``risk_free_rate`` is an effective annual rate, converted to annualized
+    arithmetic units before addition to the prior. Views are absolute annualized
+    arithmetic simple returns, and Sharpe subtracts the converted rate once.
+    """
     estimates = estimate_portfolio_inputs(
         returns,
         covariance_shrinkage=covariance_shrinkage,
         return_shrinkage=return_shrinkage,
+        deterministic_assets=deterministic_assets,
     )
     symbols = list(estimates.symbols)
     weights = _aligned_weights(market_weights, symbols, "market_weights")
@@ -228,18 +395,32 @@ def estimate_black_litterman_inputs(
     weights = weights / float(weights.sum())
     delta = float(risk_aversion)
     uncertainty_scale = float(tau)
+    risk_free = float(risk_free_rate)
     if not np.isfinite(delta) or delta <= 0:
         raise ValueError("risk_aversion must be positive.")
     if not np.isfinite(uncertainty_scale) or uncertainty_scale <= 0:
         raise ValueError("tau must be positive.")
+    if not np.isfinite(risk_free) or risk_free <= -1.0:
+        raise ValueError("risk_free_rate must be finite and greater than -1.")
 
     covariance = estimates.covariance
-    equilibrium = delta * covariance @ weights
+    equilibrium_excess = delta * covariance @ weights
+    arithmetic_risk_free = annual_effective_to_arithmetic(risk_free, estimates.trading_days)
+    equilibrium = arithmetic_risk_free + equilibrium_excess
     supplied_views = dict(views or {})
     unknown = [symbol for symbol in supplied_views if symbol not in symbols]
     if unknown:
         raise ValueError(f"views contain unknown assets: {', '.join(unknown)}.")
     confidence_map = dict(view_confidences or {})
+    unused_confidences = [
+        symbol for symbol in confidence_map if symbol not in supplied_views
+    ]
+    if unused_confidences:
+        raise ValueError(
+            "view_confidences contain assets without views: "
+            + ", ".join(unused_confidences)
+            + "."
+        )
 
     if supplied_views:
         view_symbols = [symbol for symbol in symbols if symbol in supplied_views]
@@ -252,6 +433,8 @@ def estimate_black_litterman_inputs(
             index = symbols.index(symbol)
             pick[row, index] = 1.0
             view_returns[row] = float(supplied_views[symbol])
+            if not np.isfinite(view_returns[row]):
+                raise ValueError(f"view return for {symbol} must be finite.")
             confidence = float(confidence_map.get(symbol, 0.50))
             if not np.isfinite(confidence) or not 0.0 < confidence <= 1.0:
                 raise ValueError(f"view confidence for {symbol} must be in (0, 1].")
@@ -279,6 +462,9 @@ def estimate_black_litterman_inputs(
     details = {
         "risk_aversion": delta,
         "tau": uncertainty_scale,
+        "risk_free_rate": risk_free,
+        "annualized_arithmetic_risk_free_rate": arithmetic_risk_free,
+        "return_convention": "annualized_arithmetic_simple_return",
         "market_weights": {
             symbol: float(value)
             for symbol, value in zip(symbols, weights, strict=False)
@@ -287,6 +473,16 @@ def estimate_black_litterman_inputs(
             symbol: float(value)
             for symbol, value in zip(symbols, equilibrium, strict=False)
         },
+        "equilibrium_total_returns": {
+            symbol: float(value)
+            for symbol, value in zip(symbols, equilibrium, strict=False)
+        },
+        "equilibrium_excess_returns": {
+            symbol: float(value)
+            for symbol, value in zip(symbols, equilibrium_excess, strict=False)
+        },
+        "prior_return_type": "annual_total_return",
+        "view_return_type": "absolute_annual_total_return",
         "views": {symbol: float(supplied_views[symbol]) for symbol in view_symbols},
         "view_confidences": resolved_confidences,
     }

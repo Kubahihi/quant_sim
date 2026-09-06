@@ -11,6 +11,7 @@ import yfinance as yf
 from loguru import logger
 
 from .base_fetcher import BaseFetcher
+from src.data.price_alignment import normalize_daily_series
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -170,7 +171,7 @@ class YahooFetcher(BaseFetcher):
 
         for symbol, fetch_result in self._fetch_many(symbols, start_date, end_date):
             if fetch_result.success and not fetch_result.data.empty:
-                prices[symbol] = fetch_result.data["close"]
+                prices[symbol] = normalize_daily_series(fetch_result.data["close"])
         
         return pd.DataFrame(prices)
 
@@ -192,8 +193,8 @@ class YahooFetcher(BaseFetcher):
             if not fetch_result.success or fetch_result.data.empty:
                 continue
             data = fetch_result.data
-            close = pd.to_numeric(data["close"], errors="coerce")
-            volume = pd.to_numeric(data["volume"], errors="coerce")
+            close = normalize_daily_series(pd.to_numeric(data["close"], errors="coerce"))
+            volume = normalize_daily_series(pd.to_numeric(data["volume"], errors="coerce"))
             dollar_volume = (close * volume).where(lambda values: values > 0)
             rolling_adv = dollar_volume.rolling(
                 window=adv_window,

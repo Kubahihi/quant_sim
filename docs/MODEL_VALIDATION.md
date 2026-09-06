@@ -18,9 +18,9 @@ The 100-point methodology score is the sum of six visible gates:
 | Gate | Maximum | Evidence |
 |---|---:|---|
 | Historical depth | 20 | Number of aligned daily observations |
-| Parameter uncertainty | 20 | Moving-block bootstrap intervals |
-| Simulation convergence | 15 | Relative standard error of terminal mean |
-| Distribution/model risk | 15 | GBM assumptions versus sample diagnostics |
+| Parameter uncertainty | 20 | Moving-block bootstrap intervals, scaled by historical depth |
+| Simulation convergence | 15 | Terminal-mean error plus disclosed tail-path depth |
+| Distribution/model risk | 15 | GBM/Merton assumptions versus sample diagnostics |
 | Out-of-sample process | 20 | Causal rolling evidence, costs, comparator, and universe scope |
 | Reproducibility | 10 | Recorded deterministic simulation seed |
 
@@ -42,20 +42,28 @@ volatility, Sharpe ratio, historical VaR and historical CVaR.
 
 These are sampling intervals conditional on the observed regime. They do not
 cover structural breaks, data-source errors or future distribution shifts.
+Merely producing five intervals is not enough for full credit: short samples
+receive less credit because a 5% empirical tail may contain only a handful of
+observations.
 
 ### Monte Carlo
 
-The GBM engine treats its expected-return input as annualized arithmetic drift,
-uses a local random generator, and reports:
+Both GBM and Merton engines treat their expected-return input as an effective
+annual simple return. Internally they convert it with `log1p`, so an 8% input
+has an analytic one-year mean wealth multiple of 1.08 rather than `exp(0.08)`.
+Both use a local random generator and report:
 
 - analytic and simulated terminal means;
 - standard error and 95% interval for the simulated mean;
 - relative Monte Carlo error;
 - loss probability, terminal VaR and expected shortfall;
+- the number of paths in the 5% tail and loss-probability sampling error;
 - the model assumptions and seed.
 
 The engine models Monte Carlo sampling error. It does not remove parameter or
-model risk. A single GBM model cannot represent jumps, volatility clustering,
+model risk. GBM cannot represent jumps. Merton adds a jump stress overlay but
+still assumes constant parameters, and the supplied diffusion volatility is
+not independently de-jumped. Neither model captures volatility clustering,
 liquidity shocks or changing correlations.
 
 ### Backtest integrity
@@ -69,8 +77,14 @@ in one report rather than creating a second validation path:
   plumbing;
 - the rolling portfolio optimizer re-estimates inputs and target weights inside
   each training window, charges turnover costs, and reports an equal-weight
-  after-cost comparator. When lagged point-in-time membership is supplied, it
-  also controls the principal survivorship-bias path.
+  after-cost comparator. Lagged point-in-time membership mitigates the main
+  current-universe shortcut only when the supplied historical union and
+  delisting returns are complete.
+
+The separate Historical Stability Diagnostic only segments one fixed realized
+return series into rolling reference and evaluation windows. It performs no
+strategy refit, makes no out-of-sample claim, and does not calculate DSR without
+genuine trial-level Sharpe ratios.
 
 Point-in-time rolling re-optimization can earn 18 of 20 points. It still does
 **not** validate the full current-state model and signal bundle, reserve an

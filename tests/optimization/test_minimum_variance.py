@@ -64,7 +64,8 @@ class TestBasicCorrectness:
         vol = result["volatility"]
         ret = result["expected_return"]
         if vol > 0:
-            expected_sharpe = (ret - 0.03) / vol
+            arithmetic_risk_free = 252 * np.expm1(np.log1p(0.03) / 252)
+            expected_sharpe = (ret - arithmetic_risk_free) / vol
             assert np.isclose(result["sharpe_ratio"], expected_sharpe, atol=1e-8)
         else:
             assert result["sharpe_ratio"] == 0.0
@@ -155,28 +156,13 @@ class TestAllowShort:
 
 class TestNumericalStability:
     def test_zero_volatility_no_nan(self):
-        """Constant returns → singular covariance → volatility must be ≥ 0 and not NaN.
-
-        With floating-point arithmetic the annualised sample covariance of
-        identical series is not exactly zero — residuals are ~1e-30.  The
-        _VOLATILITY_EPS guard in optimize_minimum_variance clips these to
-        Sharpe=0 rather than returning a ratio of order 1e+15.
-        """
+        """Unexplained flat risky series must not become zero-risk assets."""
         df = pd.DataFrame({"A": [0.01] * 10, "B": [0.01] * 10})
-        result = optimize_minimum_variance(df, risk_free_rate=0.0)
-
-        assert not np.isnan(result["volatility"]), "volatility must not be NaN"
-        assert result["volatility"] >= 0.0, "volatility must be non-negative"
-        # Sharpe must be finite and well-behaved (not exploding due to ÷ ε).
-        assert not np.isnan(result["sharpe_ratio"]), "sharpe_ratio must not be NaN"
-        assert not np.isinf(result["sharpe_ratio"]), (
-            f"sharpe_ratio is infinite ({result['sharpe_ratio']!r}); "
-            "epsilon guard may be missing or set too low"
-        )
-        # With volatility effectively zero the guard returns Sharpe=0.
-        assert result["sharpe_ratio"] == 0.0, (
-            f"Expected Sharpe=0 via epsilon guard, got {result['sharpe_ratio']!r}"
-        )
+        with pytest.raises(
+            ValueError,
+            match="Constant return columns are not assumed risk-free",
+        ):
+            optimize_minimum_variance(df, risk_free_rate=0.0)
 
     def test_low_variance_returns_stable(self, low_corr_returns: pd.DataFrame):
         result = optimize_minimum_variance(low_corr_returns)

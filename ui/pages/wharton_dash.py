@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
 from html import escape
 from io import BytesIO
@@ -949,6 +949,7 @@ def _fetch_users() -> list[sqlite3.Row]:
 
 
 def authenticate_user(username: str, password: str) -> dict[str, str | int] | None:
+    from src.auth.wharton_sessions import issue_session
     with get_connection() as conn:
         user = conn.execute(
             "SELECT id, username, password_hash, role, primary_module FROM wharton_users WHERE username = ?",
@@ -961,12 +962,12 @@ def authenticate_user(username: str, password: str) -> dict[str, str | int] | No
         return None
     if not bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
         return None
-    return {
+    return issue_session({
         "id": int(user["id"]),
         "username": str(user["username"]),
         "role": str(user["role"]),
         "primary_module": str(user["primary_module"]),
-    }
+    }, stored_hash)
 
 
 def _configured_judge_password() -> str | None:
@@ -1015,11 +1016,26 @@ def _judge_session_is_current(profile: Mapping[str, Any]) -> bool:
 
 
 def _get_current_profile() -> dict[str, str | int] | None:
+    from src.auth.wharton_sessions import session_is_current
     profile = st.session_state.get(USER_PROFILE_KEY)
     if isinstance(profile, dict) and profile.get("username"):
+        try:
+            with get_connection() as conn:
+                user = conn.execute(
+                    "SELECT id, username, password_hash, role, primary_module FROM wharton_users WHERE username = ?",
+                    (profile["username"],),
+                ).fetchone()
+            current = {key: user[key] for key in ("id", "username", "role", "primary_module")} if user else {}
+            valid = user is not None and session_is_current(profile, current, str(user["password_hash"] or ""))
+        except Exception:
+            valid = False
+        if not valid:
+            st.session_state.pop(USER_PROFILE_KEY, None)
+            return None
         if _is_judge_profile(profile) and not _judge_session_is_current(profile):
             st.session_state.pop(USER_PROFILE_KEY, None)
             return None
+        profile["_session_last_seen"] = datetime.now(timezone.utc).timestamp()
         return profile
     return None
 
@@ -2193,7 +2209,7 @@ def _load_modular_history():
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date) -> pd.DataFrame:
+def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date, session_schema: int = 2) -> pd.DataFrame:
     modules = _load_quant_modules()
     fetcher = modules["yahoo_fetcher"].YahooFetcher()
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
@@ -2204,6 +2220,7 @@ def _fetch_market_data_cached(
     symbols: tuple,
     start_date: date,
     end_date: date,
+    session_schema: int = 2,
 ) -> dict[str, Any]:
     modules = _load_quant_modules()
     fetcher = modules["yahoo_fetcher"].YahooFetcher()
@@ -2349,9 +2366,10 @@ def _compute_quant_run(
     all_prices = pd.DataFrame(market_data.get("prices", pd.DataFrame()))
     if all_prices.empty: raise ValueError("No price data returned.")
     all_prices = all_prices.sort_index().dropna(how="all")
-    prices = all_prices[
+    from src.data.price_alignment import align_daily_prices
+    prices = align_daily_prices(all_prices[
         [symbol for symbol in current_data_symbols if symbol in all_prices.columns]
-    ].ffill()
+    ])
     available_data = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
     prices = prices[available_data].dropna(how="any")
     if prices.empty: raise ValueError("Not enough aligned data.")
@@ -2365,7 +2383,7 @@ def _compute_quant_run(
     adv_history = pd.DataFrame(market_data.get("adv_history", pd.DataFrame()))
     mark_runtime_phase("market_data")
 
-    data_returns = prices.pct_change().dropna(how="any")
+    data_returns = prices.pct_change(fill_method=None).dropna(how="any")
     available_market = [ticker for ticker in tickers if ticker in data_returns.columns]
     return_parts = [data_returns[available_market]] if available_market else []
     if manual_bonds:
@@ -2394,7 +2412,8 @@ def _compute_quant_run(
         else:
             bp = _fetch_close_prices_cached((benchmark_symbol,), start_date, end_date)
             if benchmark_symbol in bp.columns:
-                benchmark_returns = bp[benchmark_symbol].sort_index().pct_change().dropna()
+                benchmark_prices = align_daily_prices(bp[[benchmark_symbol]])
+                benchmark_returns = benchmark_prices[benchmark_symbol].pct_change(fill_method=None).dropna()
 
     benchmark_metrics = analytics.calculate_active_risk_metrics(
         portfolio_returns=portfolio_returns,
@@ -2468,7 +2487,7 @@ def _compute_quant_run(
         )
     active_strategy = dict(strategy_rulebook or {})
     if float(active_strategy.get("min_cash_weight") or 0.0) > 0 and "CASH" not in engine_returns:
-        engine_returns["CASH"] = float(risk_free_rate) / 252.0
+        engine_returns["CASH"] = float(np.expm1(np.log1p(risk_free_rate) / 252.0))
         engine_current_weights = np.append(engine_current_weights, 0.0)
         synthetic_cash_proxy = True
         engine_metadata["CASH"] = {
@@ -2495,6 +2514,12 @@ def _compute_quant_run(
         execution_model_enabled and not missing_liquidity_symbols
     )
     try:
+        if execution_model_enabled and missing_liquidity_symbols:
+            raise ValueError(
+                "Liquidity-aware optimization is blocked: missing ADV for "
+                + ", ".join(missing_liquidity_symbols)
+                + ". Supply liquidity data or explicitly disable the execution model for exploratory analysis."
+            )
         portfolio_estimates = None
         if str(optimization_expected_return_model) == "black_litterman":
             supplied_views = dict(black_litterman_views or {})
@@ -2506,6 +2531,7 @@ def _compute_quant_run(
                     symbol: float(black_litterman_confidence)
                     for symbol in supplied_views
                 },
+                risk_free_rate=risk_free_rate,
                 risk_aversion=risk_aversion,
             )
         elif tuple(str(column) for column in engine_returns.columns) == tuple(
@@ -2562,7 +2588,7 @@ def _compute_quant_run(
     if execution_model_enabled and missing_liquidity_symbols:
         mandate_aware["warnings"] = [
             *list(mandate_aware.get("warnings", [])),
-            "Liquidity-aware optimization was not applied because 30-day dollar-volume "
+            "Liquidity-aware optimization was blocked because 30-day dollar-volume "
             "data is unavailable for: " + ", ".join(missing_liquidity_symbols) + ".",
         ]
 
@@ -2634,6 +2660,18 @@ def _compute_quant_run(
                     short_term_tax_rate=float(short_term_tax_rate),
                     long_term_tax_rate=float(long_term_tax_rate),
                     as_of=end_date,
+                    strategy=active_strategy or None,
+                    asset_metadata=engine_metadata,
+                    max_weight=engine_effective_max_weight,
+                    turnover_limit=turnover_limit,
+                    target_volatility=(
+                        float(optimization_target_volatility)
+                        if str(optimization_objective) == "target_volatility" else None
+                    ),
+                    annualized_covariance=(
+                        (portfolio_estimates or optimization.estimate_portfolio_inputs(engine_returns)).covariance
+                        if str(optimization_objective) == "target_volatility" else None
+                    ),
                 )
             except Exception as execution_error:
                 execution_plan = {
@@ -2702,6 +2740,11 @@ def _compute_quant_run(
     validation_liquidity_ready = bool(
         execution_model_enabled and validation_adv_history is not None
     )
+    if execution_model_enabled and not validation_liquidity_ready and optimization_validation is None:
+        optimization_validation = {
+            "success": False,
+            "error": "Liquidity-aware validation is blocked: point-in-time ADV is missing. Supply liquidity history or explicitly disable the execution model for exploratory analysis.",
+        }
     if optimization_validation is None and len(validation_returns) > 146:
         validation_train_periods = min(756, max(126, len(validation_returns) // 2))
         if len(validation_returns) > validation_train_periods:
@@ -3456,7 +3499,7 @@ def _run_quant_research_stack(result: dict[str, Any]) -> dict[str, Any]:
             portfolio_returns=portfolio_returns,
             returns_df=returns,
             config=config,
-            user_id=st.session_state.get("user_id"),
+            team_connection_factory=get_connection,
         )
     except Exception as stack_error:
         quant_stack = {"_error": str(stack_error)}
@@ -3497,8 +3540,9 @@ def _run_quant_simulations(result: dict[str, Any]) -> dict[str, Any]:
 
     price_paths, simulation_stats = simulation.run_monte_carlo_simulation(
         current_value=current_value,
-        # GBM expects arithmetic drift; CAGR remains a reporting metric.
-        expected_return=float(portfolio_returns.mean() * 252.0),
+        # Both engines accept the same effective annual simple return. Using
+        # one input prevents model comparisons from changing the drift metric.
+        expected_return=float(metrics.get("annualized_return", 0.0)),
         volatility=float(metrics.get("volatility", 0.0)),
         time_horizon=simulation_days,
         n_simulations=n_simulations,
@@ -3761,9 +3805,41 @@ def _render_performance_attribution(result: dict, advanced: bool) -> None:
         st.dataframe(rkv, use_container_width=True, hide_index=True)
 
 
+def _simulation_disclosure(stats: Mapping[str, Any]) -> dict[str, Any]:
+    """Return stable, user-facing labels for Monte Carlo model metadata."""
+    model = str(stats.get("model") or "unknown")
+    model_labels = {
+        "geometric_brownian_motion": "Geometric Brownian motion (GBM)",
+        "merton_jump_diffusion": "Merton jump diffusion",
+    }
+    expected_return = stats.get("expected_return_input")
+    try:
+        expected_return_label = (
+            f"{float(expected_return):.2%}"
+            if expected_return is not None and np.isfinite(float(expected_return))
+            else "N/A"
+        )
+    except (TypeError, ValueError):
+        expected_return_label = "N/A"
+    tail_observations = stats.get("tail_observations_95")
+    try:
+        tail_label = str(int(tail_observations)) if tail_observations is not None else "N/A"
+    except (TypeError, ValueError, OverflowError):
+        tail_label = "N/A"
+    assumptions = stats.get("assumptions")
+    if not isinstance(assumptions, (list, tuple)):
+        assumptions = []
+    return {
+        "model": model_labels.get(model, model.replace("_", " ").title()),
+        "expected_return": expected_return_label,
+        "tail_observations": tail_label,
+        "assumptions": [str(item) for item in assumptions if str(item).strip()],
+    }
+
+
 def _render_simulation(result: dict, advanced: bool) -> None:
     st.markdown("### Monte Carlo Simulation")
-    stats = result["simulation_stats"]
+    stats = dict(result.get("simulation_stats") or {})
     artifacts = _simulation_artifacts(result)
     if artifacts is None:
         st.warning("No simulation results available.")
@@ -3790,6 +3866,21 @@ def _render_simulation(result: dict, advanced: bool) -> None:
     })
     st.markdown("#### Final Value Distribution")
     st.bar_chart(hist_df.set_index("Bucket"), use_container_width=True, height=320)
+
+    disclosure = _simulation_disclosure(stats)
+    metadata = st.columns(3)
+    metadata[0].metric("Model", disclosure["model"])
+    metadata[1].metric("Effective annual simple return", disclosure["expected_return"])
+    metadata[2].metric("Paths in 5% tail", disclosure["tail_observations"])
+    if disclosure["assumptions"]:
+        st.markdown("#### Model assumptions")
+        for assumption in disclosure["assumptions"]:
+            st.caption(f"• {assumption}")
+    st.caption(
+        "The terminal distribution and Monte Carlo sampling diagnostics are conditional on the "
+        "fixed return, volatility, and model assumptions shown above. They measure simulation "
+        "sampling error, not parameter uncertainty, model uncertainty, or forecast confidence."
+    )
 
 
 def _render_methodology_validation(result: dict) -> None:
@@ -3938,25 +4029,27 @@ def _render_models_signals(result: dict) -> None:
 
 
 def _render_robustness_check(result: dict) -> None:
-    """Render Robustness Validation."""
-    st.markdown("### Robustness Check (Walk-Forward Validation)")
-    portfolio_timeseries = result.get("portfolio_timeseries", pd.DataFrame())
-    if portfolio_timeseries.empty or "cumulative_return" not in portfolio_timeseries.columns:
+    """Render rolling stability diagnostics without making an OOS/refit claim."""
+    st.markdown("### Historical Stability Diagnostic (No Strategy Refit)")
+    raw_returns = result.get("portfolio_returns")
+    if raw_returns is None or len(raw_returns) == 0:
         st.warning("Portfolio returns not available for robustness validation.")
         return
-        
-    returns = portfolio_timeseries["cumulative_return"].diff().fillna(0.0)
-    
-    st.markdown("Configure Walk-Forward Out-of-Sample Validation and run it to compute Probabilistic Sharpe Ratio (PSR) and Deflated Sharpe Ratio (DSR).")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    train_days = col1.number_input("Train Window (Days)", min_value=30, max_value=3650, value=252, step=30)
-    test_days = col2.number_input("Test Window (Days)", min_value=10, max_value=1095, value=60, step=10)
-    step_days = col3.number_input("Step (Days)", min_value=10, max_value=1095, value=30, step=10)
-    num_trials = col4.number_input("Number of Trials", min_value=1, max_value=10000, value=100, step=10, help="Number of strategy variations tested. Used for DSR.")
+
+    returns = pd.Series(raw_returns, dtype=float)
+    st.markdown(
+        "Split one already-realized return series into rolling reference and evaluation segments. "
+        "This diagnoses historical stability; it does not refit a strategy and therefore is not "
+        "walk-forward out-of-sample evidence. DSR is unavailable without genuine trial-level Sharpe ratios."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    train_days = col1.number_input("Reference window (observations)", min_value=30, max_value=3650, value=252, step=30)
+    test_days = col2.number_input("Evaluation window (observations)", min_value=10, max_value=1095, value=60, step=10)
+    step_days = col3.number_input("Step (observations)", min_value=1, max_value=1095, value=30, step=10)
     
     if st.button("Run Validation", key="btn_run_robustness"):
-        with st.spinner("Running Walk-Forward validation..."):
+        with st.spinner("Calculating rolling historical stability..."):
             from src.analytics.modular.robustness_validation import run_walk_forward_validation
             
             try:
@@ -3965,30 +4058,32 @@ def _render_robustness_check(result: dict) -> None:
                     train_days=train_days,
                     test_days=test_days,
                     step_days=step_days,
-                    num_trials=num_trials
+                    num_trials=1,
+                    risk_free_rate=float(result.get("inputs", {}).get("risk_free_rate", 0.03)),
                 )
                 
                 metrics = res["metrics"]
                 
                 r1, r2, r3 = st.columns(3)
                 r1.metric("PSR", f"{metrics['psr']:.2%}")
-                r2.metric("DSR", f"{metrics['dsr']:.2%}")
-                r3.metric("OOS Sharpe", f"{metrics['oos_sharpe']:.3f}")
+                r2.metric("Evaluation Sharpe", f"{metrics['evaluation_sharpe']:.3f}")
+                r3.metric("Evaluation return (ann.)", f"{metrics['evaluation_annualized_return']:.2%}")
                 
                 st.info(f"**PSR Interpretation:** {metrics['psr_interpretation']}")
-                st.info(f"**DSR Interpretation:** {metrics['dsr_interpretation']}")
+                st.info(f"**DSR:** {metrics['dsr_interpretation']}")
+                st.warning(str(res.get("scope", "")))
                 
                 if res["windows"]:
-                    st.markdown("#### Walk-Forward Windows")
+                    st.markdown("#### Rolling Reference / Evaluation Segments")
                     df_windows = pd.DataFrame(res["windows"])
                     st.dataframe(df_windows, use_container_width=True)
                     
-                    st.markdown("#### Rolling Out-of-Sample Performance")
-                    agg_oos = res["aggregate_oos_returns"]
-                    if not agg_oos.empty:
-                        cum_oos = (1 + agg_oos).cumprod()
+                    st.markdown("#### Aggregated Evaluation-Segment Performance")
+                    aggregate_evaluation = res["aggregate_evaluation_returns"]
+                    if not aggregate_evaluation.empty:
+                        cumulative_evaluation = (1 + aggregate_evaluation).cumprod()
                         import plotly.express as px
-                        fig = px.line(cum_oos, title="Cumulative Out-of-Sample Returns", labels={"value": "Cumulative Growth", "index": "Date"})
+                        fig = px.line(cumulative_evaluation, title="Cumulative Evaluation-Segment Growth", labels={"value": "Cumulative Growth", "index": "Date"})
                         st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.error(f"Error running validation: {e}")
@@ -4093,19 +4188,19 @@ def _render_run_history(result: dict) -> None:
     st.markdown("### Run History")
     try:
         history_mod = _load_modular_history()
-        records = history_mod.list_run_records(base_dir="data/run_history", limit=40, user_id=st.session_state.get("user_id"))
+        records = history_mod.list_run_records(limit=40, team_connection_factory=get_connection)
     except Exception as e:
         st.warning(f"Could not load run history: {e}")
         return
 
     if not records:
-        st.info("No previous runs found in data/run_history/.")
+        st.info("No previous runs found in the durable Wharton team history.")
         return
 
     st.caption(f"{len(records)} historical run(s) found.")
     rows = []
     for rec in records:
-        r_dict = rec.to_dict() if hasattr(rec, "to_dict") else {}
+        r_dict = rec if isinstance(rec, dict) else rec.to_dict() if hasattr(rec, "to_dict") else {}
         m = r_dict.get("metrics", {})
         rows.append({
             "Run ID": str(r_dict.get("run_id", ""))[-16:],
@@ -4283,7 +4378,10 @@ def _render_monte_carlo(result: dict) -> None:
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
                f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
-               f"Seed: {inputs.get('random_seed', 'N/A')}")
+               f"Seed: {inputs.get('random_seed', 'N/A')} · "
+               f"5% tail paths: {stats.get('tail_observations_95', 'N/A')}. "
+               "Intervals describe Monte Carlo sampling error conditional on fixed return, "
+               "volatility, and model assumptions—not parameter or forecast uncertainty.")
 
 
 def _render_advanced_monte_carlo(result: dict) -> None:
@@ -4447,12 +4545,61 @@ def _render_advanced_monte_carlo(result: dict) -> None:
 
     st.caption(f"Simulations: {inputs.get('n_simulations', 'N/A')} · "
                f"Horizon: {inputs.get('simulation_days', 'N/A')} days · "
-               f"Seed: {inputs.get('random_seed', 'N/A')}")
+               f"Seed: {inputs.get('random_seed', 'N/A')} · "
+               f"5% tail paths: {stats.get('tail_observations_95', 'N/A')}. "
+               "Distribution percentiles and intervals describe Monte Carlo sampling under fixed "
+               "parameters, not parameter uncertainty or forecast confidence. The Merton jump "
+               "component is a stress overlay; the supplied historical diffusion volatility has "
+               "not been de-jumped before adding jump risk.")
 
 
 
 
 # ─── Efficient Frontier ───────────────────────────────────────────────────────
+
+def _optimization_validation_presentation(
+    validation: Mapping[str, Any],
+) -> dict[str, str | bool]:
+    """Label a rolling optimizer result according to its actual evidence scope."""
+    causal_oos = (
+        validation.get("causal") is True
+        and validation.get("out_of_sample") is True
+    )
+    costs_modelled = validation.get("transaction_cost_model_configured") is True
+    cost_label = (
+        "after configured costs"
+        if costs_modelled
+        else "with no non-zero trading-cost model"
+    )
+    cost_sentence = (
+        "Returns include the configured trading-cost model."
+        if costs_modelled
+        else "No non-zero trading-cost model was configured, so results are before trading costs."
+    )
+    if causal_oos:
+        return {
+            "causal_oos": True,
+            "heading": "Rolling Causal Out-of-Sample Validation",
+            "optimized_label": f"Optimized OOS {cost_label}",
+            "equal_weight_label": f"Equal Weight OOS {cost_label}",
+            "caption": (
+                "Each evaluation segment follows a re-estimation using only the preceding training "
+                f"window. {cost_sentence} This supports a rolling OOS process claim, subject to "
+                "the universe and data-provenance warnings shown below."
+            ),
+        }
+    return {
+        "causal_oos": False,
+        "heading": "Rolling Historical Replay (Not Causal OOS Evidence)",
+        "optimized_label": f"Optimized historical replay {cost_label}",
+        "equal_weight_label": f"Equal Weight historical replay {cost_label}",
+        "caption": (
+            "The rolling segments are a historical replay, not causal out-of-sample strategy "
+            f"evidence. {cost_sentence} Do not use this result as an OOS claim; inspect the "
+            "provenance warnings below."
+        ),
+    }
+
 
 def _render_efficient_frontier(result: dict) -> None:
     """Efficient frontier with 2D/3D visualization and optimal portfolios."""
@@ -4513,7 +4660,8 @@ def _render_efficient_frontier(result: dict) -> None:
 
     validation = result.get("optimization_validation")
     if isinstance(validation, dict) and validation.get("metrics"):
-        st.markdown("#### Rolling Out-of-Sample Validation")
+        presentation = _optimization_validation_presentation(validation)
+        st.markdown(f"#### {presentation['heading']}")
         validation_metrics = validation["metrics"]
         equal_metrics = validation.get("equal_weight_metrics", {})
         failed_windows = [
@@ -4529,7 +4677,7 @@ def _render_efficient_frontier(result: dict) -> None:
         st.dataframe(
             pd.DataFrame([
                 {
-                    "Portfolio": "Optimized after costs",
+                    "Portfolio": presentation["optimized_label"],
                     "Annualized Return": _fmt_pct(validation_metrics.get("annualized_return")),
                     "Volatility": _fmt_pct(validation_metrics.get("volatility")),
                     "Sharpe": _fmt_float(validation_metrics.get("sharpe_ratio")),
@@ -4537,7 +4685,7 @@ def _render_efficient_frontier(result: dict) -> None:
                     "Turnover": _fmt_pct(validation_metrics.get("total_turnover")),
                 },
                 {
-                    "Portfolio": "Equal Weight after costs",
+                    "Portfolio": presentation["equal_weight_label"],
                     "Annualized Return": _fmt_pct(equal_metrics.get("annualized_return")),
                     "Volatility": _fmt_pct(equal_metrics.get("volatility")),
                     "Sharpe": _fmt_float(equal_metrics.get("sharpe_ratio")),
@@ -4552,21 +4700,23 @@ def _render_efficient_frontier(result: dict) -> None:
             st.success(
                 "Point-in-time universe control is active. Membership is lagged by "
                 f"{int(validation.get('membership_lag_periods') or 1)} observation(s), "
-                "and each target uses only the preceding training window."
+                "which reduces membership lookahead; it does not by itself prove that every "
+                "model input is causal."
             )
         else:
             st.warning(
                 "The selected universe is current rather than point-in-time; this rolling "
                 "test remains exposed to universe-selection and survivorship bias."
             )
+        for warning in validation.get("warnings") or []:
+            st.warning(str(warning))
+        st.caption(str(presentation["caption"]))
         st.caption(
-            "The following quarter is evaluated after commission, spread, and market-impact "
-            "costs when liquidity inputs are available. The equal-weight line is a neutral "
-            "comparator and may not satisfy the active mandate."
+            "The equal-weight line is a neutral comparator and may not satisfy the active mandate."
         )
     elif isinstance(validation, dict) and validation.get("success") is False:
         st.warning(
-            "Rolling out-of-sample validation was not available: "
+            "Rolling optimization validation was not available: "
             f"{validation.get('error', 'the optimizer did not produce valid windows')}"
         )
 
@@ -6814,6 +6964,29 @@ def _render_client_behavioral_profile(
     )
 
 
+def _strategy_selection_process(strategy: Mapping[str, Any]) -> str:
+    """Read the canonical field, retaining ``process`` only for old saved versions."""
+    return str(
+        strategy.get("selection_process")
+        or strategy.get("process")
+        or ""
+    ).strip()
+
+
+def _selection_factor_form_error(factors: list[Mapping[str, Any]]) -> str:
+    """Require at least one factor with an explicit decision rule."""
+    if not factors:
+        return "Add at least one measurable selection factor and decision rule."
+    missing_rules = [
+        str(item.get("factor") or "Unnamed factor")
+        for item in factors
+        if not str(item.get("rule") or "").strip()
+    ]
+    if missing_rules:
+        return "Add a minimum or decision rule for: " + ", ".join(missing_rules) + "."
+    return ""
+
+
 def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any]) -> None:
     from src.portfolio_tracker.strategy_alignment import normalize_strategy_rulebook
     from src.portfolio_tracker.strategy_store import (
@@ -6867,9 +7040,21 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             help="It should explain who you invest for, what you select, and why the process should work over the client's horizon.",
         )
         process = st.text_area(
-            "Selection, review, and sell discipline",
-            value=str(current.get("process") or ""),
+            "Security-selection and review process",
+            value=_strategy_selection_process(current),
             height=110,
+        )
+        sell_discipline = st.text_area(
+            "Explicit sell / thesis-break discipline",
+            value=str(current.get("sell_discipline") or ""),
+            height=90,
+            help="State observable sell, reduce, or review triggers; a generic process description is not enough.",
+        )
+        rebalance_policy = st.text_area(
+            "Explicit rebalancing policy",
+            value=str(current.get("rebalance_policy") or ""),
+            height=90,
+            help="State cadence, drift trigger, approval path, and how turnover is measured.",
         )
         st.markdown("##### Change governance")
         g1, g2, g3 = st.columns(3)
@@ -6922,7 +7107,14 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             max_goal_drift = st.number_input("Maximum goal drift (pp)", 0.0, 100.0, _saved_number(current, "max_goal_drift", 0.10) * 100.0, 1.0)
         with r4:
             max_sector_drift = st.number_input("Maximum sector drift (pp)", 0.0, 100.0, _saved_number(current, "max_sector_drift", 0.10) * 100.0, 1.0)
-            max_turnover = st.number_input("Maximum cumulative turnover (%)", 0.0, 500.0, _saved_number(current, "max_turnover", 0.25) * 100.0, 5.0)
+            max_turnover = st.number_input(
+                "Maximum rebalance turnover (%)",
+                0.0,
+                500.0,
+                _saved_number(current, "max_turnover", 0.25) * 100.0,
+                5.0,
+                help="Gross buys plus sells divided by pre-trade equity (the full L1 weight change, not half-turnover).",
+            )
         a1, a2, a3, a4 = st.columns(4)
         with a1:
             min_holdings = st.number_input("Minimum holdings", 0, 100, int(current.get("min_holdings") or 0))
@@ -6997,6 +7189,7 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
                     "rule": str(row.get("Minimum / decision rule") or "").strip(),
                 })
         factor_total = sum(float(item["weight"]) for item in parsed_factors)
+        factor_error = _selection_factor_form_error(parsed_factors)
         sector_total = sum(float(item["target_weight"]) for item in parsed_sectors)
         invalid_sector = any(
             not item["min_weight"] <= item["target_weight"] <= item["max_weight"]
@@ -7004,6 +7197,10 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
         )
         if not name.strip() or not thesis.strip():
             st.error("Strategy name and one-sentence thesis are required.")
+        elif not process.strip() or not sell_discipline.strip() or not rebalance_policy.strip():
+            st.error("Selection process, explicit sell discipline, and explicit rebalancing policy are required.")
+        elif factor_error:
+            st.error(factor_error)
         elif not change_reason.strip() or not impact_analysis.strip():
             st.error("Every version requires a change reason and current-portfolio impact analysis.")
         elif effective_from < date.today() and not retroactive_override:
@@ -7026,7 +7223,10 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
             ticker_exclusions = [item.strip().upper() for item in excluded_tickers.replace(";", ",").split(",") if item.strip()]
             sector_exclusions = [item.strip() for item in excluded_sectors.replace(";", ",").split(",") if item.strip()]
             payload = normalize_strategy_rulebook({
-                "name": name.strip(), "thesis": thesis.strip(), "process": process.strip(),
+                "name": name.strip(), "thesis": thesis.strip(),
+                "selection_process": process.strip(),
+                "sell_discipline": sell_discipline.strip(),
+                "rebalance_policy": rebalance_policy.strip(),
                 "max_position_weight": max_position / 100.0,
                 "max_sector_weight": max_sector / 100.0,
                 "min_cash_weight": min_cash / 100.0,
@@ -7046,7 +7246,12 @@ def _render_strategy_rulebook(profile: dict[str, str | int], data: dict[str, Any
                 "sector_targets": parsed_sectors,
                 "selection_factors": parsed_factors,
             }, mandate)
-            payload.update({"process": process.strip(), "selection_factors": parsed_factors})
+            payload.update({
+                "selection_process": process.strip(),
+                "sell_discipline": sell_discipline.strip(),
+                "rebalance_policy": rebalance_policy.strip(),
+                "selection_factors": parsed_factors,
+            })
             previous_version = (
                 int(record.get("version") or record.get("version_number") or 0)
                 if isinstance(record, dict)
@@ -7648,13 +7853,7 @@ def _render_strategy_alignment(data: dict[str, Any]) -> None:
     if not mandate or not strategy:
         st.warning("Save both a Client Mandate and an active Strategy Rulebook to calculate alignment.")
         return
-    observed_turnover = sum(
-        abs(float(row.get("quantity") or 0.0) * float(row.get("entry_price") or 0.0))
-        for row in positions
-        if str(row.get("status") or "open").lower() == "closed"
-    ) / INITIAL_CAPITAL_USD
     strategy_with_observations = dict(strategy)
-    strategy_with_observations["current_turnover"] = observed_turnover
     actual_cash = float(performance.get("cash_before_pnl") or 0.0) + float(performance.get("realized_pnl") or 0.0)
     analysis = analyze_strategy_alignment(
         holdings,
@@ -7671,7 +7870,9 @@ def _render_strategy_alignment(data: dict[str, Any]) -> None:
     top[3].metric("Largest holding", f"{float(summary.get('largest_position_weight') or 0):.1%}")
     top[4].metric("Effective holdings", f"{float(summary.get('effective_holdings') or 0):.1f}")
     st.caption(
-        f"Observed cumulative turnover: {observed_turnover:.1%} (entry cost of closed positions ÷ initial capital)."
+        "Rebalance turnover is not reconstructed from position snapshots: that would omit or double-count "
+        "executions. Compliance remains unassessed until a gross executed-notional / pre-trade-equity value "
+        "from the trade ledger is supplied."
     )
 
     components = _strategy_rows(analysis.get("components"), "Component")
@@ -9554,7 +9755,8 @@ def _render_commodity_analysis(profile: dict[str, str | int]) -> None:
                 ]
                 if not available:
                     raise ValueError("No usable commodity price history was returned.")
-                prices = fetched[available].sort_index().ffill().dropna(how="all")
+                from src.data.price_alignment import align_daily_prices
+                prices = align_daily_prices(fetched[available])
                 metrics = calculate_commodity_metrics(
                     prices,
                     annual_risk_free_rate=float(commodity_risk_free) / 100.0,
@@ -10323,8 +10525,17 @@ def _render_bond_analysis(profile: dict[str, str | int]) -> None:
                 st.caption("Carry-after-loss and carry-per-duration are transparent comparison aids, not buy/sell scores.")
 
 
-def _annual_goal_return_history(returns: Any) -> pd.DataFrame:
-    """Compound sufficiently complete calendar years for goal bootstrapping."""
+def _annual_goal_return_history(
+    returns: Any,
+    minimum_observations: int = 227,
+) -> pd.DataFrame:
+    """Compound near-complete calendar years for goal bootstrapping.
+
+    ``227`` is roughly 90% of a 252-session year. Short partial years are not
+    annualized or silently treated as full-year scenarios.
+    """
+    if int(minimum_observations) <= 0:
+        raise ValueError("minimum_observations must be positive.")
     frame = pd.DataFrame(returns).copy()
     if frame.empty:
         return pd.DataFrame()
@@ -10339,7 +10550,7 @@ def _annual_goal_return_history(returns: Any) -> pd.DataFrame:
     grouped = frame.groupby(frame.index.year)
     observations = grouped.count().min(axis=1)
     compounded = grouped.apply(lambda group: (1.0 + group).prod() - 1.0)
-    return compounded.loc[observations >= 126].dropna(how="any")
+    return compounded.loc[observations >= int(minimum_observations)].dropna(how="any")
 
 
 def _goal_candidate_weights(result: Mapping[str, Any], columns: list[str]) -> dict[str, np.ndarray]:
@@ -10367,12 +10578,12 @@ def _goal_candidate_weights(result: Mapping[str, Any], columns: list[str]) -> di
     current_symbols = [str(item) for item in result.get("tickers", columns)]
     if len(current_weights) == len(current_symbols):
         add_candidate("Current strategy", {"weights": current_weights, "symbols": current_symbols})
-    add_candidate("Max Sharpe", result.get("max_sharpe"), fallback_symbols=columns)
-    add_candidate("Min Variance", result.get("min_variance"), fallback_symbols=columns)
+    add_candidate("Max Sharpe (in-sample exploratory)", result.get("max_sharpe"), fallback_symbols=columns)
+    add_candidate("Min Variance (in-sample exploratory)", result.get("min_variance"), fallback_symbols=columns)
     mandate_aware = result.get("mandate_aware")
     if isinstance(mandate_aware, Mapping) and mandate_aware.get("success"):
         objective = str(mandate_aware.get("objective") or "Mandate-aware").replace("_", " ").title()
-        add_candidate(f"Mandate-aware · {objective}", mandate_aware)
+        add_candidate(f"Mandate-aware · {objective} (in-sample exploratory)", mandate_aware)
     return candidates
 
 
@@ -10412,6 +10623,11 @@ def _render_goal_funding_outlook(result: Mapping[str, Any], current_portfolio_va
             "Extend the Quant Engine lookback before relying on this output."
         )
         return
+    if len(annual_returns) < 5:
+        st.warning(
+            f"Only {len(annual_returns)} near-complete calendar years are available. The bootstrap "
+            "reuses a very small set of annual regimes, so goal probabilities are exploratory."
+        )
     candidates = _goal_candidate_weights(result, [str(column) for column in annual_returns.columns])
     if not candidates:
         st.warning("No portfolio candidate could be aligned to the return history used for this goal analysis.")
@@ -10449,8 +10665,13 @@ def _render_goal_funding_outlook(result: Mapping[str, Any], current_portfolio_va
         low, high = metrics.goal_achievement_confidence_interval
         rows.append({
             "Portfolio": portfolio_name,
+            "Evidence scope": (
+                "Current historical policy"
+                if portfolio_name == "Current strategy"
+                else "Same-history optimized; in-sample exploratory"
+            ),
             "P(goal achieved)": metrics.probability_goal_achieved,
-            "95% scenario CI": f"{low:.1%}–{high:.1%}",
+            "95% MC sampling interval": f"{low:.1%}–{high:.1%}",
             "Expected terminal wealth": metrics.expected_terminal_wealth,
             "Median terminal wealth": metrics.median_terminal_wealth,
             "10th percentile": metrics.percentile_10_terminal_wealth,
@@ -10473,7 +10694,10 @@ def _render_goal_funding_outlook(result: Mapping[str, Any], current_portfolio_va
         f"Goal: ${config.target_wealth:,.0f} in {config.horizon_years} years · starting goal capital: "
         f"${config.initial_capital:,.0f} ({target_weight:.1%} of ${capital_base:,.0f}) · annual net cash flow: "
         f"${config.annual_net_cashflow:,.0f} · {config.wealth_basis} basis. Historical calendar-year rows are "
-        "bootstrapped 10,000 times; every portfolio uses the same sampled shocks. This is a planning range, not a forecast."
+        "bootstrapped independently with replacement 10,000 times; every portfolio uses the same sampled shocks, "
+        "constant weights, annual rebalancing, and no taxes or transaction costs. The Wilson interval measures only "
+        "finite Monte Carlo sampling error conditional on this history and model—not parameter uncertainty or a "
+        "planning confidence interval. Same-history optimized candidates are in-sample comparisons, not validated forecasts."
     )
 
 
@@ -12635,18 +12859,21 @@ def _judge_json_value(value: Any, default: Any) -> Any:
 
 
 def _load_shared_quant_run_records() -> list[dict[str, Any]]:
-    """Read legacy shared Quant history without creating or changing files."""
+    """Read durable team history plus redacted, read-only legacy snapshots."""
+    from src.utils.redaction import redact_sensitive_data
+    durable = _load_modular_history().list_run_records(limit=200, team_connection_factory=get_connection)
     history_dir = Path(PROJECT_ROOT) / "data" / "run_history"
     if not history_dir.is_dir():
-        return []
-    records: list[dict[str, Any]] = []
+        return durable
+    records: list[dict[str, Any]] = list(durable)
+    known_ids = {record.get("run_id") for record in records}
     for path in sorted(history_dir.glob("*.json"), reverse=True):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(payload, Mapping):
-            records.append(dict(payload))
+        if isinstance(payload, Mapping) and payload.get("run_id") not in known_ids:
+            records.append(redact_sensitive_data(dict(payload)))
     return records
 
 

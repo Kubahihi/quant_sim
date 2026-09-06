@@ -34,6 +34,11 @@ def test_seeded_gbm_is_reproducible_and_converges_to_analytic_mean():
     assert stats_a["mean"] == pytest.approx(stats_a["analytic_mean"], rel=0.01)
     assert abs(stats_a["mean"] - stats_a["analytic_mean"]) <= 3 * stats_a["standard_error_mean"]
     assert stats_a["relative_standard_error_mean"] < 0.01
+    assert stats_a["analytic_mean"] == pytest.approx(108_000.0)
+    assert stats_a["continuous_drift"] == pytest.approx(np.log1p(0.08))
+    assert stats_a["tail_observations_95"] >= 1_000
+    assert stats_a["probability_of_loss_standard_error"] >= 0.0
+    assert stats_a["expected_shortfall_95_standard_error"] >= 0.0
 
 
 @pytest.mark.parametrize(
@@ -43,6 +48,8 @@ def test_seeded_gbm_is_reproducible_and_converges_to_analytic_mean():
         {"volatility": -0.1},
         {"time_horizon": 0},
         {"n_simulations": 1},
+        {"n_simulations": 99},
+        {"expected_return": -1.0},
     ],
 )
 def test_gbm_rejects_invalid_inputs(kwargs):
@@ -133,7 +140,8 @@ def test_optimized_advanced_paths_match_direct_merton_reference_exactly():
     jump_compensator = jump_intensity * (
         np.exp(jump_mean + 0.5 * jump_volatility**2) - 1.0
     )
-    drift = (expected_return - 0.5 * volatility**2 - jump_compensator) * dt
+    continuous_drift = np.log1p(expected_return)
+    drift = (continuous_drift - 0.5 * volatility**2 - jump_compensator) * dt
     diffusion = volatility * np.sqrt(dt)
     diffusion_returns = drift + diffusion * rng.standard_normal(
         (time_horizon, n_simulations)
@@ -173,6 +181,26 @@ def test_optimized_advanced_paths_match_direct_merton_reference_exactly():
     assert statistics["realized_average_jumps_per_path"] == pytest.approx(
         np.mean(np.sum(n_jumps, axis=0))
     )
+
+
+def test_zero_jump_merton_and_gbm_share_the_same_return_semantics():
+    kwargs = {
+        "current_value": 1_000.0,
+        "expected_return": 0.12,
+        "volatility": 0.20,
+        "time_horizon": 252,
+        "n_simulations": 1_000,
+        "random_seed": 17,
+    }
+    gbm_paths, gbm_stats = run_monte_carlo_simulation(**kwargs)
+    merton_paths, merton_stats = run_advanced_monte_carlo_simulation(
+        **kwargs,
+        jump_intensity=0.0,
+    )
+
+    assert np.array_equal(gbm_paths, merton_paths)
+    assert gbm_stats["analytic_mean"] == pytest.approx(1_120.0)
+    assert merton_stats["analytic_mean"] == pytest.approx(1_120.0)
 
 
 @pytest.mark.parametrize(

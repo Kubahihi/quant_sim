@@ -39,7 +39,7 @@ def plot_drawdown(
     fig, ax = plt.subplots(figsize=figsize)
     
     cumulative = (1 + returns).cumprod()
-    running_max = cumulative.expanding().max()
+    running_max = cumulative.expanding().max().clip(lower=1.0)
     drawdown = (cumulative - running_max) / running_max
     
     ax.fill_between(drawdown.index, drawdown, 0, alpha=0.3, color="red")

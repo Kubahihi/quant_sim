@@ -31,9 +31,10 @@ MANDATE = {
 }
 STRATEGY = {
     "strategy_thesis": "Own durable compounders with identifiable catalysts.",
-    "selection_factors": ["ROIC", "FCF"], "max_position_weight": 0.1,
+    "selection_factors": {"ROIC": ">= 15%", "FCF": "positive"}, "max_position_weight": 0.1,
     "max_sector_weight": 0.25, "sell_discipline": "Sell on thesis break.",
     "drift_limit": 0.03,
+    "rebalance_policy": "Review quarterly and rebalance when drift exceeds 3%.",
 }
 THESIS = {
     "ticker": "ABC", "payload": {
@@ -54,6 +55,30 @@ def test_complete_constitution_and_dossier_score_full_marks():
     catalyst = {"ticker": "ABC", "title": "Investor day"}
     assert assess_strategy_constitution(MANDATE, STRATEGY)["score"] == 100
     assert assess_security_dossier("ABC", THESIS, [source], [catalyst])["score"] == 100
+
+
+def test_generic_process_and_drift_defaults_do_not_substitute_for_explicit_rules():
+    incomplete = {
+        "strategy_thesis": "Own durable businesses.",
+        "process": "Research quality companies and monitor the portfolio.",
+        "selection_factors": ["ROIC", "FCF"],
+        "max_position_weight": 0.10,
+        "max_sector_weight": 0.25,
+        "max_goal_drift": 0.10,
+        "max_sector_drift": 0.10,
+    }
+
+    assessment = assess_strategy_constitution(MANDATE, incomplete)
+    missing = {item["key"] for item in assessment["missing"]}
+
+    assert {"selection", "sell", "rebalance"} <= missing
+
+
+def test_measurable_selection_and_explicit_sell_rebalance_rules_are_required():
+    assessment = assess_strategy_constitution(MANDATE, STRATEGY)
+    completed = {item["key"] for item in assessment["completed"]}
+
+    assert {"selection", "sell", "rebalance"} <= completed
 
 
 def test_canonical_dossier_catalyst_does_not_require_a_legacy_calendar_copy():

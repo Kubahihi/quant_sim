@@ -19,9 +19,10 @@ def run_quant_stack(
     portfolio_returns: pd.Series,
     returns_df: pd.DataFrame,
     config: Dict[str, Any],
-    history_dir: str = "data/run_history",
+    history_dir: str | None = None,
     user_id: int | None = None,
     precomputed_models: Mapping[str, ModelResult] | None = None,
+    team_connection_factory=None,
 ) -> Dict[str, Any]:
     context = {
         "returns_df": returns_df,
@@ -78,7 +79,10 @@ def run_quant_stack(
             "news_relevance_coverage": float(news.context.get("relevance_coverage", 0.0)),
         },
     )
-    prior_run = next(iter(list_run_records(base_dir=history_dir, limit=1, user_id=user_id)), None)
+    history_options = {"base_dir": history_dir, "user_id": user_id}
+    if team_connection_factory is not None:
+        history_options["team_connection_factory"] = team_connection_factory
+    prior_run = next(iter(list_run_records(limit=1, **history_options)), None)
     summary = build_summary(models, signals, news=news, backtest=backtest, prior_run=prior_run)
 
     run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
@@ -123,7 +127,7 @@ def run_quant_stack(
             "fetch_errors": list(news.context.get("fetch_errors", [])),
         },
     )
-    history_path = save_run_record(record, base_dir=history_dir, user_id=user_id)
+    history_path = save_run_record(record, **history_options)
 
     return {
         "models": models,

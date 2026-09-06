@@ -212,12 +212,11 @@ def _garch_model(series: pd.Series, context: Dict[str, Any]) -> ModelResult:
         variance = float(forecast.variance.values[-1, 0])
         cond_vol = max(0.0, np.sqrt(variance) / 100.0)
     else:
-        # Graceful fallback to EWMA volatility if arch is unavailable.
-        lambda_ = float(context.get("ewma_lambda", 0.94))
-        var = 0.0
-        for ret in clean:
-            var = lambda_ * var + (1 - lambda_) * float(ret) ** 2
-        cond_vol = float(np.sqrt(max(var, 0.0)))
+        # EWMA already has its own registry entry. Do not count the same model
+        # twice or claim that a missing GARCH dependency produced a GARCH fit.
+        return ModelResult(name="garch", family="classical", available=False,
+            error="arch is unavailable; use the separately reported EWMA model.",
+            payload={"requested_model": "garch", "actual_model": None, "alternative_model": "ewma"})
 
     ann = float(cond_vol * np.sqrt(252.0))
     confidence = float(max(0.0, min(1.0, 1.0 - min(0.95, ann * 0.8))))

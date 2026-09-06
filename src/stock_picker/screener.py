@@ -439,7 +439,7 @@ def apply_technical_indicators(
                     continue
 
                 cumulative = (1 + returns).cumprod()
-                running_max = cumulative.cummax()
+                running_max = cumulative.cummax().clip(lower=1.0)
                 drawdown = cumulative / running_max - 1.0
 
                 row["RSI"] = _compute_rsi(close)
