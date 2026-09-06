@@ -43,6 +43,8 @@ def _fake_quant_stack(tmp_path: Path):
         config: dict,
         history_dir: str = "data/run_history",
         precomputed_models=None,
+        user_id=None,
+        team_connection_factory=None,
     ) -> dict:
         summary = SummaryResult(
             generated_at=datetime.now(timezone.utc).isoformat(),
@@ -236,8 +238,18 @@ def test_streamlit_app_loads_default_portfolio_only_once(monkeypatch):
     assert load_calls == [("default", None)]
 
 
-def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
+def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path):
     from ui.pages import wharton_dash
+
+    monkeypatch.setenv("QUANT_SIM_ENV", "test")
+    monkeypatch.setattr(st, "secrets", {})
+    monkeypatch.setattr(wharton_dash, "DB_PATH", tmp_path / "wharton.db")
+    monkeypatch.setattr(wharton_dash, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(wharton_dash, "resolve_wharton_credentials", lambda *args, **kwargs: dict.fromkeys(wharton_dash.REQUIRED_WHARTON_USERS, "smoke-only-password"))
+    monkeypatch.setattr(wharton_dash, "resolve_wharton_judge_credential", lambda *args, **kwargs: None)
+    wharton_dash.init_db()
+    profile = wharton_dash.authenticate_user("Jakub", "smoke-only-password")
+    assert profile is not None
 
     automatic_peer_info = {
         "ORCL": {
@@ -277,12 +289,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
     )
     at = AppTest.from_file(str(APP_PATH))
     at.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
-    at.session_state["wharton_user_profile_v2"] = {
-        "id": 1,
-        "username": "Jakub",
-        "role": "Captain/Quant",
-        "primary_module": "Quant Engine",
-    }
+    at.session_state["wharton_user_profile_v2"] = profile
     at.session_state["wharton_company_analysis_v1"] = {
         "MSFT": {
             "ticker": "MSFT",
@@ -290,6 +297,8 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch):
             "info": {
                 "longName": "Microsoft Corporation",
                 "longBusinessSummary": "Software and cloud services company.",
+                "currency": "USD",
+                "financialCurrency": "USD",
                 "currentPrice": 100.0,
                 "marketCap": 1_000_000_000_000,
                 "freeCashflow": 10_000_000_000,

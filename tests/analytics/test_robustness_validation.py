@@ -149,7 +149,7 @@ def test_run_walk_forward_validation(dummy_index):
     [
         pd.Series([0.01, np.nan, 0.02]),
         pd.Series([0.01, np.inf, 0.02]),
-        pd.Series([0.01, -1.0, 0.02]),
+        pd.Series([0.01, -1.01, 0.02]),
         pd.Series([0.01, 0.02, 0.03], index=[1, 1, 2]),
         pd.Series([0.01, 0.02, 0.03], index=[2, 1, 3]),
     ],

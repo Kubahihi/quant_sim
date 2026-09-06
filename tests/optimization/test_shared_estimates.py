@@ -208,8 +208,9 @@ def test_deterministic_cash_is_not_shrunk_toward_risky_assets():
     )
     cash_index = list(estimates.symbols).index("CASH")
 
-    assert estimates.mean_returns[cash_index] == pytest.approx(0.03)
-    assert estimates.sample_mean_returns[cash_index] == pytest.approx(0.03)
+    arithmetic_cash_return = 252 * np.expm1(np.log1p(0.03) / 252)
+    assert estimates.mean_returns[cash_index] == pytest.approx(arithmetic_cash_return)
+    assert estimates.sample_mean_returns[cash_index] == pytest.approx(arithmetic_cash_return)
     np.testing.assert_array_equal(estimates.covariance[cash_index], 0.0)
     np.testing.assert_array_equal(estimates.covariance[:, cash_index], 0.0)
     np.testing.assert_array_equal(estimates.sample_covariance[cash_index], 0.0)
@@ -229,7 +230,7 @@ def test_maximum_sharpe_uses_feasible_cash_instead_of_negative_risky_mix():
 
     assert result["success"] is True
     np.testing.assert_allclose(result["weights"], [0.0, 1.0], atol=1e-10)
-    assert result["expected_return"] == pytest.approx(0.03)
+    assert result["expected_return"] == pytest.approx(252 * periodic_cash_return)
     assert result["volatility"] == pytest.approx(0.0)
     assert result["sharpe_ratio"] == pytest.approx(0.0)
     assert "zero-volatility" in result["message"]
@@ -273,16 +274,16 @@ def test_custom_constant_cash_proxy_requires_explicit_opt_in():
     )
     cash_index = list(estimates.symbols).index("TREASURY_PROXY")
 
-    assert estimates.mean_returns[cash_index] == pytest.approx(0.025)
+    assert estimates.mean_returns[cash_index] == pytest.approx(252 * periodic_cash_return)
     np.testing.assert_array_equal(estimates.covariance[cash_index], 0.0)
     assert estimates.deterministic_assets == ("TREASURY_PROXY",)
 
 
 def test_static_estimator_rejects_impossible_simple_returns():
     returns = _sample_returns(periods=40, assets=2)
-    returns.iloc[3, 0] = -1.0
+    returns.iloc[3, 0] = -1.01
 
-    with pytest.raises(ValueError, match="greater than -100%"):
+    with pytest.raises(ValueError, match="at least -100%"):
         estimate_portfolio_inputs(returns)
 
 
@@ -310,7 +311,7 @@ def test_frontier_starts_at_global_minimum_variance_and_uses_supplied_rate():
     )
     assert np.all(np.diff([float(point["return"]) for point in frontier]) >= -1e-8)
     assert first["sharpe_ratio"] == pytest.approx(
-        (float(first["return"]) - risk_free_rate) / float(first["volatility"])
+        (float(first["return"]) - 252 * np.expm1(np.log1p(risk_free_rate) / 252)) / float(first["volatility"])
     )
 
 
@@ -403,7 +404,7 @@ def test_black_litterman_prior_is_total_return_and_views_are_absolute():
     expected_excess = risk_aversion * prior.covariance @ market_weights
     np.testing.assert_allclose(
         prior.mean_returns,
-        risk_free_rate + expected_excess,
+        252 * np.expm1(np.log1p(risk_free_rate) / 252) + expected_excess,
         rtol=1e-12,
         atol=1e-14,
     )

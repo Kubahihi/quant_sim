@@ -6,6 +6,7 @@ import cvxpy as cp
 from loguru import logger
 import numpy as np
 import pandas as pd
+from src.utils.rates import annual_effective_to_arithmetic
 
 from .constraints import build_weight_bounds, validate_weight_solution
 from .estimators import (
@@ -187,7 +188,7 @@ def optimize_cost_aware_rebalance(
     volatility = float(np.sqrt(max(variance, 0.0)))
     transaction_cost_drag = float(tx_cost_rate * realized_turnover)
     sharpe_ratio = (
-        (expected_return - float(risk_free_rate)) / volatility
+        (expected_return - annual_effective_to_arithmetic(risk_free_rate, estimates.trading_days)) / volatility
         if volatility > 0
         else 0.0
     )

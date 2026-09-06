@@ -15,6 +15,12 @@ This makes minimum variance, maximum Sharpe, the efficient frontier, sampled
 portfolios and cost-aware rebalancing directly comparable. The metadata is
 included in every optimization result.
 
+Means use annualized **arithmetic** simple-return units (`N * mean(r)`) for all
+assets, including cash. The supplied risk-free rate is annual **effective** and
+is converted to `N * expm1(log1p(rf) / N)` before comparison with these means.
+Historical CAGR and the Monte Carlo expected wealth-growth input remain
+effective annual returns; they must not be substituted for an arithmetic mean.
+
 Already-numeric return matrices use a vectorized finite-row mask; mixed or text
 inputs retain the stricter coercion path. Black-Litterman views are updated in
 view space, so a small set of views requires a small linear solve instead of two
@@ -79,6 +85,10 @@ position cap raises a clear input error. Solver output is checked for finite
 weights, full investment and bound residuals before it can be returned as a
 recommendation. A failed or invalid solution contains no target weights.
 
+If the maximum-Sharpe solver fails but a feasible cash allocation exists, the
+result still has `success=False` and `status="fallback_feasible"`. Its separate
+`fallback_weights` are diagnostic, not a verified optimum or trade recommendation.
+
 The dashboards may raise a position cap to the minimum feasible value before
 calling the optimizer. When this happens, the requested and effective limits
 are retained and the UI displays a warning.
@@ -127,6 +137,26 @@ trades while enforcing:
 - maximum ADV participation;
 - minimum/maximum executed holding counts;
 - optional tax-lot selection.
+
+The final post-cost holdings, including residual cash, are checked again against
+the supplied mandate (asset/sector weights, cash bounds, beta and eligibility).
+When the optimizer imposes a volatility ceiling, the execution plan verifies it
+again using the same annualized covariance and actual post-cost weights.
+Executed notional determines turnover. A holding-count reduction or lot rounding
+that violates the mandate returns `success=False`; the UI does not display it as
+an executable recommendation. The algorithm does not claim an integer optimum.
+Minimum order value is rechecked after the cash/fee affordability adjustment.
+Missing ADV blocks a requested participation limit or nonzero market-impact
+estimate. The UI requires explicit disabling of the execution model for an
+exploratory run without liquidity data, including walk-forward validation.
+
+Walk-forward execution uses separate evolving NAVs for the strategy and the
+equal-weight comparator. Fixed departure sales consume the same turnover budget
+as survivor purchases, which start from actual pre-trade holdings. A liquidity
+failure cancels that account's whole rebalance and carries its existing positions
+forward. A security that records a -100% return cannot be bought again. Complete
+loss of either account ends the comparison at that observation and marks an
+unfinished evaluation explicitly with `evaluation_complete=False`.
 
 Tax lots are sold in ascending estimated tax per share. This harvests the most
 valuable losses first and then chooses the lowest estimated-tax gains using the

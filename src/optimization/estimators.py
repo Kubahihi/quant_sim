@@ -5,6 +5,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from src.utils.rates import annual_effective_to_arithmetic
 
 
 TRADING_DAYS = 252.0
@@ -60,6 +61,7 @@ class PortfolioEstimates:
             "observations": self.observations,
             "assets": len(self.symbols),
             "trading_days": self.trading_days,
+            "return_convention": "annualized_arithmetic_simple_return",
             "covariance_shrinkage": self.covariance_shrinkage,
             "return_shrinkage": self.return_shrinkage,
             "covariance_eigenvalue_floor": self.covariance_eigenvalue_floor,
@@ -104,8 +106,8 @@ def clean_returns(returns: pd.DataFrame) -> pd.DataFrame:
     if frame.shape[0] < 2:
         raise ValueError("returns must contain at least two observations.")
     frame = frame.astype(float)
-    if bool((frame.to_numpy(dtype=float) <= -1.0).any()):
-        raise ValueError("Simple returns must be greater than -100%.")
+    if bool((frame.to_numpy(dtype=float) < -1.0).any()):
+        raise ValueError("Simple returns must be at least -100%.")
     return frame
 
 
@@ -243,14 +245,8 @@ def estimate_portfolio_inputs(
     clean = clean_returns(returns)
     deterministic = _deterministic_column_mask(clean, deterministic_assets)
     sample_mean = clean.mean().to_numpy(dtype=float) * annualization
-    if np.any(deterministic):
-        # A certain periodic return has an exact effective annual return. This
-        # keeps a synthetic risk-free asset equal to the annual risk-free rate
-        # instead of mixing arithmetic and geometric rate conventions.
-        periodic = clean.iloc[0].to_numpy(dtype=float)[deterministic]
-        sample_mean[deterministic] = np.expm1(
-            np.log1p(periodic) * annualization
-        )
+    # Cash and risky assets must use the same arithmetic annualization. The
+    # effective annual risk-free input is converted separately before Sharpe.
     sample_covariance = clean.cov().to_numpy(dtype=float) * annualization
     sample_covariance = (sample_covariance + sample_covariance.T) * 0.5
 
@@ -381,9 +377,10 @@ def estimate_black_litterman_inputs(
 ) -> PortfolioEstimates:
     """Return Black-Litterman total returns from absolute total-return views.
 
-    Reverse optimization produces excess equilibrium returns. ``risk_free_rate``
-    is added to that prior before combining it with the absolute annual return
-    views, so downstream Sharpe calculations subtract the risk-free rate once.
+    Reverse optimization produces annualized arithmetic excess returns.
+    ``risk_free_rate`` is an effective annual rate, converted to annualized
+    arithmetic units before addition to the prior. Views are absolute annualized
+    arithmetic simple returns, and Sharpe subtracts the converted rate once.
     """
     estimates = estimate_portfolio_inputs(
         returns,
@@ -408,7 +405,8 @@ def estimate_black_litterman_inputs(
 
     covariance = estimates.covariance
     equilibrium_excess = delta * covariance @ weights
-    equilibrium = risk_free + equilibrium_excess
+    arithmetic_risk_free = annual_effective_to_arithmetic(risk_free, estimates.trading_days)
+    equilibrium = arithmetic_risk_free + equilibrium_excess
     supplied_views = dict(views or {})
     unknown = [symbol for symbol in supplied_views if symbol not in symbols]
     if unknown:
@@ -465,6 +463,8 @@ def estimate_black_litterman_inputs(
         "risk_aversion": delta,
         "tau": uncertainty_scale,
         "risk_free_rate": risk_free,
+        "annualized_arithmetic_risk_free_rate": arithmetic_risk_free,
+        "return_convention": "annualized_arithmetic_simple_return",
         "market_weights": {
             symbol: float(value)
             for symbol, value in zip(symbols, weights, strict=False)

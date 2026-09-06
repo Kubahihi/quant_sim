@@ -17,13 +17,13 @@ def test_annualized_return_compounds_simple_returns_in_log_space():
     assert calculate_annualized_return(returns) == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("bad_return", [np.nan, np.inf, -1.0, -1.1])
+@pytest.mark.parametrize("bad_return", [np.nan, np.inf, -1.01, -1.1])
 def test_return_aggregation_rejects_invalid_simple_returns(bad_return):
     returns = pd.Series([0.01, bad_return])
 
-    with pytest.raises(ValueError, match="finite and greater"):
+    with pytest.raises(ValueError, match="finite and at least"):
         calculate_annualized_return(returns)
-    with pytest.raises(ValueError, match="finite and greater"):
+    with pytest.raises(ValueError, match="finite and at least"):
         calculate_cumulative_returns(returns)
 
 

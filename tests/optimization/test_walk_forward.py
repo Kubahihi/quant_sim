@@ -141,8 +141,8 @@ def test_walk_forward_rejects_invalid_configuration():
             risk_free_rate=np.nan,
         )
     invalid_returns = returns.copy()
-    invalid_returns.iloc[0, 0] = -1.0
-    with pytest.raises(ValueError, match="greater than -1"):
+    invalid_returns.iloc[0, 0] = -1.01
+    with pytest.raises(ValueError, match="at least -1"):
         run_optimization_walk_forward(invalid_returns, train_periods=40)
 
 

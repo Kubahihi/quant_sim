@@ -207,7 +207,7 @@ def test_walk_forward_baseline_is_causal_and_reports_complete_metrics():
     [
         pd.Series([0.01, np.nan]),
         pd.Series([0.01, np.inf]),
-        pd.Series([0.01, -1.0]),
+        pd.Series([0.01, -1.01]),
         pd.Series([0.01, 0.02], index=[1, 1]),
         pd.Series([0.01, 0.02], index=[2, 1]),
     ],

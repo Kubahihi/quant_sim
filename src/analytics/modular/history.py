@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .results import RunRecord
+from src.utils.redaction import redact_sensitive_data, sanitize_run_config
 
 # Project root
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -51,8 +52,29 @@ def ensure_history_dir(base_dir: str | Path | None = None, user_id: int | None =
     return path
 
 
-def save_run_record(record: RunRecord, base_dir: str | Path = "data/run_history", user_id: int | None = None) -> Path | str:
-    content = json.dumps(record.to_dict(), indent=2, default=_json_default)
+def _decode_record(content: str) -> Dict[str, Any]:
+    payload = json.loads(content)
+    if not isinstance(payload, dict):
+        raise ValueError("History record must be an object.")
+    payload = redact_sensitive_data(payload)
+    if isinstance(payload.get("config"), dict):
+        payload["config"] = sanitize_run_config(payload["config"])
+    return payload
+
+
+def save_run_record(record: RunRecord, base_dir: str | Path | None = None, user_id: int | None = None, *, team_connection_factory=None) -> Path | str:
+    content = json.dumps(redact_sensitive_data(record.to_dict()), indent=2, default=_json_default)
+    if team_connection_factory is not None:
+        if user_id is not None:
+            raise ValueError("Team history and personal user_id are mutually exclusive.")
+        with team_connection_factory() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS team_quant_run_history (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, content_json TEXT NOT NULL)")
+            conn.execute("INSERT INTO team_quant_run_history (run_id, created_at, content_json) VALUES (?, ?, ?)",
+                         (record.run_id, record.timestamp, content))
+            conn.commit()
+            if hasattr(conn, "sync"):
+                conn.sync()
+        return f"db://wharton_team/run_history/{record.run_id}"
     if user_id is not None:
         from src.auth.database import save_user_data
         file_name = f"{record.run_id}.json"
@@ -65,22 +87,45 @@ def save_run_record(record: RunRecord, base_dir: str | Path = "data/run_history"
         return target
 
 
-def load_run_record(run_id: str, base_dir: str | Path = "data/run_history", user_id: int | None = None) -> Dict[str, Any]:
+def load_run_record(run_id: str, base_dir: str | Path | None = None, user_id: int | None = None, *, team_connection_factory=None) -> Dict[str, Any]:
+    if team_connection_factory is not None:
+        if user_id is not None:
+            raise ValueError("Team history and personal user_id are mutually exclusive.")
+        with team_connection_factory() as conn:
+            exists = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='team_quant_run_history'").fetchone()
+            row = conn.execute("SELECT content_json FROM team_quant_run_history WHERE run_id=?", (run_id,)).fetchone() if exists else None
+        if row is None:
+            raise FileNotFoundError(f"Run id not found in team DB: {run_id}")
+        return _decode_record(row[0])
     if user_id is not None:
         from src.auth.database import load_user_data
         content = load_user_data(user_id, "run_history", f"{run_id}.json")
         if content:
-            return json.loads(content)
+            return _decode_record(content)
         raise FileNotFoundError(f"Run id not found in DB: {run_id}")
     else:
-        path = ensure_history_dir(base_dir) / f"{run_id}.json"
+        path = (Path(base_dir) if base_dir is not None else LEGACY_HISTORY_DIR) / f"{run_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"Run id not found: {run_id}")
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _decode_record(path.read_text(encoding="utf-8"))
 
 
-def list_run_records(base_dir: str | Path = "data/run_history", limit: int = 50, user_id: int | None = None) -> List[Dict[str, Any]]:
+def list_run_records(base_dir: str | Path | None = None, limit: int = 50, user_id: int | None = None, *, team_connection_factory=None) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    if team_connection_factory is not None:
+        if user_id is not None:
+            raise ValueError("Team history and personal user_id are mutually exclusive.")
+        with team_connection_factory() as conn:
+            exists = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='team_quant_run_history'").fetchone()
+            if not exists:
+                return []
+            records = conn.execute("SELECT content_json FROM team_quant_run_history ORDER BY created_at DESC, run_id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+        for record in records:
+            try:
+                rows.append(_decode_record(record[0]))
+            except (TypeError, ValueError):
+                continue
+        return rows
     
     if user_id is not None:
         from src.auth.database import list_user_data, load_user_data
@@ -89,22 +134,18 @@ def list_run_records(base_dir: str | Path = "data/run_history", limit: int = 50,
             content = load_user_data(user_id, "run_history", fname)
             if content:
                 try:
-                    rows.append(json.loads(content))
+                    rows.append(_decode_record(content))
                 except Exception:
                     continue
-            if len(rows) >= max(1, int(limit)):
-                break
-        return rows
+        return sorted(rows, key=lambda row: (str(row.get("timestamp", "")), str(row.get("run_id", ""))), reverse=True)[:max(1, int(limit))]
 
-    history_dir = ensure_history_dir(base_dir)
+    history_dir = Path(base_dir) if base_dir is not None else LEGACY_HISTORY_DIR
     for file in sorted(history_dir.glob("*.json"), reverse=True):
         try:
-            rows.append(json.loads(file.read_text(encoding="utf-8")))
+            rows.append(_decode_record(file.read_text(encoding="utf-8")))
         except Exception:
             continue
-        if len(rows) >= max(1, int(limit)):
-            break
-    return rows
+    return sorted(rows, key=lambda row: (str(row.get("timestamp", "")), str(row.get("run_id", ""))), reverse=True)[:max(1, int(limit))]
 
 
 def compare_runs(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:

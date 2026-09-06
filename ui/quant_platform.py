@@ -497,7 +497,11 @@ def _align_prices_and_weights(
     if not available_tickers:
         raise ValueError("No valid market data was fetched for the selected tickers.")
 
-    aligned_prices = prices[available_tickers].dropna(how="all")
+    from src.data.price_alignment import align_daily_prices
+    aligned_prices = align_daily_prices(prices[available_tickers])
+    filled_count = aligned_prices.attrs.get("forward_filled_observations", 0)
+    if filled_count:
+        warnings.append(f"Forward-filled {filled_count} prices across short market-calendar gaps (maximum 3 sessions / 7 days).")
     if aligned_prices.empty:
         raise ValueError("Fetched data is empty after alignment.")
 
@@ -1173,6 +1177,7 @@ def _compute_analysis(
     portfolio_timeseries = build_portfolio_timeseries(portfolio_returns, initial_value=100.0)
 
     quant_stack = run_quant_stack(
+        user_id=user_id,
         portfolio_returns=portfolio_returns,
         returns_df=returns,
         config={

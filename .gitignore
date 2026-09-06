@@ -39,6 +39,7 @@ data/cache/
 data/*.db
 data/*.db-journal
 data/*.db-wal
+data/*.db-shm
 data/raw/
 data/processed/
 data/exports/

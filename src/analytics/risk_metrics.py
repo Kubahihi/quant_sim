@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Optional
+from .tail_risk import empirical_expected_shortfall
 
 
 def _periodic_risk_free_rate(risk_free_rate: float, periods_per_year: int) -> float:
@@ -101,8 +102,7 @@ def calculate_cvar(
     confidence_level: float = 0.95,
 ) -> float:
     """Calculate Conditional Value at Risk (Expected Shortfall)"""
-    var = calculate_var(returns, confidence_level)
-    return float(-returns[returns <= -var].mean())
+    return empirical_expected_shortfall(-np.asarray(returns, dtype=float), confidence_level)
 
 
 def calculate_parametric_var(

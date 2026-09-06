@@ -64,7 +64,8 @@ class TestBasicCorrectness:
         vol = result["volatility"]
         ret = result["expected_return"]
         if vol > 0:
-            expected_sharpe = (ret - 0.03) / vol
+            arithmetic_risk_free = 252 * np.expm1(np.log1p(0.03) / 252)
+            expected_sharpe = (ret - arithmetic_risk_free) / vol
             assert np.isclose(result["sharpe_ratio"], expected_sharpe, atol=1e-8)
         else:
             assert result["sharpe_ratio"] == 0.0

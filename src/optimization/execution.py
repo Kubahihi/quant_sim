@@ -6,6 +6,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from .constraint_sets import build_constraint_set, build_constraint_report
 
 
 def _aligned_values(
@@ -73,6 +74,10 @@ def estimate_trade_costs(
         raise ValueError("average_daily_dollar_volume values must be positive.")
 
     absolute_weights = np.abs(trades)
+    missing_impact = (absolute_weights > 1e-12) & (impact_bps > 0) & (~np.isfinite(adv) | (adv <= 0))
+    if np.any(missing_impact):
+        missing_symbols = [names[index] for index in np.flatnonzero(missing_impact)]
+        raise ValueError("Market impact cannot be estimated without positive ADV for traded symbols: " + ", ".join(missing_symbols))
     notionals = absolute_weights * capital
     participation = np.divide(
         notionals,
@@ -106,10 +111,10 @@ def estimate_trade_costs(
         "total_drag": float(total_by_asset.sum()),
         "unmodeled_impact_symbols": [
             symbol
-            for symbol, rate, is_modeled in zip(
-                names, impact_bps, modeled, strict=False
+            for symbol, rate, is_modeled, weight in zip(
+                names, impact_bps, modeled, absolute_weights, strict=False
             )
-            if rate > 0 and not is_modeled
+            if weight > 1e-12 and rate > 0 and not is_modeled
         ],
     }
 
@@ -244,6 +249,12 @@ def build_execution_plan(
     short_term_tax_rate: float = 0.0,
     long_term_tax_rate: float = 0.0,
     as_of: Optional[date] = None,
+    strategy: Optional[Mapping[str, Any]] = None,
+    asset_metadata: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    max_weight: Optional[float] = None,
+    turnover_limit: Optional[float] = None,
+    target_volatility: Optional[float] = None,
+    annualized_covariance: Optional[np.ndarray] = None,
 ) -> dict[str, Any]:
     """Translate continuous weights into a cash- and liquidity-feasible trade list."""
     names = [str(symbol).strip() for symbol in symbols]
@@ -294,8 +305,9 @@ def build_execution_plan(
         if total_weight <= 0:
             current = np.zeros(len(names), dtype=float)
         else:
-            normalized = weights / total_weight
-            current = np.floor((normalized * capital / price) / lots) * lots
+            if total_weight > 1.0 + 1e-6:
+                raise ValueError("current_weights cannot exceed one including residual cash.")
+            current = np.floor((weights * capital / price) / lots) * lots
             warnings.append(
                 "Current shares were inferred from weights and rounded down to lot sizes."
             )
@@ -307,6 +319,11 @@ def build_execution_plan(
         raise ValueError("current shares exceed portfolio_value at supplied prices.")
     cash = capital - current_market_value
 
+    rules_for_holdings = dict(strategy or {})
+    maximum_candidates = [int(value) for value in (maximum_holdings, rules_for_holdings.get("max_holdings")) if value is not None]
+    minimum_candidates = [int(value) for value in (minimum_holdings, rules_for_holdings.get("min_holdings")) if value is not None]
+    maximum_holdings = min(maximum_candidates) if maximum_candidates else None
+    minimum_holdings = max(minimum_candidates) if minimum_candidates else None
     positive_indices = [index for index, weight in enumerate(target) if weight > 1e-10]
     max_count = len(positive_indices) if maximum_holdings is None else int(maximum_holdings)
     if max_count < 1:
@@ -337,15 +354,17 @@ def build_execution_plan(
 
     desired = np.floor((executable_target * capital / price) / lots) * lots
     adv = _optional_aligned_mapping(average_daily_dollar_volume, names)
+    liquidity_violations: list[str] = []
 
     def liquidity_cap(index: int, requested_shares: float) -> float:
         if maximum_adv_participation is None:
             return requested_shares
         if not np.isfinite(adv[index]) or adv[index] <= 0:
-            warnings.append(
-                f"{names[index]} has no ADV estimate; its liquidity cap was not applied."
-            )
-            return requested_shares
+            if abs(requested_shares) > 1e-12:
+                violation = f"{names[index]} has no ADV estimate; the requested liquidity limit cannot be verified."
+                warnings.append(violation)
+                liquidity_violations.append(violation)
+            return 0.0
         maximum_shares = math.floor(
             (adv[index] * maximum_adv_participation / price[index]) / lots[index]
         ) * lots[index]
@@ -455,6 +474,8 @@ def build_execution_plan(
             else:
                 upper = midpoint - 1
         requested = affordable_lots * lots[index]
+        if requested * price[index] < minimum_notional - 1e-9:
+            continue
         if requested > 1e-12:
             costs = trade_cost(index, requested)
             planned[index] += requested
@@ -484,12 +505,50 @@ def build_execution_plan(
     total_execution_cost = float(sum(row["total_execution_cost"] for row in trades))
     total_tax = float(sum(row["estimated_tax"] for row in trades))
     total_realized_gain = float(sum(row["realized_gain"] for row in trades))
+    mandate_report: list[dict[str, Any]] = []
+    mandate_errors: list[str] = []
+    if strategy is not None or max_weight is not None or turnover_limit is not None:
+        # An explicit residual cash asset keeps sector/beta/cash checks on the
+        # actual post-cost NAV, without renormalizing away uninvested money.
+        residual_symbol = "__EXECUTION_RESIDUAL_CASH__"
+        metadata = {**dict(asset_metadata or {}), residual_symbol: {"is_cash": True, "asset_type": "cash", "beta": 0.0}}
+        rules = dict(strategy or {})
+        effective_turnover = min([float(v) for v in (turnover_limit, rules.pop("max_turnover", None)) if v is not None], default=None)
+        try:
+            spec = build_constraint_set([*names, residual_symbol], strategy=rules,
+                                        asset_metadata=metadata, max_weight=max_weight)
+            mandate_report = build_constraint_report(np.append(final_weights, cash_weight), spec, binding_tolerance=2e-5)
+            if effective_turnover is not None:
+                actual_turnover = sum(row["notional"] for row in trades) / capital
+                mandate_report.append({"name": "turnover", "actual": actual_turnover,
+                    "maximum": effective_turnover, "minimum": None,
+                    "passed": actual_turnover <= effective_turnover + 2e-5})
+            mandate_errors = [f"Execution violates {row['name']}." for row in mandate_report if not row["passed"]]
+        except ValueError as exc:
+            mandate_errors = [str(exc)]
+    if target_volatility is not None:
+        limit = float(target_volatility)
+        covariance = np.asarray(annualized_covariance, dtype=float)
+        if not np.isfinite(limit) or limit <= 0:
+            mandate_errors.append("Target volatility must be finite and positive.")
+        elif covariance.shape != (len(names), len(names)) or not np.isfinite(covariance).all():
+            mandate_errors.append("Target volatility requires aligned, finite annualized covariance.")
+        elif not np.allclose(covariance, covariance.T) or np.linalg.eigvalsh(covariance).min() < -1e-10:
+            mandate_errors.append("Annualized covariance must be symmetric and positive semidefinite.")
+        else:
+            actual_volatility = float(np.sqrt(max(float(final_weights @ covariance @ final_weights), 0.0)))
+            passed = actual_volatility <= limit + 2e-5
+            mandate_report.append({"name": "portfolio_volatility", "actual": actual_volatility,
+                                   "maximum": limit, "minimum": None, "passed": passed})
+            if not passed:
+                mandate_errors.append("Execution violates target volatility.")
+    violations = list(dict.fromkeys(holding_constraint_violations + liquidity_violations + mandate_errors))
     return {
-        "success": not holding_constraint_violations,
+        "success": not violations,
         "message": (
             "ok"
-            if not holding_constraint_violations
-            else " ".join(holding_constraint_violations)
+            if not violations
+            else " ".join(violations)
         ),
         "symbols": names,
         "continuous_target_weights": target,
@@ -500,6 +559,9 @@ def build_execution_plan(
         "cash_weight": float(cash_weight),
         "holding_count": holding_count,
         "holding_constraints_satisfied": not holding_constraint_violations,
+        "mandate_constraints_satisfied": not mandate_errors,
+        "liquidity_constraints_satisfied": not liquidity_violations,
+        "constraint_report": mandate_report,
         "trades": trades,
         "turnover": float(sum(row["notional"] for row in trades) / capital),
         "total_execution_cost": total_execution_cost,

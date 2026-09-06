@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 from loguru import logger
+from src.analytics.tail_risk import empirical_expected_shortfall
 
 
 TRADING_DAYS = 252.0
@@ -53,8 +54,9 @@ def _terminal_path_statistics(
         percentile_95,
     ) = np.percentile(final_values, (5, 25, 50, 75, 95))
     percentile_5 = float(percentile_5)
-    tail_5 = final_values[final_values <= percentile_5]
-    expected_shortfall_value_95 = float(np.mean(tail_5)) if tail_5.size else percentile_5
+    tail_count = max(1, int(np.ceil(final_values.size * 0.05)))
+    tail_5 = np.partition(final_values, tail_count - 1)[:tail_count]
+    expected_shortfall_value_95 = -empirical_expected_shortfall(-final_values)
     expected_shortfall_standard_error = (
         float(np.std(tail_5, ddof=1) / np.sqrt(tail_5.size))
         if tail_5.size > 1

@@ -365,6 +365,27 @@ def _configure_temp_wharton(monkeypatch, tmp_path: Path, password: str = "new-te
     return db_path
 
 
+@pytest.mark.parametrize("change", ["password", "role", "delete", "expiry"])
+def test_active_team_session_is_revalidated(monkeypatch, tmp_path, change):
+    db_path = _configure_temp_wharton(monkeypatch, tmp_path)
+    wharton_dash.init_db()
+    profile = wharton_dash.authenticate_user("Jakub", "new-team-pass")
+    assert profile is not None
+    monkeypatch.setattr(wharton_dash.st, "session_state", {wharton_dash.USER_PROFILE_KEY: profile})
+    assert wharton_dash._get_current_profile() is not None
+    with sqlite3.connect(db_path) as connection:
+        if change == "password":
+            connection.execute("UPDATE wharton_users SET password_hash = ? WHERE username = ?", ("changed-hash", "Jakub"))
+        elif change == "role":
+            connection.execute("UPDATE wharton_users SET role = ? WHERE username = ?", ("reader", "Jakub"))
+        elif change == "delete":
+            connection.execute("DELETE FROM wharton_users WHERE username = ?", ("Jakub",))
+        else:
+            profile["_session_issued_at"] -= 9 * 60 * 60
+    assert wharton_dash._get_current_profile() is None
+    assert wharton_dash.USER_PROFILE_KEY not in wharton_dash.st.session_state
+
+
 def test_init_db_materializes_executemany_parameters_for_libsql(monkeypatch, tmp_path):
     db_path = _configure_temp_wharton(monkeypatch, tmp_path)
 

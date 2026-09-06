@@ -43,8 +43,8 @@ def _validated_simple_returns(portfolio_returns: pd.Series) -> pd.Series:
     values = returns.to_numpy(dtype=float, copy=False)
     if not bool(np.isfinite(values).all()):
         raise ValueError("portfolio_returns must contain only finite simple returns.")
-    if bool((values <= -1.0).any()):
-        raise ValueError("Simple returns must be greater than -100%.")
+    if bool((values < -1.0).any()):
+        raise ValueError("Simple returns must be at least -100%.")
     return returns
 
 

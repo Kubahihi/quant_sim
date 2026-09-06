@@ -5,6 +5,7 @@ from typing import Any, Optional
 from loguru import logger
 import numpy as np
 import pandas as pd
+from src.utils.rates import annual_effective_to_arithmetic
 from scipy.optimize import minimize
 
 from .constraints import build_weight_bounds, validate_weight_solution
@@ -104,7 +105,7 @@ def optimize_minimum_variance(
     )
     sample_volatility = float(np.sqrt(max(sample_variance, 0.0)))
     sharpe_ratio = (
-        (expected_return - float(risk_free_rate)) / volatility
+        (expected_return - annual_effective_to_arithmetic(risk_free_rate, estimates.trading_days)) / volatility
         if sample_volatility > _VOLATILITY_EPS and volatility > _VOLATILITY_EPS
         else 0.0
     )

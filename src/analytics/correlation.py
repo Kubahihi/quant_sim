@@ -23,8 +23,15 @@ def calculate_beta(
     market_returns: pd.Series,
 ) -> float:
     """Calculate beta vs market"""
-    covariance = asset_returns.cov(market_returns)
-    market_variance = market_returns.var()
+    aligned = pd.concat(
+        [asset_returns.rename("asset"), market_returns.rename("market")], axis=1
+    ).dropna(how="any")
+    if len(aligned) < 2:
+        return 0.0
+    if not np.isfinite(aligned.to_numpy(dtype=float)).all():
+        raise ValueError("Return series must contain only finite values.")
+    covariance = aligned["asset"].cov(aligned["market"])
+    market_variance = aligned["market"].var()
     
     if market_variance == 0:
         return 0.0

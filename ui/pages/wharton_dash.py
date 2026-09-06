@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
 from html import escape
 from io import BytesIO
@@ -949,6 +949,7 @@ def _fetch_users() -> list[sqlite3.Row]:
 
 
 def authenticate_user(username: str, password: str) -> dict[str, str | int] | None:
+    from src.auth.wharton_sessions import issue_session
     with get_connection() as conn:
         user = conn.execute(
             "SELECT id, username, password_hash, role, primary_module FROM wharton_users WHERE username = ?",
@@ -961,12 +962,12 @@ def authenticate_user(username: str, password: str) -> dict[str, str | int] | No
         return None
     if not bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
         return None
-    return {
+    return issue_session({
         "id": int(user["id"]),
         "username": str(user["username"]),
         "role": str(user["role"]),
         "primary_module": str(user["primary_module"]),
-    }
+    }, stored_hash)
 
 
 def _configured_judge_password() -> str | None:
@@ -1015,11 +1016,26 @@ def _judge_session_is_current(profile: Mapping[str, Any]) -> bool:
 
 
 def _get_current_profile() -> dict[str, str | int] | None:
+    from src.auth.wharton_sessions import session_is_current
     profile = st.session_state.get(USER_PROFILE_KEY)
     if isinstance(profile, dict) and profile.get("username"):
+        try:
+            with get_connection() as conn:
+                user = conn.execute(
+                    "SELECT id, username, password_hash, role, primary_module FROM wharton_users WHERE username = ?",
+                    (profile["username"],),
+                ).fetchone()
+            current = {key: user[key] for key in ("id", "username", "role", "primary_module")} if user else {}
+            valid = user is not None and session_is_current(profile, current, str(user["password_hash"] or ""))
+        except Exception:
+            valid = False
+        if not valid:
+            st.session_state.pop(USER_PROFILE_KEY, None)
+            return None
         if _is_judge_profile(profile) and not _judge_session_is_current(profile):
             st.session_state.pop(USER_PROFILE_KEY, None)
             return None
+        profile["_session_last_seen"] = datetime.now(timezone.utc).timestamp()
         return profile
     return None
 
@@ -2193,7 +2209,7 @@ def _load_modular_history():
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date) -> pd.DataFrame:
+def _fetch_close_prices_cached(symbols: tuple, start_date: date, end_date: date, session_schema: int = 2) -> pd.DataFrame:
     modules = _load_quant_modules()
     fetcher = modules["yahoo_fetcher"].YahooFetcher()
     return fetcher.fetch_close_prices(list(symbols), start_date, end_date)
@@ -2204,6 +2220,7 @@ def _fetch_market_data_cached(
     symbols: tuple,
     start_date: date,
     end_date: date,
+    session_schema: int = 2,
 ) -> dict[str, Any]:
     modules = _load_quant_modules()
     fetcher = modules["yahoo_fetcher"].YahooFetcher()
@@ -2349,9 +2366,10 @@ def _compute_quant_run(
     all_prices = pd.DataFrame(market_data.get("prices", pd.DataFrame()))
     if all_prices.empty: raise ValueError("No price data returned.")
     all_prices = all_prices.sort_index().dropna(how="all")
-    prices = all_prices[
+    from src.data.price_alignment import align_daily_prices
+    prices = align_daily_prices(all_prices[
         [symbol for symbol in current_data_symbols if symbol in all_prices.columns]
-    ].ffill()
+    ])
     available_data = [str(c) for c in prices.columns if prices[c].notna().sum() > 2]
     prices = prices[available_data].dropna(how="any")
     if prices.empty: raise ValueError("Not enough aligned data.")
@@ -2365,7 +2383,7 @@ def _compute_quant_run(
     adv_history = pd.DataFrame(market_data.get("adv_history", pd.DataFrame()))
     mark_runtime_phase("market_data")
 
-    data_returns = prices.pct_change().dropna(how="any")
+    data_returns = prices.pct_change(fill_method=None).dropna(how="any")
     available_market = [ticker for ticker in tickers if ticker in data_returns.columns]
     return_parts = [data_returns[available_market]] if available_market else []
     if manual_bonds:
@@ -2394,7 +2412,8 @@ def _compute_quant_run(
         else:
             bp = _fetch_close_prices_cached((benchmark_symbol,), start_date, end_date)
             if benchmark_symbol in bp.columns:
-                benchmark_returns = bp[benchmark_symbol].sort_index().pct_change().dropna()
+                benchmark_prices = align_daily_prices(bp[[benchmark_symbol]])
+                benchmark_returns = benchmark_prices[benchmark_symbol].pct_change(fill_method=None).dropna()
 
     benchmark_metrics = analytics.calculate_active_risk_metrics(
         portfolio_returns=portfolio_returns,
@@ -2495,6 +2514,12 @@ def _compute_quant_run(
         execution_model_enabled and not missing_liquidity_symbols
     )
     try:
+        if execution_model_enabled and missing_liquidity_symbols:
+            raise ValueError(
+                "Liquidity-aware optimization is blocked: missing ADV for "
+                + ", ".join(missing_liquidity_symbols)
+                + ". Supply liquidity data or explicitly disable the execution model for exploratory analysis."
+            )
         portfolio_estimates = None
         if str(optimization_expected_return_model) == "black_litterman":
             supplied_views = dict(black_litterman_views or {})
@@ -2563,7 +2588,7 @@ def _compute_quant_run(
     if execution_model_enabled and missing_liquidity_symbols:
         mandate_aware["warnings"] = [
             *list(mandate_aware.get("warnings", [])),
-            "Liquidity-aware optimization was not applied because 30-day dollar-volume "
+            "Liquidity-aware optimization was blocked because 30-day dollar-volume "
             "data is unavailable for: " + ", ".join(missing_liquidity_symbols) + ".",
         ]
 
@@ -2635,6 +2660,18 @@ def _compute_quant_run(
                     short_term_tax_rate=float(short_term_tax_rate),
                     long_term_tax_rate=float(long_term_tax_rate),
                     as_of=end_date,
+                    strategy=active_strategy or None,
+                    asset_metadata=engine_metadata,
+                    max_weight=engine_effective_max_weight,
+                    turnover_limit=turnover_limit,
+                    target_volatility=(
+                        float(optimization_target_volatility)
+                        if str(optimization_objective) == "target_volatility" else None
+                    ),
+                    annualized_covariance=(
+                        (portfolio_estimates or optimization.estimate_portfolio_inputs(engine_returns)).covariance
+                        if str(optimization_objective) == "target_volatility" else None
+                    ),
                 )
             except Exception as execution_error:
                 execution_plan = {
@@ -2703,6 +2740,11 @@ def _compute_quant_run(
     validation_liquidity_ready = bool(
         execution_model_enabled and validation_adv_history is not None
     )
+    if execution_model_enabled and not validation_liquidity_ready and optimization_validation is None:
+        optimization_validation = {
+            "success": False,
+            "error": "Liquidity-aware validation is blocked: point-in-time ADV is missing. Supply liquidity history or explicitly disable the execution model for exploratory analysis.",
+        }
     if optimization_validation is None and len(validation_returns) > 146:
         validation_train_periods = min(756, max(126, len(validation_returns) // 2))
         if len(validation_returns) > validation_train_periods:
@@ -3457,7 +3499,7 @@ def _run_quant_research_stack(result: dict[str, Any]) -> dict[str, Any]:
             portfolio_returns=portfolio_returns,
             returns_df=returns,
             config=config,
-            user_id=st.session_state.get("user_id"),
+            team_connection_factory=get_connection,
         )
     except Exception as stack_error:
         quant_stack = {"_error": str(stack_error)}
@@ -4146,19 +4188,19 @@ def _render_run_history(result: dict) -> None:
     st.markdown("### Run History")
     try:
         history_mod = _load_modular_history()
-        records = history_mod.list_run_records(base_dir="data/run_history", limit=40, user_id=st.session_state.get("user_id"))
+        records = history_mod.list_run_records(limit=40, team_connection_factory=get_connection)
     except Exception as e:
         st.warning(f"Could not load run history: {e}")
         return
 
     if not records:
-        st.info("No previous runs found in data/run_history/.")
+        st.info("No previous runs found in the durable Wharton team history.")
         return
 
     st.caption(f"{len(records)} historical run(s) found.")
     rows = []
     for rec in records:
-        r_dict = rec.to_dict() if hasattr(rec, "to_dict") else {}
+        r_dict = rec if isinstance(rec, dict) else rec.to_dict() if hasattr(rec, "to_dict") else {}
         m = r_dict.get("metrics", {})
         rows.append({
             "Run ID": str(r_dict.get("run_id", ""))[-16:],
@@ -9713,7 +9755,8 @@ def _render_commodity_analysis(profile: dict[str, str | int]) -> None:
                 ]
                 if not available:
                     raise ValueError("No usable commodity price history was returned.")
-                prices = fetched[available].sort_index().ffill().dropna(how="all")
+                from src.data.price_alignment import align_daily_prices
+                prices = align_daily_prices(fetched[available])
                 metrics = calculate_commodity_metrics(
                     prices,
                     annual_risk_free_rate=float(commodity_risk_free) / 100.0,
@@ -12816,18 +12859,21 @@ def _judge_json_value(value: Any, default: Any) -> Any:
 
 
 def _load_shared_quant_run_records() -> list[dict[str, Any]]:
-    """Read legacy shared Quant history without creating or changing files."""
+    """Read durable team history plus redacted, read-only legacy snapshots."""
+    from src.utils.redaction import redact_sensitive_data
+    durable = _load_modular_history().list_run_records(limit=200, team_connection_factory=get_connection)
     history_dir = Path(PROJECT_ROOT) / "data" / "run_history"
     if not history_dir.is_dir():
-        return []
-    records: list[dict[str, Any]] = []
+        return durable
+    records: list[dict[str, Any]] = list(durable)
+    known_ids = {record.get("run_id") for record in records}
     for path in sorted(history_dir.glob("*.json"), reverse=True):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(payload, Mapping):
-            records.append(dict(payload))
+        if isinstance(payload, Mapping) and payload.get("run_id") not in known_ids:
+            records.append(redact_sensitive_data(dict(payload)))
     return records
 
 

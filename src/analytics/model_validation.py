@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
+from .tail_risk import empirical_expected_shortfall
 
 
 TRADING_DAYS = 252
@@ -25,8 +26,8 @@ def _periodic_risk_free_rate(risk_free_rate: float) -> float:
 
 def _clean_returns(returns: pd.Series) -> pd.Series:
     clean = pd.Series(returns).replace([np.inf, -np.inf], np.nan).dropna().astype(float)
-    if bool((clean <= -1.0).any()):
-        raise ValueError("Simple returns must be greater than -100%.")
+    if bool((clean < -1.0).any()):
+        raise ValueError("Simple returns must be at least -100%.")
     return clean
 
 
@@ -34,7 +35,8 @@ def _point_metrics(values: np.ndarray, risk_free_rate: float) -> Dict[str, float
     n = int(values.size)
     if n == 0:
         return {name: 0.0 for name in ("annualized_return", "volatility", "sharpe_ratio", "var_95", "cvar_95")}
-    log_growth = float(np.log1p(values).sum())
+    with np.errstate(divide="ignore"):
+        log_growth = float(np.log1p(values).sum())
     annualized_return = float(np.expm1(log_growth * TRADING_DAYS / n))
     volatility = float(np.std(values, ddof=1) * np.sqrt(TRADING_DAYS)) if n > 1 else 0.0
     daily_rf = _periodic_risk_free_rate(risk_free_rate)
@@ -42,13 +44,12 @@ def _point_metrics(values: np.ndarray, risk_free_rate: float) -> Dict[str, float
     excess_std = float(np.std(excess, ddof=1)) if n > 1 else 0.0
     sharpe = float(np.mean(excess) / excess_std * np.sqrt(TRADING_DAYS)) if excess_std > 0 else 0.0
     cutoff = float(np.percentile(values, 5))
-    tail = values[values <= cutoff]
     return {
         "annualized_return": annualized_return,
         "volatility": volatility,
         "sharpe_ratio": sharpe,
         "var_95": float(-cutoff),
-        "cvar_95": float(-np.mean(tail)) if tail.size else float(-cutoff),
+        "cvar_95": empirical_expected_shortfall(-values),
     }
 
 
@@ -78,7 +79,8 @@ def moving_block_bootstrap_intervals(
     indices = (starts[:, :, None] + offsets[None, None, :]).reshape(n_bootstrap, -1)[:, :n]
     samples = values[indices]
 
-    log_growth = np.log1p(samples).sum(axis=1)
+    with np.errstate(divide="ignore"):
+        log_growth = np.log1p(samples).sum(axis=1)
     annualized_return = np.expm1(log_growth * TRADING_DAYS / n)
     volatility = np.std(samples, axis=1, ddof=1) * np.sqrt(TRADING_DAYS)
     excess = samples - daily_rf
@@ -90,10 +92,7 @@ def moving_block_bootstrap_intervals(
         where=excess_std > 0,
     )
     cutoffs = np.percentile(samples, 5, axis=1)
-    cvar = np.array(
-        [-float(np.mean(row[row <= cutoff])) for row, cutoff in zip(samples, cutoffs, strict=True)],
-        dtype=float,
-    )
+    cvar = empirical_expected_shortfall(-samples, axis=1)
     distributions = {
         "annualized_return": annualized_return,
         "volatility": volatility,

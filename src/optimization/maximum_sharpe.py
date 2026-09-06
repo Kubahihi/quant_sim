@@ -6,6 +6,7 @@ from loguru import logger
 import numpy as np
 import pandas as pd
 from scipy.optimize import linprog, minimize
+from src.utils.rates import annual_effective_to_arithmetic
 
 from .constraints import build_weight_bounds, validate_weight_solution
 from .estimators import (
@@ -86,6 +87,7 @@ def _optimization_result(
             "volatility": float("nan"),
             "sharpe_ratio": float("nan"),
             "success": False,
+            "status": "failed",
             "message": message,
             "estimation": estimates.metadata(),
         }
@@ -105,6 +107,7 @@ def _optimization_result(
         "volatility": volatility,
         "sharpe_ratio": float(sharpe_ratio),
         "success": True,
+        "status": "optimal",
         "message": message,
         "estimation": estimates.metadata(),
     }
@@ -129,7 +132,7 @@ def optimize_maximum_sharpe(
     n_assets = len(estimates.symbols)
     mean_returns = estimates.mean_returns
     covariance = estimates.covariance
-    risk_free = _risk_free_rate(risk_free_rate)
+    risk_free = annual_effective_to_arithmetic(_risk_free_rate(risk_free_rate), estimates.trading_days)
     bounds = build_weight_bounds(
         n_assets,
         allow_short=allow_short,
@@ -192,7 +195,7 @@ def optimize_maximum_sharpe(
             deterministic_candidate is not None
             and abs(deterministic_candidate[1] - risk_free) <= rate_tolerance
         ):
-            return _optimization_result(
+            fallback = _optimization_result(
                 estimates=estimates,
                 success=True,
                 message=(
@@ -202,6 +205,14 @@ def optimize_maximum_sharpe(
                 weights=deterministic_candidate[0],
                 risk_free_rate=risk_free,
             )
+            fallback.update({
+                "success": False,
+                "status": "fallback_feasible",
+                "fallback_weights": fallback["weights"].copy(),
+                "weights": np.array([], dtype=float),
+                "solver_message": str(result.message),
+            })
+            return fallback
         return _optimization_result(
             estimates=estimates,
             success=False,
