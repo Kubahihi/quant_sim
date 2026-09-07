@@ -87,7 +87,7 @@ def _spread(models: Dict[str, ModelResult], _: Dict[str, object]) -> SignalResul
 
 
 def _disagreement(models: Dict[str, ModelResult], _: Dict[str, object]) -> SignalResult:
-    bma = models.get("bayesian_model_averaging")
+    bma = models.get("confidence_weighted_forecast_ensemble")
     dis = float(bma.metrics.get("disagreement", 0.0)) if bma and bma.available else 0.0
     score = float(np.tanh(-dis * 4.0))
     return SignalResult(name="disagreement", family="meta", available=True, score=score, direction=_direction(score), confidence=float(max(0.0, min(1.0, 1.0 - dis))), metrics={"score": score, "model_disagreement": dis})

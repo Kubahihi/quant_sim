@@ -31,8 +31,8 @@ def _expected_return_view(models: Dict[str, ModelResult]) -> float:
         if not model.available:
             continue
         metrics = model.metrics
-        if "bma_expected_annual_return" in metrics:
-            candidates.append(float(metrics["bma_expected_annual_return"]))
+        if "ensemble_expected_annual_return" in metrics:
+            candidates.append(float(metrics["ensemble_expected_annual_return"]))
         elif "posterior_expected_annual_return" in metrics:
             candidates.append(float(metrics["posterior_expected_annual_return"]))
         elif "posterior_annual_return" in metrics:
