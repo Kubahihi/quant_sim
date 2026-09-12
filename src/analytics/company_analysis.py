@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import lru_cache
 from html import unescape
@@ -1326,68 +1327,88 @@ def fetch_geographic_revenue(
         }
 
 
-def fetch_company_data(ticker: str) -> dict[str, Any]:
-    """Fetch a broad company snapshot without letting one Yahoo endpoint block research."""
+def _fetch_company_fields(
+    symbol: str,
+    fields: tuple[tuple[str, str, str], ...],
+) -> tuple[dict[str, Any], list[str]]:
+    """Load related endpoints on a worker-owned Ticker, without Streamlit state."""
     import yfinance as yf
 
+    company = yf.Ticker(symbol)
+    values: dict[str, Any] = {}
+    errors: list[str] = []
+    for key, label, attribute in fields:
+        fallback: Any = (
+            {} if key == "info" else [] if key in {"news", "sec_filings"} else pd.DataFrame()
+        )
+        try:
+            value = (
+                company.history(period="5y", interval="1d", auto_adjust=False)
+                if key == "history" else getattr(company, attribute)
+            )
+        except Exception as exc:  # Yahoo regularly rate-limits individual endpoints.
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            value = fallback
+        values[key] = fallback if value is None else value
+
+    if "sec_filings" in values:
+        # Start the dependent filing extraction while other workers load Yahoo
+        # data. Annual filings themselves remain sequential.
+        values["geographic_revenue"] = fetch_geographic_revenue(
+            symbol, sec_filings=values["sec_filings"]
+        )
+    return values, errors
+
+
+def fetch_company_data(ticker: str) -> dict[str, Any]:
+    """Fetch a complete snapshot with at most four concurrent provider requests."""
     symbol = ticker.strip().upper()
     if not symbol:
         raise ValueError("Ticker is required.")
-    company = yf.Ticker(symbol)
+
+    # Keep related annual/quarterly statement caches on the same Ticker, but
+    # never access one mutable Ticker from multiple workers. All groups are
+    # independent; the bounded pool avoids flooding providers on a cold load.
+    groups = (
+        (("info", "company profile", "info"),),
+        (("history", "price history", "history"),),
+        (("news", "news", "news"),),
+        (("sec_filings", "filings", "sec_filings"),),
+        (
+            ("income_statement", "income statement", "income_stmt"),
+            ("quarterly_income_statement", "quarterly income statement", "quarterly_income_stmt"),
+        ),
+        (
+            ("balance_sheet", "balance sheet", "balance_sheet"),
+            ("quarterly_balance_sheet", "quarterly balance sheet", "quarterly_balance_sheet"),
+        ),
+        (
+            ("cash_flow", "cash flow", "cashflow"),
+            ("quarterly_cash_flow", "quarterly cash flow", "quarterly_cashflow"),
+        ),
+    )
+    payload: dict[str, Any] = {}
     provider_errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="company-data") as executor:
+        futures = [executor.submit(_fetch_company_fields, symbol, group) for group in groups]
+        # Merge in request order so diagnostics don't depend on response timing.
+        for future in futures:
+            values, errors = future.result()
+            payload.update(values)
+            provider_errors.extend(errors)
 
-    def safe_value(label: str, loader: Any, fallback: Any) -> Any:
-        try:
-            value = loader()
-        except Exception as exc:  # Yahoo regularly rate-limits individual endpoints.
-            provider_errors.append(f"{label}: {type(exc).__name__}: {exc}")
-            return fallback
-        return fallback if value is None else value
-
-    info = safe_value("company profile", lambda: company.info, {})
+    info = payload.pop("info")
     if not isinstance(info, dict):
         info = {}
-    history = safe_value(
-        "price history",
-        lambda: company.history(period="5y", interval="1d", auto_adjust=False),
-        pd.DataFrame(),
-    )
+    history = payload.pop("history")
     if not isinstance(history, pd.DataFrame):
         history = pd.DataFrame()
-    try:
-        news = company.news or []
-    except Exception as exc:
-        provider_errors.append(f"news: {type(exc).__name__}: {exc}")
-        news = []
-    try:
-        sec_filings = company.sec_filings or []
-    except Exception as exc:
-        provider_errors.append(f"filings: {type(exc).__name__}: {exc}")
-        sec_filings = []
+    news = payload.pop("news") or []
     officers = info.get("companyOfficers") if isinstance(info.get("companyOfficers"), list) else []
     scalar_metrics = {
         key: value
         for key, value in info.items()
         if isinstance(value, (str, int, float, bool)) or value is None
-    }
-    geographic_revenue = fetch_geographic_revenue(symbol, sec_filings=sec_filings)
-    statements = {
-        "income_statement": safe_value(
-            "income statement", lambda: company.income_stmt, pd.DataFrame()
-        ),
-        "balance_sheet": safe_value(
-            "balance sheet", lambda: company.balance_sheet, pd.DataFrame()
-        ),
-        "cash_flow": safe_value("cash flow", lambda: company.cashflow, pd.DataFrame()),
-        "quarterly_income_statement": safe_value(
-            "quarterly income statement", lambda: company.quarterly_income_stmt, pd.DataFrame()
-        ),
-        "quarterly_balance_sheet": safe_value(
-            "quarterly balance sheet", lambda: company.quarterly_balance_sheet, pd.DataFrame()
-        ),
-        "quarterly_cash_flow": safe_value(
-            "quarterly cash flow", lambda: company.quarterly_cashflow, pd.DataFrame()
-        ),
     }
     return {
         "ticker": symbol,
@@ -1400,7 +1421,5 @@ def fetch_company_data(ticker: str) -> dict[str, Any]:
         "officers": officers,
         "history": history,
         "news": news[:20],
-        "sec_filings": sec_filings,
-        **statements,
-        "geographic_revenue": geographic_revenue,
+        **payload,
     }

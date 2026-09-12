@@ -1175,166 +1175,10 @@ def _render_login() -> None:
 # ─── Styles ──────────────────────────────────────────────────────────────────
 
 def _inject_cockpit_styles() -> None:
-    st.markdown("""
-        <style>
-        /* Streamlit's header is fixed and overlays the document.  Reserve
-           enough space for it at every zoom level, including any device safe
-           area, so the build fingerprint is never clipped underneath it. */
-        [data-testid="stMainBlockContainer"],
-        .block-container {
-            max-width: 1480px !important;
-            padding-top: calc(4.5rem + env(safe-area-inset-top, 0px)) !important;
-            padding-left: 2.25rem !important;
-            padding-right: 2.25rem !important;
-        }
-        .wharton-hero {
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 20px;
-            padding: 1.65rem 1.8rem;
-            margin-bottom: 1.25rem;
-            background:
-                radial-gradient(circle at 88% 10%, rgba(72,193,185,0.24), transparent 20rem),
-                linear-gradient(135deg, #142238 0%, #193450 65%, #175e61 130%);
-            color: #f8fafc;
-            box-shadow: 0 10px 30px rgba(27,39,54,0.07);
-        }
-        .wharton-hero h1 { color:#fff; margin:0; font-size:2.05rem; letter-spacing:-0.04em; }
-        .wharton-hero p { margin:0.45rem 0 0; color:rgba(248,250,252,0.72); }
-        .wharton-login-header {
-            margin:4rem 0 1.25rem;
-            padding:0 0.15rem;
-        }
-        .wharton-login-header h1 {
-            margin:0;
-            color:#17202e;
-            font-size:1.75rem;
-            letter-spacing:-0.035em;
-        }
-        .wharton-login-header p {
-            margin:0.35rem 0 0;
-            color:#64748b;
-        }
-        .wharton-profile-strip {
-            display:flex;
-            align-items:center;
-            gap:0.8rem;
-            padding:0.85rem 1rem;
-            margin-bottom:1.1rem;
-            border:1px solid #e3e8ef;
-            border-radius:14px;
-            background:rgba(255,255,255,0.82);
-            box-shadow:0 3px 14px rgba(27,39,54,0.035);
-        }
-        .wharton-profile-avatar {
-            display:grid;
-            place-items:center;
-            width:2.15rem;
-            height:2.15rem;
-            flex:0 0 2.15rem;
-            border-radius:10px;
-            color:#167d78;
-            background:#eaf7f5;
-            font-size:0.82rem;
-            font-weight:800;
-        }
-        .wharton-profile-copy strong {
-            display:block;
-            color:#17202e;
-            font-size:0.96rem;
-            line-height:1.25;
-        }
-        .wharton-profile-copy span {
-            display:block;
-            margin-top:0.12rem;
-            color:#64748b;
-            font-size:0.8rem;
-        }
-        .wharton-badge-row { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.9rem; }
-        .wharton-badge {
-            border:1px solid rgba(226,232,240,0.22); border-radius:999px;
-            padding:0.35rem 0.7rem; background:rgba(255,255,255,0.08);
-            color:#e2e8f0; font-size:0.86rem;
-        }
-        .wharton-panel {
-            border:1px solid #e3e8ef; border-radius:14px;
-            padding:1rem 1.15rem; background:#fff; margin-bottom:1rem;
-            box-shadow:0 4px 16px rgba(27,39,54,0.04);
-        }
-        .wharton-nav-panel {
-            display:flex;
-            align-items:flex-start;
-            justify-content:space-between;
-            gap:1rem;
-            padding:0.95rem 1.1rem;
-            margin:0.2rem 0 1rem;
-            border:1px solid #dce5ec;
-            border-left:4px solid #167d78;
-            border-radius:14px;
-            background:linear-gradient(90deg,#f0faf8 0%,rgba(255,255,255,0.94) 72%);
-        }
-        .wharton-nav-panel strong {
-            display:block;
-            color:#17202e;
-            font-size:1rem;
-            letter-spacing:-0.015em;
-        }
-        .wharton-nav-panel span {
-            display:block;
-            margin-top:0.2rem;
-            color:#64748b;
-            font-size:0.84rem;
-            line-height:1.45;
-        }
-        .wharton-section-kicker {
-            color:#0f766e; text-transform:uppercase; letter-spacing:0.12em;
-            font-weight:800; font-size:0.76rem; margin-bottom:0.35rem;
-        }
-        div[data-testid="stMetric"] {
-            border:1px solid #e3e8ef; border-radius:14px;
-            padding:0.9rem 1rem;
-            background:#fff;
-            box-shadow:0 4px 18px rgba(27,39,54,0.045);
-        }
-        div[data-testid="stMetric"] label,
-        div[data-testid="stMetric"] [data-testid="stMetricLabel"],
-        div[data-testid="stMetric"] [data-testid="stMetricValue"],
-        div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color:#17202e !important; }
-        div[data-testid="stMetric"] svg { fill:#64748b !important; }
-        .wharton-graph-shell {
-            border:1px solid rgba(20,184,166,0.24); border-radius:20px;
-            padding:0.75rem 0.75rem 0.25rem;
-            background:linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,64,89,0.90));
-            box-shadow:0 18px 45px rgba(15,23,42,0.16); margin:0.75rem 0 1.25rem;
-        }
-        .wharton-graph-shell strong { color:#ecfeff; }
-        .wharton-graph-shell span { color:#a7f3d0; }
-        .task-priority-Critical { color:#dc2626; font-weight:700; }
-        .task-priority-High { color:#d97706; font-weight:700; }
-        .task-priority-Medium { color:#2563eb; font-weight:600; }
-        .task-priority-Low { color:#64748b; }
-        .subproject-card {
-            border:1px solid rgba(20,184,166,0.2); border-radius:14px;
-            padding:1rem 1.2rem; margin-bottom:0.75rem;
-            background:linear-gradient(135deg,rgba(15,23,42,0.04),rgba(20,184,166,0.04));
-        }
-        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-            overflow-x:auto;
-            gap:0.25rem;
-            border-bottom:1px solid #e3e8ef;
-        }
-        div[data-testid="stTabs"] button {
-            white-space:nowrap;
-            font-weight:650;
-        }
-        @media (max-width:900px) {
-            [data-testid="stMainBlockContainer"],
-            .block-container {
-                padding:calc(4.5rem + env(safe-area-inset-top, 0px)) 1rem 3rem !important;
-            }
-            .wharton-hero { padding:1.35rem 1.2rem; border-radius:16px; }
-        }
-        </style>
-    """, unsafe_allow_html=True)
+    # Also support the standalone cockpit entrypoint with the shared theme.
+    from ui.dashboard_shell import inject_dashboard_styles
+
+    inject_dashboard_styles()
 
 
 # ─── Task Manager ─────────────────────────────────────────────────────────────
@@ -6052,7 +5896,9 @@ def _render_quant_engine(profile: dict[str, str | int]) -> None:
 # ─── Overview ─────────────────────────────────────────────────────────────────
 
 def _render_overview_action_center(profile: dict[str, str | int]) -> None:
-    st.markdown("### Overview & Action Center")
+    from ui.dashboard_shell import metric_columns
+
+    st.title("Overview")
 
     with get_connection() as conn:
         task_counts = conn.execute(
@@ -6091,7 +5937,7 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     committee_cases = int(lifecycle_counts["committee_cases"])
     reconciliation_cases = int(lifecycle_counts["reconciliation_cases"])
 
-    r = st.columns(6)
+    r = metric_columns(6, key="overview")
     r[0].metric("Open Tasks", open_tasks)
     r[1].metric("Critical", critical_tasks)
     r[2].metric("Overdue", overdue_tasks)
@@ -6131,22 +5977,15 @@ def _render_overview_action_center(profile: dict[str, str | int]) -> None:
     else:
         st.success("No open blocker is recorded. Create the next evidence, portfolio, or pitch task below.")
 
-    st.markdown(f"""
-        <div class="wharton-panel">
-          <div class="wharton-section-kicker">Active Desk</div>
-          <strong>{escape(str(profile['username']))}</strong> · {escape(str(profile['role']))} · Primary: <strong>{escape(str(profile['primary_module']))}</strong>
-        </div>
-    """, unsafe_allow_html=True)
-
     if st.toggle(
-        "Open Mission Task Board",
+        "Task board",
         key=TASK_BOARD_VISIBLE_KEY,
         help="Loads the editable task table only when you need it.",
     ):
         _render_task_manager(profile)
     else:
         st.caption(
-            "Task counts and the next action are current. Open the Mission Task Board to edit individual tasks."
+            "Open the task board to view and edit tasks."
         )
 
 
@@ -11296,21 +11135,35 @@ def _company_news_rows(news: list[dict[str, Any]]) -> list[dict[str, str]]:
 def _format_company_metric(key: str, value: Any) -> str:
     if value is None:
         return "—"
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         return "Yes" if value else "No"
-    if isinstance(value, float):
-        if not np.isfinite(value):
-            return "—"
-        if any(token in key.lower() for token in ("margin", "growth", "yield", "returnon", "heldpercent")):
-            return f"{value:.2%}"
-        if abs(value) >= 1e9:
-            return f"{value / 1e9:,.2f}B"
-        if abs(value) >= 1e6:
-            return f"{value / 1e6:,.2f}M"
-        return f"{value:,.4g}"
-    if isinstance(value, int) and abs(value) >= 1_000_000:
-        return f"{value / 1e6:,.2f}M"
-    return str(value)
+    if not isinstance(value, (int, float, np.integer, np.floating)):
+        return str(value)
+    number = float(value)
+    if not np.isfinite(number):
+        return "—"
+    normalized_key = key.casefold().replace(" ", "").replace("/", "").replace("_", "")
+    if normalized_key in {"roe", "roa", "roic"} or any(
+        token in normalized_key for token in ("margin", "growth", "yield", "returnon", "heldpercent")
+    ):
+        return f"{number:.2%}"
+    if normalized_key in {
+        "price", "currentprice", "regularmarketprice", "targetmeanprice",
+        "targetmedianprice", "targethighprice", "targetlowprice",
+        "fiftytwoweekhigh", "fiftytwoweeklow",
+    }:
+        return f"{number:,.2f}"
+    if normalized_key in {
+        "forwardpe", "trailingpe", "pegratio", "pricetobook",
+        "enterprisetoebitda", "enterprisetorevenue",
+    }:
+        return f"{number:,.1f}×"
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(number) >= threshold:
+            return f"{number / threshold:,.2f}{suffix}"
+    if isinstance(value, (int, np.integer)):
+        return f"{value:,}"
+    return f"{number:,.4g}"
 
 
 def _render_statement_block(label: str, frame: pd.DataFrame) -> None:
@@ -12204,6 +12057,62 @@ def _render_research_evidence(
             st.rerun()
 
 
+COMPANY_DETAIL_GROUPS = {
+    "Overview": ("Overview",),
+    "Financials": ("Financial Statements", "Revenue by Region", "All Metrics"),
+    "Valuation": ("DCF",),
+    "Business & risks": ("Industry & Peers", "Management", "Moat, Track Record & Risks"),
+    "Evidence": ("Evidence & Sources",),
+}
+COMPANY_DETAIL_LABELS = {
+    "Financial Statements": "Statements",
+    "Revenue by Region": "Regions",
+    "All Metrics": "Metrics",
+    "Industry & Peers": "Peers",
+    "Management": "Management",
+    "Moat, Track Record & Risks": "Moat & risks",
+}
+
+
+def _company_detail_widget_keys(ticker: str) -> tuple[str, ...]:
+    return (
+        f"company_detail_tab_{ticker}",
+        f"company_section_tab_{ticker}",
+        *(f"company_detail_view_{ticker}_{index}" for index in range(len(COMPANY_DETAIL_GROUPS))),
+    )
+
+
+def _render_company_detail_navigation(ticker: str):
+    """Group detail views while keeping expensive views lazy and edits durable."""
+    groups = list(COMPANY_DETAIL_GROUPS)
+    group_key = f"company_section_tab_{ticker}"
+    legacy_view = st.session_state.get(f"company_detail_tab_{ticker}", "Overview")
+    if st.session_state.get(group_key) not in groups:
+        st.session_state[group_key] = next(
+            (group for group, views in COMPANY_DETAIL_GROUPS.items() if legacy_view in views),
+            "Overview",
+        )
+    tabs = st.tabs(groups, key=group_key, on_change="rerun")
+    for index, (group, tab) in enumerate(zip(groups, tabs)):
+        if not tab.open:
+            continue
+        views = COMPANY_DETAIL_GROUPS[group]
+        view = views[0]
+        if len(views) > 1:
+            view_key = f"company_detail_view_{ticker}_{index}"
+            if st.session_state.get(view_key) not in views:
+                st.session_state[view_key] = legacy_view if legacy_view in views else views[0]
+            with tab:
+                view = st.radio(
+                    f"{group} view", views,
+                    format_func=lambda value: COMPANY_DETAIL_LABELS.get(value, value),
+                    key=view_key, horizontal=True, label_visibility="collapsed",
+                )
+        st.session_state[f"company_detail_tab_{ticker}"] = view
+        return view, tab
+    return "Overview", tabs[0]
+
+
 def _render_company_analysis(profile: dict[str, str | int]) -> None:
     from src.analytics.company_analysis import (
         analyze_moat,
@@ -12218,21 +12127,20 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
         solve_reverse_dcf,
     )
 
-    st.markdown("### Company Analysis")
-    st.caption(
-        "Company profile, all available metrics, financial statements, management, operating track record, "
-        "moat screening, risks, news, and a configurable DCF for every company."
-    )
+    from ui.dashboard_shell import metric_columns
+
+    st.markdown("# Company Analysis")
     existing_positions = _fetch_competition_positions()
     suggested = ", ".join(dict.fromkeys(str(row["ticker"]).upper() for row in existing_positions))
-    raw_tickers = st.text_area(
-        "Tickers (comma, space, or newline separated; maximum 8)",
-        value=suggested,
-        placeholder="MSFT, ASML, NVDA",
-        key="wharton_company_analysis_tickers",
-        height=75,
-    )
-    run_analysis = st.button("Analyze Companies", type="primary", use_container_width=True)
+    with st.expander("Analyze companies", expanded=not bool(st.session_state.get(COMPANY_ANALYSIS_KEY))):
+        raw_tickers = st.text_area(
+            "Tickers (comma, space, or newline separated; maximum 8)",
+            value=suggested,
+            placeholder="MSFT, ASML, NVDA",
+            key="wharton_company_analysis_tickers",
+            height=75,
+        )
+        run_analysis = st.button("Analyze Companies", type="primary", use_container_width=True)
     if run_analysis:
         import re
 
@@ -12274,7 +12182,20 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     if not valid_results:
         return
 
-    st.markdown("#### Company Comparison")
+    # Lazy tabs temporarily remove their widgets. Retain DCF edits and tab
+    # selection for every loaded company before Streamlit cleans hidden widgets.
+    for ticker in valid_results:
+        for widget_key in (
+            *_dcf_widget_keys(ticker),
+            *_company_detail_widget_keys(ticker),
+            f"company_financials_tab_{ticker}",
+            f"company_region_view_{ticker}",
+            f"company_macro_region_{ticker}",
+            f"industry_peer_set_{ticker}",
+        ):
+            if widget_key in st.session_state:
+                st.session_state[widget_key] = st.session_state[widget_key]
+
     comparison_rows: list[dict[str, Any]] = []
     for ticker, snapshot in valid_results.items():
         info = snapshot.get("info", {})
@@ -12299,446 +12220,440 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
             ),
             "Baseline DCF v2 / share": f"${base_dcf['fair_value_per_share']:,.2f}" if base_dcf.get("available") else "N/A",
         })
-    st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+    if len(valid_results) > 1:
+        with st.expander("Compare companies", expanded=False):
+            st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+        selected_ticker = st.selectbox("Company", list(valid_results), key="wharton_company_detail_ticker")
+    else:
+        selected_ticker = next(iter(valid_results))
 
-    selected_ticker = st.selectbox("Company Detail", list(valid_results), key="wharton_company_detail_ticker")
     snapshot = valid_results[selected_ticker]
     info = snapshot.get("info", {})
     company_name = info.get("longName") or info.get("shortName") or selected_ticker
     st.markdown(f"## {company_name} ({selected_ticker})")
     st.caption(f"Data fetched: {snapshot.get('fetched_at', '—')} · Market-data source: Yahoo Finance")
 
-    overview_tab, regions_tab, industry_tab, evidence_tab, financials_tab, management_tab, moat_tab, dcf_tab, metrics_tab = st.tabs([
-        "Overview", "Revenue by Region", "Industry & Peers", "Evidence & Sources", "Financial Statements", "Management", "Moat, Track Record & Risks", "DCF", "All Metrics",
-    ])
+    detail_view, detail_tab = _render_company_detail_navigation(selected_ticker)
 
-    with overview_tab:
-        kpis = st.columns(6)
-        overview_metrics = [
-            ("Price", info.get("currentPrice") or info.get("regularMarketPrice")),
-            ("Market cap", info.get("marketCap")),
-            ("Forward P/E", info.get("forwardPE")),
-            ("Revenue growth", info.get("revenueGrowth")),
-            ("Operating margin", info.get("operatingMargins")),
-            ("ROE", info.get("returnOnEquity")),
-        ]
-        for column, (label, value) in zip(kpis, overview_metrics):
-            column.metric(label, _format_company_metric(label, value))
-        st.markdown("#### What the Company Does")
-        st.write(info.get("longBusinessSummary") or "A company description is not available from the data source.")
-        profile_rows = {
-            "Sector": info.get("sector"), "Industry": info.get("industry"),
-            "Country": info.get("country"), "City": info.get("city"),
-            "Employees": info.get("fullTimeEmployees"), "Website": info.get("website"),
-        }
-        st.dataframe(pd.DataFrame([{"Field": key, "Value": value or "—"} for key, value in profile_rows.items()]), hide_index=True, use_container_width=True)
-        history = snapshot.get("history")
-        if isinstance(history, pd.DataFrame) and not history.empty and "Close" in history:
-            st.markdown("#### Five-Year Price History")
-            st.line_chart(history[["Close"]].rename(columns={"Close": selected_ticker}), use_container_width=True)
-
-    with regions_tab:
-        _render_geographic_revenue(snapshot, selected_ticker, str(company_name))
-
-    with industry_tab:
-        _render_industry_peer_analysis(profile, selected_ticker, valid_results)
-
-    with evidence_tab:
-        _render_research_evidence(profile, selected_ticker, snapshot)
-
-    with financials_tab:
-        annual, quarterly = st.tabs(["Annual", "Quarterly"])
-        with annual:
-            _render_statement_block("Income Statement", snapshot.get("income_statement", pd.DataFrame()))
-            _render_statement_block("Balance Sheet", snapshot.get("balance_sheet", pd.DataFrame()))
-            _render_statement_block("Cash Flow Statement", snapshot.get("cash_flow", pd.DataFrame()))
-        with quarterly:
-            _render_statement_block("Quarterly Income Statement", snapshot.get("quarterly_income_statement", pd.DataFrame()))
-            _render_statement_block("Quarterly Balance Sheet", snapshot.get("quarterly_balance_sheet", pd.DataFrame()))
-            _render_statement_block("Quarterly Cash Flow Statement", snapshot.get("quarterly_cash_flow", pd.DataFrame()))
-
-    with management_tab:
-        st.markdown("#### Current Management")
-        officers = snapshot.get("officers", [])
-        if officers:
-            officer_rows = []
-            for officer in officers:
-                officer_rows.append({
-                    "Name": officer.get("name") or "—", "Role": officer.get("title") or "—",
-                    "Age": officer.get("age") or "—", "Year born": officer.get("yearBorn") or "—",
-                    "Reported fiscal year": officer.get("fiscalYear") or "—",
-                    "Total compensation": _format_company_metric("totalPay", officer.get("totalPay")),
-                })
-            st.dataframe(pd.DataFrame(officer_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("The source did not provide a management roster.")
-        st.warning(
-            "Yahoo Finance usually does not provide complete executive education and career histories. "
-            "The app never invents them. Source-backed public biographies can be loaded below."
-        )
-        biography_key = f"wharton_management_biographies_{selected_ticker}"
-        if officers and st.button(
-            "Load Education and Career Histories",
-            key=f"load_{biography_key}",
-            use_container_width=True,
-        ):
-            biographies: dict[str, Any] = {}
-            biography_progress = st.progress(0.0, text="Searching public biographies…")
-            for officer_index, officer in enumerate(officers, start=1):
-                officer_name = str(officer.get("name") or "").strip()
-                if officer_name:
-                    try:
-                        biographies[officer_name] = _fetch_management_biography_cached(officer_name, company_name)
-                    except Exception as exc:
-                        biographies[officer_name] = {"available": False, "error": str(exc)}
-                biography_progress.progress(
-                    officer_index / len(officers),
-                    text=f"Checked {officer_index}/{len(officers)}: {officer_name or 'Unnamed executive'}",
-                )
-            biography_progress.empty()
-            st.session_state[biography_key] = biographies
-
-        biographies = st.session_state.get(biography_key, {})
-        if isinstance(biographies, dict) and biographies:
-            st.markdown("#### Education and Historical Career")
-            st.caption(
-                "Profiles are matched to public English Wikipedia biographies and include a direct source link. "
-                "Unmatched executives remain explicitly unavailable. Verify material facts against official company biographies or filings."
-            )
-            for officer in officers:
-                officer_name = str(officer.get("name") or "").strip()
-                biography = biographies.get(officer_name, {})
-                with st.expander(f"{officer_name or 'Unnamed executive'} — {officer.get('title') or 'Role unavailable'}"):
-                    if biography.get("available"):
-                        st.markdown("**Education**")
-                        st.write(biography.get("education"))
-                        st.markdown("**Historical career**")
-                        st.write(biography.get("career"))
-                        st.markdown(f"[Source: {biography.get('matched_title')}]({biography.get('source_url')})")
-                        st.caption(biography.get("verification_note") or "")
-                    else:
-                        st.info(f"Source-backed profile unavailable: {biography.get('error', 'No confident match found.')}")
-        elif officers:
-            st.info("Select **Load Education and Career Histories** to enrich the management roster with source-backed public biographies.")
-        news_rows = _company_news_rows(snapshot.get("news", []))
-        st.markdown("#### Current Evidence Sources")
-        if news_rows:
-            for item in news_rows[:10]:
-                if item["url"]:
-                    st.markdown(f"- **[{item['id']}]** [{item['title']}]({item['url']}) — {item['publisher']}")
-                else:
-                    st.markdown(f"- **[{item['id']}]** {item['title']} — {item['publisher']}")
-        else:
-            st.info("No current news is available.")
-
-        ai_key = f"wharton_company_ai_{selected_ticker}"
-        if st.button("Generate Evidence-Constrained Management Synthesis", key=f"run_{ai_key}"):
-            from src.ai.ai_review import resolve_groq_api_key
-            from src.ai.company_analysis import generate_company_deep_dive
-
-            api_key = resolve_groq_api_key(st.secrets)
-            evidence = {
-                "ticker": selected_ticker, "company": company_name,
-                "business_summary": info.get("longBusinessSummary"), "officers": officers,
-                "management_biographies": biographies if isinstance(biographies, dict) else {},
-                "selected_metrics": {key: info.get(key) for key in [
-                    "revenueGrowth", "earningsGrowth", "operatingMargins", "profitMargins",
-                    "returnOnEquity", "freeCashflow", "totalDebt", "marketCap",
-                ]},
-                "news": news_rows,
-                "deterministic_track_record": analyze_track_record(info, snapshot.get("history")),
+    if detail_view == "Overview":
+        with detail_tab:
+            kpis = metric_columns(6, key="company_overview")
+            overview_metrics = [
+                ("Price", info.get("currentPrice") or info.get("regularMarketPrice")),
+                ("Market cap", info.get("marketCap")),
+                ("Forward P/E", info.get("forwardPE")),
+                ("Revenue growth", info.get("revenueGrowth")),
+                ("Operating margin", info.get("operatingMargins")),
+                ("ROE", info.get("returnOnEquity")),
+            ]
+            for column, (label, value) in zip(kpis, overview_metrics):
+                column.metric(label, _format_company_metric(label, value))
+            st.markdown("#### What the Company Does")
+            st.write(info.get("longBusinessSummary") or "A company description is not available from the data source.")
+            profile_rows = {
+                "Sector": info.get("sector"), "Industry": info.get("industry"),
+                "Country": info.get("country"), "City": info.get("city"),
+                "Employees": info.get("fullTimeEmployees"), "Website": info.get("website"),
             }
-            with st.spinner("Preparing a synthesis from the supplied evidence…"):
-                st.session_state[ai_key] = generate_company_deep_dive(evidence, api_key)
-        ai_result = st.session_state.get(ai_key)
-        if isinstance(ai_result, dict):
-            if ai_result.get("available"):
-                st.markdown("#### Management-History Synthesis")
-                st.write(ai_result.get("management_history") or "Insufficient evidence.")
-                st.markdown("**Investment View**")
-                st.write(ai_result.get("investment_view") or "—")
-                st.caption(ai_result.get("evidence_limitations") or "")
+            st.dataframe(pd.DataFrame([{"Field": key, "Value": str(value) if value is not None else "—"} for key, value in profile_rows.items()]), hide_index=True, use_container_width=True)
+            history = snapshot.get("history")
+            if isinstance(history, pd.DataFrame) and not history.empty and "Close" in history:
+                st.markdown("#### Five-Year Price History")
+                st.line_chart(history[["Close"]].rename(columns={"Close": selected_ticker}), use_container_width=True)
+
+    if detail_view == "Revenue by Region":
+        with detail_tab:
+            _render_geographic_revenue(snapshot, selected_ticker, str(company_name))
+
+    if detail_view == "Industry & Peers":
+        with detail_tab:
+            _render_industry_peer_analysis(profile, selected_ticker, valid_results)
+
+    if detail_view == "Evidence & Sources":
+        with detail_tab:
+            _render_research_evidence(profile, selected_ticker, snapshot)
+
+    if detail_view == "Financial Statements":
+        with detail_tab:
+            annual, quarterly = st.tabs(
+                ["Annual", "Quarterly"],
+                key=f"company_financials_tab_{selected_ticker}", on_change="rerun",
+            )
+            if annual.open:
+                with annual:
+                    _render_statement_block("Income Statement", snapshot.get("income_statement", pd.DataFrame()))
+                    _render_statement_block("Balance Sheet", snapshot.get("balance_sheet", pd.DataFrame()))
+                    _render_statement_block("Cash Flow Statement", snapshot.get("cash_flow", pd.DataFrame()))
+            if quarterly.open:
+                with quarterly:
+                    _render_statement_block("Quarterly Income Statement", snapshot.get("quarterly_income_statement", pd.DataFrame()))
+                    _render_statement_block("Quarterly Balance Sheet", snapshot.get("quarterly_balance_sheet", pd.DataFrame()))
+                    _render_statement_block("Quarterly Cash Flow Statement", snapshot.get("quarterly_cash_flow", pd.DataFrame()))
+
+    if detail_view == "Management":
+        with detail_tab:
+            st.markdown("#### Current Management")
+            officers = snapshot.get("officers", [])
+            if officers:
+                officer_rows = []
+                for officer in officers:
+                    officer_rows.append({
+                        "Name": officer.get("name") or "—", "Role": officer.get("title") or "—",
+                        "Age": officer.get("age") or "—", "Year born": officer.get("yearBorn") or "—",
+                        "Reported fiscal year": officer.get("fiscalYear") or "—",
+                        "Total compensation": _format_company_metric("totalPay", officer.get("totalPay")),
+                    })
+                st.dataframe(pd.DataFrame(officer_rows), use_container_width=True, hide_index=True)
             else:
-                st.warning(f"Supplementary synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
-
-    with moat_tab:
-        moat = analyze_moat(info)
-        track = analyze_track_record(info, snapshot.get("history"))
-        score_col, label_col = st.columns(2)
-        score_col.metric("Quantitative Moat Score", f"{moat['score']}/{moat['max_score']}")
-        label_col.metric("Result", moat["label"])
-        st.caption(moat["warning"])
-        st.dataframe(pd.DataFrame([{
-            "Status": "Pass" if signal["passed"] else "Fail", "Area": signal["name"], "Evidence": signal["evidence"],
-        } for signal in moat["signals"]]), use_container_width=True, hide_index=True)
-        success_col, failure_col = st.columns(2)
-        with success_col:
-            st.markdown("#### Observable Successes")
-            if track["successes"]:
-                for item in track["successes"]:
-                    st.success(item)
-            else:
-                st.info("Available metrics did not establish a clear positive signal.")
-        with failure_col:
-            st.markdown("#### Failures / Warning Signals")
-            if track["failures"]:
-                for item in track["failures"]:
-                    st.error(item)
-            else:
-                st.info("Available metrics did not establish a clear negative signal.")
-        if isinstance(ai_result := st.session_state.get(f"wharton_company_ai_{selected_ticker}"), dict) and ai_result.get("available"):
-            st.markdown("#### Qualitative Moat Synthesis")
-            st.write(ai_result.get("moat_analysis") or "—")
-            ai_success, ai_failure = st.columns(2)
-            with ai_success:
-                for item in ai_result.get("successes", []):
-                    st.success(item)
-            with ai_failure:
-                for item in ai_result.get("failures", []):
-                    st.error(item)
-
-    with dcf_tab:
-        dcf_inputs = prepare_dcf_inputs(snapshot)
-        defaults = default_multistage_dcf_assumptions(dcf_inputs)
-        dcf_evidence = {key: info.get(key) for key in [
-            "shortName", "sector", "industry", "marketCap", "beta", "freeCashflow",
-            "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth", "grossMargins",
-            "operatingMargins", "profitMargins", "returnOnEquity", "totalCash", "totalDebt",
-            "sharesOutstanding", "currentPrice", "regularMarketPrice",
-        ]}
-        dcf_evidence.update({
-            "normalizedFcff": dcf_inputs.get("normalized", {}).get("fcff"),
-            "cashFlowBasis": dcf_inputs.get("normalized", {}).get("cash_flow_basis"),
-            "calculatedWacc": dcf_inputs.get("wacc", {}).get("wacc"),
-            "statementPeriods": dcf_inputs.get("quality", {}).get("statement_periods"),
-        })
-        with st.spinner("Preparing AI-informed multi-stage DCF assumptions…"):
-            ai_dcf = _fetch_ai_dcf_assumptions_cached(selected_ticker, dcf_evidence)
-        if ai_dcf.get("available") and isinstance(ai_dcf.get("assumptions"), dict):
-            ai_assumptions = ai_dcf["assumptions"]
-            ai_forecast_assumptions = {
-                key: ai_assumptions[key] for key in (
-                    "initial_growth_rate", "near_term_years", "fade_years",
-                    "terminal_growth_rate", "lifecycle",
-                ) if key in ai_assumptions
-            }
-            if "terminal_growth_rate" in ai_forecast_assumptions:
-                ai_forecast_assumptions["terminal_growth_rate"] = min(
-                    max(float(ai_forecast_assumptions["terminal_growth_rate"]), -0.02),
-                    float(defaults["discount_rate"]) - 0.025,
-                )
-            defaults = {
-                **defaults,
-                **ai_forecast_assumptions,
-            }
-            st.success(
-                f"AI-informed {str(defaults.get('lifecycle') or 'company-specific').replace('_', ' ')} starting point loaded automatically."
+                st.info("The source did not provide a management roster.")
+            st.warning(
+                "Yahoo Finance usually does not provide complete executive education and career histories. "
+                "The app never invents them. Source-backed public biographies can be loaded below."
             )
-            st.caption(
-                f"{ai_dcf.get('rationale', 'Based on the available company metrics.')} "
-                f"Confidence: {float(ai_dcf.get('confidence') or 0.5):.0%}. Forecast judgments remain editable; "
-                "WACC stays tied to the transparent beta and capital-structure calculation."
-            )
-        else:
-            st.info(
-                "AI proposal is unavailable. A lifecycle-aware deterministic model was loaded automatically from statements, "
-                "growth, beta, and capital structure; no assumption is randomized."
-            )
-
-        normalized = dcf_inputs.get("normalized", {})
-        wacc_detail = dcf_inputs.get("wacc", {})
-        quality = dcf_inputs.get("quality", {})
-        summary_cols = st.columns(4)
-        summary_cols[0].metric("Normalized FCFF", f"${float(normalized.get('fcff') or 0) / 1e9:,.2f}B")
-        summary_cols[1].metric("Cash-flow basis", str(normalized.get("cash_flow_basis") or "Unavailable").replace("_", " ").title())
-        summary_cols[2].metric("Calculated WACC", f"{float(wacc_detail.get('wacc') or 0):.2%}")
-        summary_cols[3].metric("Lifecycle", str(defaults.get("lifecycle") or "Unknown").replace("_", " ").title())
-        st.caption(
-            "DCF v2 separates reported data, normalized FCFF, calculated WACC, AI forecast judgments, and manual overrides. "
-            "Growth fades smoothly into the terminal rate instead of dropping abruptly."
-        )
-
-        st.markdown("#### Editable Multi-Stage Assumptions")
-        reset_values = _dcf_widget_values(selected_ticker, defaults)
-        initialization_key = f"dcf_v2_defaults_loaded_{selected_ticker}"
-        if not st.session_state.get(initialization_key):
-            st.session_state.update(reset_values)
-            st.session_state[initialization_key] = True
-        if st.button("Reset all fields to current suggested values", key=f"dcf_reset_{selected_ticker}"):
-            st.session_state.update(reset_values)
-        with st.form(f"dcf_form_{selected_ticker}"):
-            d1, d2, d3, d4 = st.columns(4)
-            with d1:
-                fcf_b = st.number_input("Normalized FCFF (billions)", step=0.1, key=f"dcf_fcf_{selected_ticker}")
-                growth_pct = st.number_input("Initial FCFF Growth (%)", min_value=-99.0, max_value=100.0, step=0.5, key=f"dcf_growth_{selected_ticker}")
-            with d2:
-                near_years = st.number_input("Near-Term Stage (years)", min_value=1, max_value=10, step=1, key=f"dcf_near_{selected_ticker}")
-                fade_years = st.number_input("Competitive Fade (years)", min_value=1, max_value=15, step=1, key=f"dcf_fade_{selected_ticker}")
-            with d3:
-                discount_pct = st.number_input("Discount Rate / WACC (%)", step=0.5, key=f"dcf_wacc_{selected_ticker}")
-                terminal_pct = st.number_input("Terminal Growth (%)", step=0.25, key=f"dcf_terminal_{selected_ticker}")
-            with d4:
-                shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, step=1.0, key=f"dcf_shares_{selected_ticker}")
-                cash_b = st.number_input("Cash (billions)", step=0.1, key=f"dcf_cash_{selected_ticker}")
-                debt_b = st.number_input("Debt (billions)", step=0.1, key=f"dcf_debt_{selected_ticker}")
-            midyear = st.checkbox(
-                "Mid-year discounting convention",
-                key=f"dcf_midyear_{selected_ticker}",
-                help="Assumes cash flows arrive through the year instead of only on the final day.",
-            )
-            st.form_submit_button("Recalculate Multi-Stage DCF", type="primary", use_container_width=True)
-        assumptions = {
-            **defaults,
-            "starting_fcff": float(fcf_b) * 1e9,
-            "initial_growth_rate": float(growth_pct) / 100,
-            "near_term_years": int(near_years),
-            "fade_years": int(fade_years),
-            "discount_rate": float(discount_pct) / 100,
-            "terminal_growth_rate": float(terminal_pct) / 100,
-            "cash": float(cash_b) * 1e9,
-            "debt": float(debt_b) * 1e9,
-            "shares_outstanding": float(shares_m) * 1e6,
-            "current_price": float(defaults["current_price"]),
-            "midyear_convention": bool(midyear),
-        }
-        scenarios = build_multistage_dcf_scenarios(dcf_inputs, assumptions)
-        scenario_columns = st.columns(3)
-        for column, (name, result) in zip(scenario_columns, scenarios.items()):
-            with column:
-                st.markdown(f"#### {name}")
-                if result.get("available"):
-                    st.metric("Fair Value / Share", f"${result['fair_value_per_share']:,.2f}", f"{result['upside_pct']:+.1%}" if result.get("upside_pct") is not None else None)
-                    st.caption(
-                        f"Terminal value: {result['terminal_value_share']:.1%} EV · "
-                        f"Explicit forecast: {len(result.get('projected', []))} years"
+            biography_key = f"wharton_management_biographies_{selected_ticker}"
+            if officers and st.button(
+                "Load Education and Career Histories",
+                key=f"load_{biography_key}",
+                use_container_width=True,
+            ):
+                biographies: dict[str, Any] = {}
+                biography_progress = st.progress(0.0, text="Searching public biographies…")
+                for officer_index, officer in enumerate(officers, start=1):
+                    officer_name = str(officer.get("name") or "").strip()
+                    if officer_name:
+                        try:
+                            biographies[officer_name] = _fetch_management_biography_cached(officer_name, company_name)
+                        except Exception as exc:
+                            biographies[officer_name] = {"available": False, "error": str(exc)}
+                    biography_progress.progress(
+                        officer_index / len(officers),
+                        text=f"Checked {officer_index}/{len(officers)}: {officer_name or 'Unnamed executive'}",
                     )
+                biography_progress.empty()
+                st.session_state[biography_key] = biographies
+
+            biographies = st.session_state.get(biography_key, {})
+            if isinstance(biographies, dict) and biographies:
+                st.markdown("#### Education and Historical Career")
+                st.caption(
+                    "Profiles are matched to public English Wikipedia biographies and include a direct source link. "
+                    "Unmatched executives remain explicitly unavailable. Verify material facts against official company biographies or filings."
+                )
+                for officer in officers:
+                    officer_name = str(officer.get("name") or "").strip()
+                    biography = biographies.get(officer_name, {})
+                    with st.expander(f"{officer_name or 'Unnamed executive'} — {officer.get('title') or 'Role unavailable'}"):
+                        if biography.get("available"):
+                            st.markdown("**Education**")
+                            st.write(biography.get("education"))
+                            st.markdown("**Historical career**")
+                            st.write(biography.get("career"))
+                            st.markdown(f"[Source: {biography.get('matched_title')}]({biography.get('source_url')})")
+                            st.caption(biography.get("verification_note") or "")
+                        else:
+                            st.info(f"Source-backed profile unavailable: {biography.get('error', 'No confident match found.')}")
+            elif officers:
+                st.info("Select **Load Education and Career Histories** to enrich the management roster with source-backed public biographies.")
+            news_rows = _company_news_rows(snapshot.get("news", []))
+            st.markdown("#### Current Evidence Sources")
+            if news_rows:
+                for item in news_rows[:10]:
+                    if item["url"]:
+                        st.markdown(f"- **[{item['id']}]** [{item['title']}]({item['url']}) — {item['publisher']}")
+                    else:
+                        st.markdown(f"- **[{item['id']}]** {item['title']} — {item['publisher']}")
+            else:
+                st.info("No current news is available.")
+
+            ai_key = f"wharton_company_ai_{selected_ticker}"
+            if st.button("Generate Evidence-Constrained Management Synthesis", key=f"run_{ai_key}"):
+                from src.ai.ai_review import resolve_groq_api_key
+                from src.ai.company_analysis import generate_company_deep_dive
+
+                api_key = resolve_groq_api_key(st.secrets)
+                evidence = {
+                    "ticker": selected_ticker, "company": company_name,
+                    "business_summary": info.get("longBusinessSummary"), "officers": officers,
+                    "management_biographies": biographies if isinstance(biographies, dict) else {},
+                    "selected_metrics": {key: info.get(key) for key in [
+                        "revenueGrowth", "earningsGrowth", "operatingMargins", "profitMargins",
+                        "returnOnEquity", "freeCashflow", "totalDebt", "marketCap",
+                    ]},
+                    "news": news_rows,
+                    "deterministic_track_record": analyze_track_record(info, snapshot.get("history")),
+                }
+                with st.spinner("Preparing a synthesis from the supplied evidence…"):
+                    st.session_state[ai_key] = generate_company_deep_dive(evidence, api_key)
+            ai_result = st.session_state.get(ai_key)
+            if isinstance(ai_result, dict):
+                if ai_result.get("available"):
+                    st.markdown("#### Management-History Synthesis")
+                    st.write(ai_result.get("management_history") or "Insufficient evidence.")
+                    st.markdown("**Investment View**")
+                    st.write(ai_result.get("investment_view") or "—")
+                    st.caption(ai_result.get("evidence_limitations") or "")
                 else:
-                    st.error(result.get("error", "DCF cannot be calculated."))
-        base_result = scenarios.get("Base", {})
-        if base_result.get("available"):
-            st.markdown("#### Base-Case Growth Fade")
+                    st.warning(f"Supplementary synthesis is unavailable: {ai_result.get('error', 'unknown error')}")
+
+    if detail_view == "Moat, Track Record & Risks":
+        with detail_tab:
+            moat = analyze_moat(info)
+            track = analyze_track_record(info, snapshot.get("history"))
+            score_col, label_col = st.columns(2)
+            score_col.metric("Quantitative Moat Score", f"{moat['score']}/{moat['max_score']}")
+            label_col.metric("Result", moat["label"])
+            st.caption(moat["warning"])
             st.dataframe(pd.DataFrame([{
-                "Year": row["year"],
-                "Phase": str(row.get("phase") or "").replace("_", " ").title(),
-                "FCFF Growth": row.get("growth_rate"),
-                "FCFF ($B)": row["free_cash_flow"] / 1e9,
-                "Discount Factor": row.get("discount_factor"),
-                "Present Value ($B)": row["present_value"] / 1e9,
-            } for row in base_result["projected"]]), use_container_width=True, hide_index=True)
+                "Status": "Pass" if signal["passed"] else "Fail", "Area": signal["name"], "Evidence": signal["evidence"],
+            } for signal in moat["signals"]]), use_container_width=True, hide_index=True)
+            success_col, failure_col = st.columns(2)
+            with success_col:
+                st.markdown("#### Observable Successes")
+                if track["successes"]:
+                    for item in track["successes"]:
+                        st.success(item)
+                else:
+                    st.info("Available metrics did not establish a clear positive signal.")
+            with failure_col:
+                st.markdown("#### Failures / Warning Signals")
+                if track["failures"]:
+                    for item in track["failures"]:
+                        st.error(item)
+                else:
+                    st.info("Available metrics did not establish a clear negative signal.")
+            if isinstance(ai_result := st.session_state.get(f"wharton_company_ai_{selected_ticker}"), dict) and ai_result.get("available"):
+                st.markdown("#### Qualitative Moat Synthesis")
+                st.write(ai_result.get("moat_analysis") or "—")
+                ai_success, ai_failure = st.columns(2)
+                with ai_success:
+                    for item in ai_result.get("successes", []):
+                        st.success(item)
+                with ai_failure:
+                    for item in ai_result.get("failures", []):
+                        st.error(item)
 
-            bridge = base_result.get("bridge", {})
-            st.markdown("#### Enterprise-to-Equity Bridge")
-            bridge_cols = st.columns(5)
-            bridge_cols[0].metric("Explicit PV", f"${float(base_result.get('pv_explicit') or 0) / 1e9:,.2f}B")
-            bridge_cols[1].metric("Terminal PV", f"${float(base_result.get('terminal_present_value') or 0) / 1e9:,.2f}B")
-            bridge_cols[2].metric("Enterprise Value", f"${float(bridge.get('enterprise_value') or 0) / 1e9:,.2f}B")
-            bridge_cols[3].metric("Net Cash / (Debt)", f"${(float(bridge.get('cash') or 0) - float(bridge.get('debt') or 0)) / 1e9:,.2f}B")
-            bridge_cols[4].metric("Equity Value", f"${float(bridge.get('equity_value') or 0) / 1e9:,.2f}B")
-
-            reverse = solve_reverse_dcf(dcf_inputs, assumptions)
-            st.markdown("#### What Must Be True? — Reverse DCF")
-            if reverse.get("available"):
-                reverse_cols = st.columns(3)
-                reverse_cols[0].metric("Current Market Price", f"${float(reverse['target_price']):,.2f}")
-                reverse_cols[1].metric("Base Initial Growth", f"{float(reverse['base_initial_growth_rate']):.1%}")
-                reverse_cols[2].metric(
-                    "Growth Implied by Market",
-                    f"{float(reverse['implied_initial_growth_rate']):.1%}",
-                    f"{float(reverse['growth_gap']):+.1%} vs base",
+    if detail_view == "DCF":
+        with detail_tab:
+            dcf_inputs = prepare_dcf_inputs(snapshot)
+            defaults = default_multistage_dcf_assumptions(dcf_inputs)
+            dcf_evidence = {key: info.get(key) for key in [
+                "shortName", "sector", "industry", "marketCap", "beta", "freeCashflow",
+                "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth", "grossMargins",
+                "operatingMargins", "profitMargins", "returnOnEquity", "totalCash", "totalDebt",
+                "sharesOutstanding", "currentPrice", "regularMarketPrice",
+            ]}
+            dcf_evidence.update({
+                "normalizedFcff": dcf_inputs.get("normalized", {}).get("fcff"),
+                "cashFlowBasis": dcf_inputs.get("normalized", {}).get("cash_flow_basis"),
+                "calculatedWacc": dcf_inputs.get("wacc", {}).get("wacc"),
+                "statementPeriods": dcf_inputs.get("quality", {}).get("statement_periods"),
+            })
+            with st.spinner("Preparing AI-informed multi-stage DCF assumptions…"):
+                ai_dcf = _fetch_ai_dcf_assumptions_cached(selected_ticker, dcf_evidence)
+            if ai_dcf.get("available") and isinstance(ai_dcf.get("assumptions"), dict):
+                ai_assumptions = ai_dcf["assumptions"]
+                ai_forecast_assumptions = {
+                    key: ai_assumptions[key] for key in (
+                        "initial_growth_rate", "near_term_years", "fade_years",
+                        "terminal_growth_rate", "lifecycle",
+                    ) if key in ai_assumptions
+                }
+                if "terminal_growth_rate" in ai_forecast_assumptions:
+                    ai_forecast_assumptions["terminal_growth_rate"] = min(
+                        max(float(ai_forecast_assumptions["terminal_growth_rate"]), -0.02),
+                        float(defaults["discount_rate"]) - 0.025,
+                    )
+                defaults = {
+                    **defaults,
+                    **ai_forecast_assumptions,
+                }
+                st.success(
+                    f"AI-informed {str(defaults.get('lifecycle') or 'company-specific').replace('_', ' ')} starting point loaded automatically."
                 )
                 st.caption(
-                    "This is not a forecast. It solves the initial FCFF growth required for the model to equal the current share price, "
-                    "holding the remaining assumptions constant."
+                    f"{ai_dcf.get('rationale', 'Based on the available company metrics.')} "
+                    f"Confidence: {float(ai_dcf.get('confidence') or 0.5):.0%}. Forecast judgments remain editable; "
+                    "WACC stays tied to the transparent beta and capital-structure calculation."
                 )
             else:
-                st.warning(reverse.get("error", "Reverse DCF is unavailable."))
+                st.info(
+                    "AI proposal is unavailable. A lifecycle-aware deterministic model was loaded automatically from statements, "
+                    "growth, beta, and capital structure; no assumption is randomized."
+                )
 
-            sensitivity = build_dcf_sensitivity(dcf_inputs, assumptions)
-            sensitivity_frame = pd.DataFrame(
-                sensitivity["values"],
-                index=[f"Terminal g {value:.2%}" for value in sensitivity["terminal_growth_values"]],
-                columns=[f"WACC {value:.2%}" for value in sensitivity["wacc_values"]],
+            normalized = dcf_inputs.get("normalized", {})
+            wacc_detail = dcf_inputs.get("wacc", {})
+            quality = dcf_inputs.get("quality", {})
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("Normalized FCFF", f"${float(normalized.get('fcff') or 0) / 1e9:,.2f}B")
+            summary_cols[1].metric("Cash-flow basis", str(normalized.get("cash_flow_basis") or "Unavailable").replace("_", " ").title())
+            summary_cols[2].metric("Calculated WACC", f"{float(wacc_detail.get('wacc') or 0):.2%}")
+            summary_cols[3].metric("Lifecycle", str(defaults.get("lifecycle") or "Unknown").replace("_", " ").title())
+            st.caption(
+                "DCF v2 separates reported data, normalized FCFF, calculated WACC, AI forecast judgments, and manual overrides. "
+                "Growth fades smoothly into the terminal rate instead of dropping abruptly."
             )
-            st.markdown("#### Fair Value Sensitivity ($ / share)")
-            st.dataframe(sensitivity_frame.round(2), use_container_width=True)
 
-            with st.expander("WACC calculation and data-quality audit", expanded=False):
+            st.markdown("#### Editable Multi-Stage Assumptions")
+            reset_values = _dcf_widget_values(selected_ticker, defaults)
+            initialization_key = f"dcf_v2_defaults_loaded_{selected_ticker}"
+            if not st.session_state.get(initialization_key):
+                st.session_state.update(reset_values)
+                st.session_state[initialization_key] = True
+            if st.button("Reset all fields to current suggested values", key=f"dcf_reset_{selected_ticker}"):
+                st.session_state.update(reset_values)
+            with st.form(f"dcf_form_{selected_ticker}"):
+                d1, d2, d3, d4 = st.columns(4)
+                with d1:
+                    fcf_b = st.number_input("Normalized FCFF (billions)", step=0.1, key=f"dcf_fcf_{selected_ticker}")
+                    growth_pct = st.number_input("Initial FCFF Growth (%)", min_value=-99.0, max_value=100.0, step=0.5, key=f"dcf_growth_{selected_ticker}")
+                with d2:
+                    near_years = st.number_input("Near-Term Stage (years)", min_value=1, max_value=10, step=1, key=f"dcf_near_{selected_ticker}")
+                    fade_years = st.number_input("Competitive Fade (years)", min_value=1, max_value=15, step=1, key=f"dcf_fade_{selected_ticker}")
+                with d3:
+                    discount_pct = st.number_input("Discount Rate / WACC (%)", step=0.5, key=f"dcf_wacc_{selected_ticker}")
+                    terminal_pct = st.number_input("Terminal Growth (%)", step=0.25, key=f"dcf_terminal_{selected_ticker}")
+                with d4:
+                    shares_m = st.number_input("Shares Outstanding (millions)", min_value=0.0, step=1.0, key=f"dcf_shares_{selected_ticker}")
+                    cash_b = st.number_input("Cash (billions)", step=0.1, key=f"dcf_cash_{selected_ticker}")
+                    debt_b = st.number_input("Debt (billions)", step=0.1, key=f"dcf_debt_{selected_ticker}")
+                midyear = st.checkbox(
+                    "Mid-year discounting convention",
+                    key=f"dcf_midyear_{selected_ticker}",
+                    help="Assumes cash flows arrive through the year instead of only on the final day.",
+                )
+                st.form_submit_button("Recalculate Multi-Stage DCF", type="primary", use_container_width=True)
+            assumptions = {
+                **defaults,
+                "starting_fcff": float(fcf_b) * 1e9,
+                "initial_growth_rate": float(growth_pct) / 100,
+                "near_term_years": int(near_years),
+                "fade_years": int(fade_years),
+                "discount_rate": float(discount_pct) / 100,
+                "terminal_growth_rate": float(terminal_pct) / 100,
+                "cash": float(cash_b) * 1e9,
+                "debt": float(debt_b) * 1e9,
+                "shares_outstanding": float(shares_m) * 1e6,
+                "current_price": float(defaults["current_price"]),
+                "midyear_convention": bool(midyear),
+            }
+            scenarios = build_multistage_dcf_scenarios(dcf_inputs, assumptions)
+            scenario_columns = st.columns(3)
+            for column, (name, result) in zip(scenario_columns, scenarios.items()):
+                with column:
+                    st.markdown(f"#### {name}")
+                    if result.get("available"):
+                        st.metric("Fair Value / Share", f"${result['fair_value_per_share']:,.2f}", f"{result['upside_pct']:+.1%}" if result.get("upside_pct") is not None else None)
+                        st.caption(
+                            f"Terminal value: {result['terminal_value_share']:.1%} EV · "
+                            f"Explicit forecast: {len(result.get('projected', []))} years"
+                        )
+                    else:
+                        st.error(result.get("error", "DCF cannot be calculated."))
+            base_result = scenarios.get("Base", {})
+            if base_result.get("available"):
+                st.markdown("#### Base-Case Growth Fade")
                 st.dataframe(pd.DataFrame([{
-                    "Risk-free rate": wacc_detail.get("risk_free_rate"),
-                    "Raw beta": wacc_detail.get("raw_beta"),
-                    "Adjusted beta": wacc_detail.get("adjusted_beta"),
-                    "Equity risk premium": wacc_detail.get("equity_risk_premium"),
-                    "Cost of equity": wacc_detail.get("cost_of_equity"),
-                    "Pre-tax cost of debt": wacc_detail.get("pre_tax_cost_of_debt"),
-                    "Tax rate": wacc_detail.get("tax_rate"),
-                    "Equity weight": wacc_detail.get("equity_weight"),
-                    "Debt weight": wacc_detail.get("debt_weight"),
-                    "Calculated WACC": wacc_detail.get("wacc"),
-                }]), use_container_width=True, hide_index=True)
-                st.write(f"FCFF normalization method: `{normalized.get('method', 'unavailable')}`")
-                st.write(f"Historical statement periods used: {quality.get('statement_periods', 0)}")
+                    "Year": row["year"],
+                    "Phase": str(row.get("phase") or "").replace("_", " ").title(),
+                    "FCFF Growth": row.get("growth_rate"),
+                    "FCFF ($B)": row["free_cash_flow"] / 1e9,
+                    "Discount Factor": row.get("discount_factor"),
+                    "Present Value ($B)": row["present_value"] / 1e9,
+                } for row in base_result["projected"]]), use_container_width=True, hide_index=True)
 
-            for warning in base_result.get("diagnostics", {}).get("warnings", []):
-                st.warning(str(warning))
-        else:
-            st.error(base_result.get("error", "Base DCF cannot be calculated from the available data."))
-        st.caption("DCF v2 is an auditable scenario model, not a price target or investment recommendation.")
+                bridge = base_result.get("bridge", {})
+                st.markdown("#### Enterprise-to-Equity Bridge")
+                bridge_cols = st.columns(5)
+                bridge_cols[0].metric("Explicit PV", f"${float(base_result.get('pv_explicit') or 0) / 1e9:,.2f}B")
+                bridge_cols[1].metric("Terminal PV", f"${float(base_result.get('terminal_present_value') or 0) / 1e9:,.2f}B")
+                bridge_cols[2].metric("Enterprise Value", f"${float(bridge.get('enterprise_value') or 0) / 1e9:,.2f}B")
+                bridge_cols[3].metric("Net Cash / (Debt)", f"${(float(bridge.get('cash') or 0) - float(bridge.get('debt') or 0)) / 1e9:,.2f}B")
+                bridge_cols[4].metric("Equity Value", f"${float(bridge.get('equity_value') or 0) / 1e9:,.2f}B")
 
-    with metrics_tab:
-        st.markdown(f"#### All Available Scalar Metrics ({len(snapshot.get('metrics', {}))})")
-        metric_rows = [
-            {"Metric / Key": key, "Value": _format_company_metric(key, value), "Raw": str(value)}
-            for key, value in sorted(snapshot.get("metrics", {}).items())
-        ]
-        st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True, height=650)
-        st.download_button(
-            "Download Metrics as JSON",
-            data=json.dumps(snapshot.get("metrics", {}), ensure_ascii=False, indent=2, default=str),
-            file_name=f"{selected_ticker}_company_metrics.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+                reverse = solve_reverse_dcf(dcf_inputs, assumptions)
+                st.markdown("#### What Must Be True? — Reverse DCF")
+                if reverse.get("available"):
+                    reverse_cols = st.columns(3)
+                    reverse_cols[0].metric("Current Market Price", f"${float(reverse['target_price']):,.2f}")
+                    reverse_cols[1].metric("Base Initial Growth", f"{float(reverse['base_initial_growth_rate']):.1%}")
+                    reverse_cols[2].metric(
+                        "Growth Implied by Market",
+                        f"{float(reverse['implied_initial_growth_rate']):.1%}",
+                        f"{float(reverse['growth_gap']):+.1%} vs base",
+                    )
+                    st.caption(
+                        "This is not a forecast. It solves the initial FCFF growth required for the model to equal the current share price, "
+                        "holding the remaining assumptions constant."
+                    )
+                else:
+                    st.warning(reverse.get("error", "Reverse DCF is unavailable."))
+
+                sensitivity = build_dcf_sensitivity(dcf_inputs, assumptions)
+                sensitivity_frame = pd.DataFrame(
+                    sensitivity["values"],
+                    index=[f"Terminal g {value:.2%}" for value in sensitivity["terminal_growth_values"]],
+                    columns=[f"WACC {value:.2%}" for value in sensitivity["wacc_values"]],
+                )
+                st.markdown("#### Fair Value Sensitivity ($ / share)")
+                st.dataframe(sensitivity_frame.round(2), use_container_width=True)
+
+                with st.expander("WACC calculation and data-quality audit", expanded=False):
+                    st.dataframe(pd.DataFrame([{
+                        "Risk-free rate": wacc_detail.get("risk_free_rate"),
+                        "Raw beta": wacc_detail.get("raw_beta"),
+                        "Adjusted beta": wacc_detail.get("adjusted_beta"),
+                        "Equity risk premium": wacc_detail.get("equity_risk_premium"),
+                        "Cost of equity": wacc_detail.get("cost_of_equity"),
+                        "Pre-tax cost of debt": wacc_detail.get("pre_tax_cost_of_debt"),
+                        "Tax rate": wacc_detail.get("tax_rate"),
+                        "Equity weight": wacc_detail.get("equity_weight"),
+                        "Debt weight": wacc_detail.get("debt_weight"),
+                        "Calculated WACC": wacc_detail.get("wacc"),
+                    }]), use_container_width=True, hide_index=True)
+                    st.write(f"FCFF normalization method: `{normalized.get('method', 'unavailable')}`")
+                    st.write(f"Historical statement periods used: {quality.get('statement_periods', 0)}")
+
+                for warning in base_result.get("diagnostics", {}).get("warnings", []):
+                    st.warning(str(warning))
+            else:
+                st.error(base_result.get("error", "Base DCF cannot be calculated from the available data."))
+            st.caption("DCF v2 is an auditable scenario model, not a price target or investment recommendation.")
+
+    if detail_view == "All Metrics":
+        with detail_tab:
+            st.markdown(f"#### All Available Scalar Metrics ({len(snapshot.get('metrics', {}))})")
+            metric_rows = [
+                {"Metric / Key": key, "Value": _format_company_metric(key, value), "Raw": str(value)}
+                for key, value in sorted(snapshot.get("metrics", {}).items())
+            ]
+            st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True, height=650)
+            st.download_button(
+                "Download Metrics as JSON",
+                data=json.dumps(snapshot.get("metrics", {}), ensure_ascii=False, indent=2, default=str),
+                file_name=f"{selected_ticker}_company_metrics.json",
+                mime="application/json",
+                use_container_width=True,
+            )
 
 
 def _render_header(profile: dict[str, str | int]) -> None:
-    _render_build_fingerprint()
     username = escape(str(profile["username"]))
     role = escape(str(profile["role"]))
-    initial = username[:1].upper()
-    visibility_key = "wharton_show_profile_header"
-    if visibility_key not in st.session_state:
-        st.session_state[visibility_key] = True
-
-    show_profile = bool(st.session_state[visibility_key])
-    if show_profile:
-        profile_col, hide_col = st.columns([8.5, 1.5])
-        with profile_col:
-            st.markdown(f"""
-                <div class="wharton-profile-strip">
-                  <div class="wharton-profile-avatar">{initial}</div>
-                  <div class="wharton-profile-copy">
-                    <strong>{username}</strong>
-                    <span>{role}</span>
-                  </div>
-                </div>
-            """, unsafe_allow_html=True)
-        with hide_col:
-            if st.button("Hide profile", key="wharton_hide_profile", use_container_width=True):
-                st.session_state[visibility_key] = False
-                st.rerun()
-    else:
-        with st.sidebar:
-            st.caption("PROFILE")
-            if st.button(
-                "Show profile",
-                key="wharton_restore_profile",
-                use_container_width=True,
-            ):
-                st.session_state[visibility_key] = True
-                st.rerun()
-
-    if st.sidebar.button("Sign out", use_container_width=True):
-        _logout()
+    with st.sidebar:
+        st.divider()
+        st.markdown(
+            f'<div class="wharton-profile-strip">'
+            f'<div class="wharton-profile-avatar">{username[:1].upper()}</div>'
+            f'<div class="wharton-profile-copy"><strong>{username}</strong>'
+            f'<span>{role}</span></div></div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("Account & appearance", expanded=False):
+            if st.button("Sign out", use_container_width=True):
+                _logout()
+            st.caption("Change the color theme in ⋮ → Settings.")
+            _render_build_fingerprint()
 
 
 def _render_custom_quant_context(result: dict[str, Any]) -> None:
@@ -12766,13 +12681,13 @@ def _render_cockpit_navigation(profile: dict[str, Any], visible_labels: list[str
     if st.session_state.get(area_key) not in available_areas:
         st.session_state[area_key] = available_areas[0]
 
-    area_col, panel_col = st.columns([1.0, 1.55])
-    with area_col:
-        active_area = st.selectbox(
+    with st.sidebar:
+        st.divider()
+        active_area = st.radio(
             "Workspace area",
             options=available_areas,
             key=area_key,
-            help="Choose a stage of the team's workflow.",
+            label_visibility="collapsed",
         )
 
     panels = [
@@ -12786,28 +12701,14 @@ def _render_cockpit_navigation(profile: dict[str, Any], visible_labels: list[str
             preferred_panel if preferred_panel in panels else panels[0]
         )
 
-    with panel_col:
+    with st.sidebar:
         active_panel = st.selectbox(
             "Active panel",
             options=panels,
             key=panel_key,
-            help="Only the selected panel is loaded, keeping the cockpit focused and fast.",
+            label_visibility="collapsed",
         )
 
-    area_description = COCKPIT_AREA_DESCRIPTIONS.get(active_area, "")
-    panel_description = COCKPIT_PANEL_DESCRIPTIONS.get(active_panel, area_description)
-    st.markdown(
-        (
-            '<div class="wharton-nav-panel">'
-            '<div>'
-            f'<div class="wharton-section-kicker">{escape(active_area)}</div>'
-            f'<strong>{escape(active_panel)}</strong>'
-            f'<span>{escape(panel_description)}</span>'
-            '</div>'
-            '</div>'
-        ),
-        unsafe_allow_html=True,
-    )
     return active_panel
 
 
@@ -13558,16 +13459,12 @@ def _render_ios_rules(profile: Mapping[str, Any]) -> None:
 
 def _render_research_workspace(profile: Mapping[str, Any]) -> None:
     """Expose one lazy research surface instead of four competing top-level pages."""
-    st.markdown("### Research Workspace")
-    st.caption(
-        "Screen first, investigate second, then capture the investable case once in Security Dossiers. "
-        "Choosing a view below does not create a second thesis or approval record."
-    )
     research_view = st.radio(
         "Research view",
         ["Stock Screener", "Company Analysis", "Fixed Income", "Real Assets"],
         horizontal=True,
         key="wharton_research_workspace_view",
+        label_visibility="collapsed",
     )
     if research_view == "Stock Screener":
         _render_stock_screener()
@@ -13681,9 +13578,9 @@ def render_wharton_cockpit() -> None:
     # authenticated cockpit.  Keeping it off the public login route removes a
     # network round trip and table audit from the first interaction.
     init_db()
-    _render_header(profile)
 
     if _is_judge_profile(profile):
+        _render_header(profile)
         _render_judge_view(profile)
         return
 
@@ -13708,6 +13605,7 @@ def render_wharton_cockpit() -> None:
         profile,
         [label for label, _ in tab_renderers],
     )
+    _render_header(profile)
     renderer_by_label[active_panel]()
 
 

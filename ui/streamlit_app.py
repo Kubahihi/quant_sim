@@ -84,50 +84,6 @@ st.set_page_config(
 )
 inject_dashboard_styles()
 
-SIDEBAR_HIDDEN_KEY = "quant_workspace_sidebar_hidden"
-if SIDEBAR_HIDDEN_KEY not in st.session_state:
-    st.session_state[SIDEBAR_HIDDEN_KEY] = False
-
-
-def _set_sidebar_hidden(hidden: bool) -> None:
-    st.session_state[SIDEBAR_HIDDEN_KEY] = hidden
-
-
-if st.session_state[SIDEBAR_HIDDEN_KEY]:
-    st.markdown(
-        """
-        <style>
-        [data-testid="stSidebar"] {
-            display: none !important;
-            width: 0 !important;
-            min-width: 0 !important;
-            max-width: 0 !important;
-        }
-        [data-testid="stMain"] {
-            width: 100vw !important;
-            max-width: 100vw !important;
-            margin-left: 0 !important;
-        }
-        [data-testid="stMainBlockContainer"],
-        .main .block-container {
-            width: 100% !important;
-            max-width: 100% !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    restore_col, _ = st.columns([0.45, 9.55])
-    with restore_col:
-        st.button(
-            "»",
-            key="quant_show_sidebar",
-            help="Open navigation",
-            use_container_width=True,
-            on_click=_set_sidebar_hidden,
-            args=(False,),
-        )
-
 with st.sidebar:
     st.markdown(
         """
@@ -135,87 +91,22 @@ with st.sidebar:
             <div class="qp-brand-mark">QS</div>
             <div class="qp-brand-copy">
                 <strong>Quant Workspace</strong>
-                <span>Portfolio intelligence</span>
+                <span>Research &amp; portfolio</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="qp-eyebrow">Workspace</div>', unsafe_allow_html=True)
     if _JUDGE_SESSION_ACTIVE:
         app_route = "Wharton Cockpit"
-        st.markdown("**Judge View**")
-        st.caption("Read-only competition record")
+        st.caption("Judge View · Read-only competition record")
     else:
-        app_route = st.radio(
+        app_route = st.selectbox(
             "Choose workspace",
             options=["Wharton Cockpit", "Quant Platform"],
             key="quant_sim_workspace_route",
             label_visibility="collapsed",
         )
-    st.button(
-        "Hide navigation",
-        key="quant_hide_sidebar",
-        use_container_width=True,
-        on_click=_set_sidebar_hidden,
-        args=(True,),
-    )
-    st.markdown("---")
-
-    if _JUDGE_SESSION_ACTIVE:
-        # Keep the external evaluation surface visually deterministic and do
-        # not expose workspace display controls beyond navigation visibility.
-        st.session_state["quant_manual_dark_mode"] = False
-        is_dark = False
-    else:
-        is_dark = st.toggle("Dark Mode", key="quant_manual_dark_mode")
-    if is_dark:
-        st.markdown(
-            """
-            <style>
-            [data-testid="stAppViewContainer"], [data-testid="stSidebar"], :root {
-                --background-color: #0f172a !important;
-                --text-color: #e2e8f0 !important;
-                --secondary-background-color: #1e293b !important;
-                --qp-ink: #f8fafc !important;
-                --qp-line: #334155 !important;
-                --qp-card: #1e293b !important;
-                --qp-muted: #94a3b8 !important;
-                --qp-soft: #334155 !important;
-                --qp-navy: #020617 !important;
-                --qp-accent: #0f766e !important;
-                --qp-accent-text: #2dd4bf !important;
-                --qp-accent-soft: rgba(45, 212, 191, 0.15) !important;
-                --qp-shadow: 0 10px 30px rgba(0, 0, 0, 0.4) !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            """
-            <style>
-            [data-testid="stAppViewContainer"], [data-testid="stSidebar"], :root {
-                --background-color: #f8fafc !important;
-                --text-color: #334155 !important;
-                --secondary-background-color: #ffffff !important;
-                --qp-ink: #1e293b !important;
-                --qp-line: #e2e8f0 !important;
-                --qp-card: #ffffff !important;
-                --qp-muted: #64748b !important;
-                --qp-soft: #f1f5f9 !important;
-                --qp-navy: #0f172a !important;
-                --qp-accent: #167d78 !important;
-                --qp-accent-text: #167d78 !important;
-                --qp-accent-soft: #eaf7f5 !important;
-                --qp-shadow: 0 10px 30px rgba(15, 23, 42, 0.05) !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    st.markdown("---")
 
 
 def _render_runtime_diagnostics(*, route: str, stage: str) -> None:
