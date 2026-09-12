@@ -12,8 +12,28 @@ runOnSave = false
 gatherUsageStats = false
 
 [client]
-toolbarMode = "minimal"
+toolbarMode = "viewer"
 
 [theme]
+base = "light"
 primaryColor = "#167d78"
-font = "sans serif"
+font = "sans-serif"
+baseFontSize = 15
+baseRadius = "0.45rem"
+buttonRadius = "0.4rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#167d78"
+backgroundColor = "#f8fafb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#24303d"
+borderColor = "#dce2e7"
+
+[theme.dark]
+primaryColor = "#64b9af"
+backgroundColor = "#151b23"
+secondaryBackgroundColor = "#1d2630"
+textColor = "#dce3eb"
+borderColor = "#34414f"

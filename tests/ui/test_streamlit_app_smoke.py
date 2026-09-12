@@ -271,10 +271,11 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
             "forwardPE": 26.0,
         },
     }
+    enrichment_calls: list[str] = []
     monkeypatch.setattr(
         wharton_dash,
         "_discover_automatic_peers_cached",
-        lambda ticker, target_info, max_peers=6: {
+        lambda ticker, target_info, max_peers=6: enrichment_calls.append("peers") or {
             "available": True,
             "source": "Smoke-test fundamentals",
             "peers": [],
@@ -285,7 +286,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     monkeypatch.setattr(
         wharton_dash,
         "_fetch_ai_dcf_assumptions_cached",
-        lambda ticker, evidence: {"available": False, "source": "smoke_test"},
+        lambda ticker, evidence: enrichment_calls.append("dcf") or {"available": False, "source": "smoke_test"},
     )
     at = AppTest.from_file(str(APP_PATH))
     at.session_state["quant_sim_workspace_route"] = "Wharton Cockpit"
@@ -405,7 +406,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     at.run(timeout=60)
 
     assert len(at.exception) == 0
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     assert area_selector.options == [
         "Home", "Client & Policy", "Research", "Decisions", "Portfolio", "Deliverables"
     ]
@@ -419,7 +420,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     assert "Red Team & AI Audit" in readiness_tabs
     assert "Report & Pitch" in readiness_tabs
 
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     area_selector.set_value("Client & Policy").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     assert panel_selector.options == ["Mandate & Strategy"]
@@ -431,7 +432,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     assert "Thesis Monitor" not in strategy_tab_labels
     assert "Decision Journal" not in strategy_tab_labels
 
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     area_selector.set_value("Research").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     assert panel_selector.options == ["Research Workspace", "Security Dossiers"]
@@ -441,27 +442,82 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     assert len(at.exception) == 0
     assert any("Company Analysis" in item.value for item in at.markdown)
 
-    region_view = next(item for item in at.radio if item.label == "Regional analysis view")
-    assert region_view.options == ["Revenue Exposure", "Macro Drill-down"]
     nested_tab_labels = [tab.label for tab in at.tabs]
-    assert "Industry & Peers" in nested_tab_labels
+    assert nested_tab_labels == ["Overview", "Financials", "Valuation", "Business & risks", "Evidence"]
+    assert enrichment_calls == []
+    assert not any(item.label == "Initial FCFF Growth (%)" for item in at.number_input)
+    assert not any(item.label == "Comparable companies" for item in at.multiselect)
+
+    at.session_state["company_section_tab_MSFT"] = "Business & risks"
+    at.session_state["company_detail_view_MSFT_3"] = "Industry & Peers"
+    at.run(timeout=60)
+    assert len(at.exception) == 0
+    assert enrichment_calls == ["peers"]
+    assert any(item.label == "Comparable companies" for item in at.multiselect)
+    assert any("Automatically selected competitors" in item.value for item in at.markdown)
+    peers = next(item for item in at.multiselect if item.label == "Comparable companies")
+    peers.set_value(["ORCL"]).run(timeout=60)
+
+    at.session_state["company_section_tab_MSFT"] = "Valuation"
+    at.run(timeout=60)
+    assert len(at.exception) == 0
+    assert enrichment_calls == ["peers", "peers", "dcf"]
     assert any(item.label == "Normalized FCFF (billions)" for item in at.number_input)
     assert any(item.label == "Initial FCFF Growth (%)" for item in at.number_input)
     assert any(item.label == "Competitive Fade (years)" for item in at.number_input)
-    assert any(item.label == "Comparable companies" for item in at.multiselect)
     assert any("What Must Be True?" in item.value for item in at.markdown)
-    assert any("Automatically selected competitors" in item.value for item in at.markdown)
 
     growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
     growth_input.set_value(17.0).run(timeout=60)
     growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
     assert growth_input.value == 17.0
 
+    calls_before_overview = list(enrichment_calls)
+    at.session_state["company_section_tab_MSFT"] = "Overview"
+    at.run(timeout=60)
+    assert len(at.exception) == 0
+    assert enrichment_calls == calls_before_overview
+    assert at.session_state["dcf_growth_MSFT"] == 17.0
+    at.session_state["company_section_tab_MSFT"] = "Valuation"
+    at.run(timeout=60)
+    growth_input = next(item for item in at.number_input if item.label == "Initial FCFF Growth (%)")
+    assert growth_input.value == 17.0
+
+    at.session_state["company_section_tab_MSFT"] = "Financials"
+    at.session_state["company_detail_view_MSFT_1"] = "Revenue by Region"
+    at.run(timeout=60)
     region_view = next(item for item in at.radio if item.label == "Regional analysis view")
+    assert region_view.options == ["Revenue Exposure", "Macro Drill-down"]
     region_view.set_value("Macro Drill-down").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Regional Macro Drill-down" in item.value for item in at.markdown)
     assert any(item.label == "Macro resilience (2024)" for item in at.metric)
+
+    for label in (
+        "Evidence & Sources", "Financial Statements", "Management",
+        "Moat, Track Record & Risks", "All Metrics", "Industry & Peers",
+    ):
+        group, subindex = {
+            "Evidence & Sources": ("Evidence", None),
+            "Financial Statements": ("Financials", 1),
+            "Management": ("Business & risks", 3),
+            "Moat, Track Record & Risks": ("Business & risks", 3),
+            "All Metrics": ("Financials", 1),
+            "Industry & Peers": ("Business & risks", 3),
+        }[label]
+        at.session_state["company_section_tab_MSFT"] = group
+        if subindex is not None:
+            at.session_state[f"company_detail_view_MSFT_{subindex}"] = label
+        at.run(timeout=60)
+        assert len(at.exception) == 0, label
+        if label == "Financial Statements":
+            at.session_state["company_financials_tab_MSFT"] = "Quarterly"
+            at.run(timeout=60)
+            assert len(at.exception) == 0
+            assert any("Quarterly Income Statement" in item.value for item in at.markdown)
+    peers = next(item for item in at.multiselect if item.label == "Comparable companies")
+    assert peers.value == ["ORCL"]
+    assert at.session_state["dcf_growth_MSFT"] == 17.0
 
     research_view = next(item for item in at.radio if item.label == "Research view")
     research_view.set_value("Fixed Income").run(timeout=60)
@@ -474,14 +530,14 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     assert len(at.exception) == 0
     assert any("Security Dossiers" in item.value for item in at.markdown)
 
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     area_selector.set_value("Decisions").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     assert panel_selector.options == ["Investment Committee"]
     assert len(at.exception) == 0
     assert any("Investment Committee" in item.value for item in at.markdown)
 
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     area_selector.set_value("Portfolio").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     assert panel_selector.options == ["Portfolio Overview", "WInS & Reconciliation", "Risk & Scenarios"]
@@ -503,7 +559,7 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     assert any("Currency Risk & Hedging" in item.value for item in at.markdown)
     assert any(item.label == "Reporting currency" for item in at.selectbox)
 
-    area_selector = next(item for item in at.selectbox if item.label == "Workspace area")
+    area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     area_selector.set_value("Deliverables").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     assert panel_selector.options == ["Report & Pitch", "Rules & Compliance"]
