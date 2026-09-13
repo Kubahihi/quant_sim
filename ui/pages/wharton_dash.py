@@ -1176,9 +1176,12 @@ def _render_login() -> None:
 
 def _inject_cockpit_styles() -> None:
     # Also support the standalone cockpit entrypoint with the shared theme.
-    from ui.dashboard_shell import inject_dashboard_styles
+    from ui.dashboard_shell import inject_dashboard_styles, render_theme_toggle
 
     inject_dashboard_styles()
+    with st.sidebar:
+        st.divider()
+        render_theme_toggle()
 
 
 # ─── Task Manager ─────────────────────────────────────────────────────────────
