@@ -50,8 +50,13 @@ h2 { font-size: 1.4rem !important; }
 h3 { font-size: 1.15rem !important; }
 h4 { font-size: 1.02rem !important; }
 h5, h6 { font-size: 0.95rem !important; }
-[data-testid="stCaptionContainer"] { color: var(--qp-muted); }
-p, label, [data-testid="stMarkdownContainer"], [data-testid="stWidgetLabel"] { color: var(--qp-ink); }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+    color: var(--qp-muted) !important; opacity: 1 !important;
+}
+p, label, [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
+[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
+    color: var(--qp-ink) !important; opacity: 1 !important;
+}
 hr { border-color: var(--qp-line); margin: 0.65rem 0 !important; }
 
 .qp-brand { display: flex; align-items: center; gap: 0.65rem; padding: 0.2rem 0 0.6rem; }
@@ -192,7 +197,10 @@ div[data-testid="stAlert"] { border-radius: 6px; }
 
 [data-testid="stCheckbox"] label, [data-testid="stRadio"] label,
 [data-testid="stToggle"] label, [data-testid="stSlider"] label { color: var(--qp-ink) !important; }
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: var(--qp-ink) !important; }
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary *,
+[data-testid="stExpander"] summary p, [data-testid="stExpander"] summary span {
+    color: var(--qp-ink) !important; opacity: 1 !important;
+}
 [data-testid="stCodeBlock"], pre, code { background: var(--qp-input) !important; color: var(--qp-ink) !important; }
 
 .wharton-profile-strip { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0; }
