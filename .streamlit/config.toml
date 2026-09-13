@@ -23,17 +23,22 @@ baseRadius = "0.45rem"
 buttonRadius = "0.4rem"
 showWidgetBorder = true
 showSidebarBorder = true
+# Shared mid-tone series colors have >=3:1 contrast on both chart backgrounds.
+# Streamlit 1.58 supports this option at theme level, not theme.light/theme.dark.
+chartCategoricalColors = ["#0f8a80", "#3b82f6", "#a06cd5", "#c67916", "#e14d72", "#6d8d25"]
 
 [theme.light]
-primaryColor = "#167d78"
+primaryColor = "#0f766e"
 backgroundColor = "#f8fafb"
 secondaryBackgroundColor = "#ffffff"
-textColor = "#24303d"
-borderColor = "#dce2e7"
+textColor = "#17212b"
+borderColor = "#cbd5df"
+linkColor = "#0f766e"
 
 [theme.dark]
-primaryColor = "#64b9af"
-backgroundColor = "#151b23"
-secondaryBackgroundColor = "#1d2630"
-textColor = "#dce3eb"
-borderColor = "#34414f"
+primaryColor = "#167d78"
+backgroundColor = "#111827"
+secondaryBackgroundColor = "#182230"
+textColor = "#f1f5f9"
+borderColor = "#3a4a5d"
+linkColor = "#69d2c4"

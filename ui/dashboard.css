@@ -1,13 +1,8 @@
-/* Colors follow Streamlit's active theme, including native tables and charts. */
-:root, [data-testid="stApp"], [data-testid="stSidebar"] {
-    --qp-ink: var(--text-color, #24303d);
-    --qp-muted: color-mix(in srgb, var(--text-color, #24303d) 72%, var(--background-color, #f8fafb));
-    --qp-line: color-mix(in srgb, var(--text-color, #24303d) 15%, var(--background-color, #f8fafb));
-    --qp-card: var(--secondary-background-color, #ffffff);
-    --qp-soft: color-mix(in srgb, var(--text-color, #24303d) 5%, var(--background-color, #f8fafb));
-    --qp-accent: var(--primary-color, #167d78);
-    --qp-accent-text: var(--primary-color, #167d78);
-    --qp-accent-soft: color-mix(in srgb, var(--primary-color, #167d78) 9%, var(--background-color, #f8fafb));
+:root {
+    --qp-ink: var(--qp-text);
+    --qp-line: var(--qp-border);
+    --qp-card: var(--qp-surface);
+    --qp-soft: var(--qp-surface);
     --qp-radius: 7px;
     --qp-shadow: none;
 }
@@ -16,14 +11,6 @@
     max-width: 1480px;
     padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 2.25rem 4rem;
 }
-[data-testid="stHeader"] { background: var(--background-color); }
-[data-testid="stAppViewContainer"], [data-testid="stSidebar"], [data-testid="stHeader"],
-[data-testid="stBottomBlockContainer"] {
-    background-color: var(--qp-background) !important;
-    color: var(--qp-ink) !important;
-}
-[data-testid="stSidebar"] > div:first-child { background-color: var(--qp-background) !important; }
-[data-testid="stAppViewContainer"] > .main { background-color: var(--qp-background) !important; }
 [data-testid="stSidebar"][aria-expanded="true"] {
     min-width: 248px;
     max-width: 248px;
@@ -44,18 +31,14 @@
 [data-testid="stSidebarNav"] { display: none; }
 [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.65rem; }
 
-h1, h2, h3, h4, h5, h6 { color: var(--qp-ink) !important; letter-spacing: -0.025em; }
+h1, h2, h3, h4, h5, h6 { letter-spacing: -0.025em; }
 h1 { font-size: 1.8rem !important; }
 h2 { font-size: 1.4rem !important; }
 h3 { font-size: 1.15rem !important; }
 h4 { font-size: 1.02rem !important; }
 h5, h6 { font-size: 0.95rem !important; }
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
-    color: var(--qp-muted) !important; opacity: 1 !important;
-}
-p, label, [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
-[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
-    color: var(--qp-ink) !important; opacity: 1 !important;
+    color: var(--qp-muted);
 }
 hr { border-color: var(--qp-line); margin: 0.65rem 0 !important; }
 
@@ -85,10 +68,10 @@ hr { border-color: var(--qp-line); margin: 0.65rem 0 !important; }
 }
 .st-key-wharton_active_area_v2 label:has(input:checked),
 .st-key-wharton_active_panel_v2 label:has(input:checked) {
-    background: var(--qp-accent-soft); border-left-color: var(--qp-accent);
+    background: var(--qp-accent-soft); border-left-color: var(--qp-accent-ink);
 }
 .st-key-wharton_active_area_v2 label:has(input:checked) p,
-.st-key-wharton_active_panel_v2 label:has(input:checked) p { color: var(--qp-accent); font-weight: 600; }
+.st-key-wharton_active_panel_v2 label:has(input:checked) p { color: var(--qp-accent-ink); font-weight: 600; }
 .st-key-wharton_active_area_v2 label:hover,
 .st-key-wharton_active_panel_v2 label:hover { background: var(--qp-soft); }
 .st-key-wharton_active_area_v2 label:focus-within,
@@ -101,9 +84,9 @@ hr { border-color: var(--qp-line); margin: 0.65rem 0 !important; }
     padding: 0.3rem 0.6rem; margin: 0; border-bottom: 2px solid transparent;
 }
 .st-key-wharton_research_workspace_view label:has(input:checked),
-[class*="st-key-company_detail_view_"] label:has(input:checked) { border-bottom-color: var(--qp-accent); }
+[class*="st-key-company_detail_view_"] label:has(input:checked) { border-bottom-color: var(--qp-accent-ink); }
 .st-key-wharton_research_workspace_view label:has(input:checked) p,
-[class*="st-key-company_detail_view_"] label:has(input:checked) p { color: var(--qp-accent); }
+[class*="st-key-company_detail_view_"] label:has(input:checked) p { color: var(--qp-accent-ink); }
 .st-key-wharton_research_workspace_view label:focus-within,
 [class*="st-key-company_detail_view_"] label:focus-within { outline: 2px solid var(--qp-accent); outline-offset: 2px; }
 
@@ -133,76 +116,8 @@ div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
     [class*="st-key-metric_grid_6_"] [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-div[data-testid="stForm"], div[data-testid="stExpander"],
-div[data-testid="stDataFrame"], div[data-testid="stPlotlyChart"],
-div[data-testid="stVegaLiteChart"] {
-    border-radius: var(--qp-radius); border-color: var(--qp-line); background: var(--qp-card);
-}
-div[data-testid="stDataFrame"] { color: var(--qp-ink) !important; }
-div[data-testid="stDataFrame"] [role="grid"], div[data-testid="stDataFrame"] canvas {
-    background: var(--qp-card) !important;
-}
-
-/* Native controls do not inherit every custom Streamlit theme variable after
-   a runtime palette switch, so give controls explicit, high-contrast colors. */
-.stTextInput input, .stTextArea textarea, .stNumberInput input,
-.stDateInput input, [data-baseweb="input"] input, [data-baseweb="textarea"] textarea,
-[data-baseweb="select"] > div, [data-baseweb="base-input"] {
-    color: var(--qp-ink) !important;
-    background-color: var(--qp-input) !important;
-    border-color: var(--qp-line) !important;
-}
-.stTextInput input::placeholder, .stTextArea textarea::placeholder,
-.stNumberInput input::placeholder { color: var(--qp-muted) !important; opacity: 1; }
-[data-baseweb="select"] *, [data-baseweb="input"] *, [data-baseweb="textarea"] * { color: inherit; }
-[data-baseweb="popover"], [role="listbox"], [data-baseweb="menu"] {
-    background: var(--qp-card) !important; color: var(--qp-ink) !important;
-}
-[role="listbox"] [role="option"], [data-baseweb="menu"] [role="option"] {
-    background: var(--qp-card) !important; color: var(--qp-ink) !important;
-}
-[role="option"]:hover, [role="option"][aria-selected="true"] {
-    background: var(--qp-accent-soft) !important; color: var(--qp-ink) !important;
-}
-.stButton button, .stDownloadButton button, .stFormSubmitButton button, .stLinkButton a {
-    border-radius: 6px; box-shadow: none !important; font-weight: 600;
-    color: var(--qp-ink) !important; background: var(--qp-card) !important;
-    border-color: var(--qp-line) !important;
-    transition: background-color 120ms ease, border-color 120ms ease;
-}
-.stButton button :is(p, span), .stDownloadButton button :is(p, span),
-.stFormSubmitButton button :is(p, span), .stLinkButton a :is(p, span) { color: inherit !important; }
-button[kind="primary"], button[kind="primaryFormSubmit"],
-button[data-testid="stBaseButton-primary"], button[data-testid="stBaseButton-primaryFormSubmit"] {
-    background: var(--qp-accent) !important; border-color: var(--qp-accent) !important;
-    color: var(--qp-accent-text) !important;
-}
-.stButton button:hover, .stDownloadButton button:hover, .stFormSubmitButton button:hover, .stLinkButton a:hover {
-    transform: none; box-shadow: none; background: var(--qp-accent-soft) !important;
-    border-color: var(--qp-accent) !important; color: var(--qp-ink) !important;
-}
-button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover,
-button[data-testid="stBaseButton-primary"]:hover, button[data-testid="stBaseButton-primaryFormSubmit"]:hover {
-    background: var(--qp-accent-hover) !important; border-color: var(--qp-accent-hover) !important;
-    color: var(--qp-accent-text) !important;
-}
-.stButton button:focus-visible, .stDownloadButton button:focus-visible,
-.stFormSubmitButton button:focus-visible, .stLinkButton a:focus-visible {
-    outline: 2px solid var(--qp-accent); outline-offset: 3px;
-}
-div[data-testid="stTabs"] [data-baseweb="tab-list"] { gap: 0.15rem; border-bottom: 1px solid var(--qp-line); }
-div[data-testid="stTabs"] button[data-baseweb="tab"] { padding: 0.6rem 0.85rem; white-space: nowrap; font-weight: 500; color: var(--qp-muted); }
-div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] { color: var(--qp-accent); }
-div[data-testid="stAlert"] { border-radius: 6px; }
-
-[data-testid="stCheckbox"] label, [data-testid="stRadio"] label,
-[data-testid="stToggle"] label, [data-testid="stSlider"] label { color: var(--qp-ink) !important; }
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary *,
-[data-testid="stExpander"] summary p, [data-testid="stExpander"] summary span {
-    color: var(--qp-ink) !important; opacity: 1 !important;
-}
-[data-testid="stCodeBlock"], pre, code { background: var(--qp-input) !important; color: var(--qp-ink) !important; }
-
+/* Native widgets, menus, tables and charts use Streamlit's real theme.
+   Do not add global p/label/button/input colors or --gdg canvas overrides here. */
 .wharton-profile-strip { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0; }
 .wharton-profile-avatar {
     display: grid; place-items: center; width: 1.85rem; height: 1.85rem; flex: 0 0 1.85rem;
@@ -235,7 +150,7 @@ div[data-testid="stAlert"] { border-radius: 6px; }
 .wharton-nav-panel span { color: var(--qp-muted); }
 .qp-workflow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.2rem; margin-bottom: 1.25rem; }
 .qp-workflow-card { padding: 1rem 0; border-top: 1px solid var(--qp-line); }
-.qp-workflow-card span { color: var(--qp-accent); font-size: 0.8rem; }
+.qp-workflow-card span { color: var(--qp-accent-ink); font-size: 0.8rem; }
 .qp-workflow-card strong { display: block; margin: 0.35rem 0; }
 .qp-workflow-card p { color: var(--qp-muted); font-size: 0.85rem; }
 .qp-page-nav-header { display: flex; justify-content: space-between; gap: 1rem; margin: 1rem 0 0.6rem; }

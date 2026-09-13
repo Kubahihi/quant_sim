@@ -284,6 +284,7 @@ def test_compact_artifacts_render_in_baseline_and_advanced_views(monkeypatch) ->
     }
     streamlit_stub = StreamlitStub()
     monkeypatch.setattr(wharton_dash, "st", streamlit_stub)
+    monkeypatch.setattr(wharton_dash, "render_plotly_chart", streamlit_stub.plotly_chart)
 
     wharton_dash._render_monte_carlo(result)
     wharton_dash._render_advanced_monte_carlo(result)

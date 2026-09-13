@@ -32,7 +32,10 @@ for module_name, module_obj in list(sys.modules.items()):
     if not resolved.startswith(PROJECT_ROOT):
         sys.modules.pop(module_name, None)
 
-from ui.dashboard_shell import inject_dashboard_styles, render_theme_toggle
+from ui.dashboard_shell import (
+    inject_dashboard_styles, render_theme_toggle, render_plotly_chart,
+    render_matplotlib_chart, semantic_cell_style,
+)
 from src.utils.environment import resolve_environment
 from ui.runtime_diagnostics import (
     PerformanceTrace,
@@ -102,8 +105,9 @@ with st.sidebar:
         key="quant_sim_workspace_route",
         label_visibility="collapsed",
     )
-    st.divider()
-    render_theme_toggle()
+    if app_route == "Quant Platform":
+        st.divider()
+        render_theme_toggle()
 
 
 def _render_runtime_diagnostics(*, route: str, stage: str) -> None:
@@ -3021,7 +3025,7 @@ def _render_swing_tracker_tab() -> None:
 
             def _highlight_overdue(row: pd.Series) -> list[str]:
                 if str(row.get("Status", "")).lower() == "overdue":
-                    return ["background-color: #ffe6e6"] * len(row)
+                    return [semantic_cell_style("danger")] * len(row)
                 return [""] * len(row)
 
             st.dataframe(
@@ -3679,7 +3683,7 @@ def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
     _render_dashboard_note("Decision brief", cockpit_message)
 
     st.markdown("### Crisis Atlas")
-    st.plotly_chart(
+    render_plotly_chart(
         plot_scenario_atlas(summary_rows, highlight_scenario=selected_name),
         use_container_width=True,
     )
@@ -3731,7 +3735,7 @@ def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
     cockpit_tabs = st.tabs(["Playback", "Shock Map", "Fingerprint", "Impact Board"])
     with cockpit_tabs[0]:
         st.caption("Press Play to replay the path like a mini crisis filmstrip.")
-        st.plotly_chart(
+        render_plotly_chart(
             plot_crisis_playback(
                 scenario_name=selected_name,
                 baseline_path=selected_scenario["baseline_path"],
@@ -3740,7 +3744,7 @@ def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
             ),
             use_container_width=True,
         )
-        st.plotly_chart(
+        render_plotly_chart(
             plot_phase_timeline(selected_name, selected_scenario["phase_table"]),
             use_container_width=True,
         )
@@ -3748,7 +3752,7 @@ def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
     with cockpit_tabs[1]:
         shock_col, phase_col = st.columns([1.2, 1.0])
         with shock_col:
-            st.plotly_chart(
+            render_plotly_chart(
                 plot_scenario_shock_map(
                     selected_scenario["shock_map"],
                     title=f"{selected_name} Shock Map",
@@ -3771,7 +3775,7 @@ def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
     with cockpit_tabs[2]:
         fingerprint_col, role_col = st.columns([1.0, 1.0])
         with fingerprint_col:
-            st.plotly_chart(
+            render_plotly_chart(
                 plot_scenario_fingerprint(
                     scenario_name=selected_name,
                     stressed_stats=selected_scenario["stressed_stats"],
@@ -3794,7 +3798,7 @@ def _render_decision_cockpit_page(analysis_result: Dict[str, Any]) -> None:
     with cockpit_tabs[3]:
         impact_col, asset_col = st.columns([1.1, 0.9])
         with impact_col:
-            st.plotly_chart(
+            render_plotly_chart(
                 plot_asset_stress_impact(selected_scenario["asset_impact_proxy"]),
                 use_container_width=True,
             )
@@ -4017,10 +4021,10 @@ def _render_analysis_lab_page(analysis_result: Dict[str, Any], show_raw_tables: 
 
                 def _sentiment_color_style(value: Any) -> str:
                     if value == "green":
-                        return "background-color: #d5f5e3; color: #1e8449;"
+                        return semantic_cell_style("success")
                     if value == "red":
-                        return "background-color: #fadbd8; color: #922b21;"
-                    return "background-color: #fcf3cf; color: #7d6608;"
+                        return semantic_cell_style("danger")
+                    return semantic_cell_style("warning")
 
                 styled = news_df.style.map(_sentiment_color_style, subset=["Sentiment Color"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -4126,17 +4130,17 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
             pd.DataFrame({"Portfolio": portfolio_returns}),
             title="Portfolio Cumulative Return",
         )
-        st.pyplot(portfolio_cumulative_fig)
+        render_matplotlib_chart(portfolio_cumulative_fig)
 
         asset_cumulative_fig = plot_cumulative_returns(returns, title="Asset Cumulative Returns")
         with st.expander("Show cumulative returns for individual assets", expanded=False):
-            st.pyplot(asset_cumulative_fig)
+            render_matplotlib_chart(asset_cumulative_fig)
 
         drawdown_fig = plot_drawdown(portfolio_returns, title="Portfolio Drawdown")
-        st.pyplot(drawdown_fig)
+        render_matplotlib_chart(drawdown_fig)
 
         corr_fig = plot_correlation_heatmap(corr_matrix, title="Correlation Matrix")
-        st.pyplot(corr_fig)
+        render_matplotlib_chart(corr_fig)
         st.dataframe(corr_matrix.round(3), use_container_width=True)
 
         benchmark_symbol = str(benchmark_metrics.get("benchmark_ticker", "") or "")
@@ -4259,7 +4263,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
         with opt_tabs[3]:
             if frontier:
                 frontier_fig = plot_efficient_frontier(frontier, title="Efficient Frontier")
-                st.pyplot(frontier_fig)
+                render_matplotlib_chart(frontier_fig)
             else:
                 st.warning("No efficient frontier points were generated.")
 
@@ -4270,7 +4274,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
                     frontier_points=frontier,
                     highlighted_portfolios=analysis_result["highlighted_portfolios"],
                 )
-                st.plotly_chart(tradeoff_fig, use_container_width=True)
+                render_plotly_chart(tradeoff_fig, use_container_width=True)
             except Exception as exc:
                 st.warning(f"3D portfolio view unavailable: {exc}")
 
@@ -4321,7 +4325,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
             monte_carlo_fig = plot_monte_carlo_fan(
                 percentile_frame=simulation_grid,
             )
-            st.pyplot(monte_carlo_fig)
+            render_matplotlib_chart(monte_carlo_fig)
         else:
             st.warning("Simulation percentile paths are unavailable.")
 
@@ -4332,7 +4336,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
             surface_fig = plot_monte_carlo_percentile_surface(
                 percentile_frame=simulation_grid,
             )
-            st.plotly_chart(surface_fig, use_container_width=True)
+            render_plotly_chart(surface_fig, use_container_width=True)
         except Exception as exc:
             st.warning(f"3D scenario surface unavailable: {exc}")
 
@@ -4354,7 +4358,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
                     title="Merton Jump Diffusion Fan",
                     percentile_frame=adv_simulation_grid,
                 )
-                st.pyplot(adv_monte_carlo_fig)
+                render_matplotlib_chart(adv_monte_carlo_fig)
             else:
                 st.warning("Advanced simulation percentile paths are unavailable.")
             
@@ -4364,7 +4368,7 @@ def _render_portfolio_lab_page(analysis_result: Dict[str, Any]) -> None:
                 adv_surface_fig = plot_monte_carlo_percentile_surface(
                     percentile_frame=adv_simulation_grid,
                 )
-                st.plotly_chart(adv_surface_fig, use_container_width=True)
+                render_plotly_chart(adv_surface_fig, use_container_width=True)
             except Exception as exc:
                 st.warning(f"3D scenario surface unavailable: {exc}")
         else:
