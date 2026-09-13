@@ -32,7 +32,7 @@ for module_name, module_obj in list(sys.modules.items()):
     if not resolved.startswith(PROJECT_ROOT):
         sys.modules.pop(module_name, None)
 
-from ui.dashboard_shell import inject_dashboard_styles
+from ui.dashboard_shell import inject_dashboard_styles, render_theme_toggle
 from src.utils.environment import resolve_environment
 from ui.runtime_diagnostics import (
     PerformanceTrace,
@@ -102,6 +102,8 @@ with st.sidebar:
         key="quant_sim_workspace_route",
         label_visibility="collapsed",
     )
+    st.divider()
+    render_theme_toggle()
 
 
 def _render_runtime_diagnostics(*, route: str, stage: str) -> None:

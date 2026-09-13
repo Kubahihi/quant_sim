@@ -62,7 +62,7 @@ if (
     st.stop()
 
 
-from ui.dashboard_shell import inject_dashboard_styles
+from ui.dashboard_shell import inject_dashboard_styles, render_theme_toggle
 from ui.runtime_diagnostics import (
     PerformanceTrace,
     append_trace_history,
@@ -107,6 +107,8 @@ with st.sidebar:
             key="quant_sim_workspace_route",
             label_visibility="collapsed",
         )
+    st.divider()
+    render_theme_toggle()
 
 
 def _render_runtime_diagnostics(*, route: str, stage: str) -> None:
