@@ -153,6 +153,9 @@ div[data-testid="stDataFrame"] [role="grid"], div[data-testid="stDataFrame"] can
 [data-baseweb="popover"], [role="listbox"], [data-baseweb="menu"] {
     background: var(--qp-card) !important; color: var(--qp-ink) !important;
 }
+[role="listbox"] [role="option"], [data-baseweb="menu"] [role="option"] {
+    background: var(--qp-card) !important; color: var(--qp-ink) !important;
+}
 [role="option"]:hover, [role="option"][aria-selected="true"] {
     background: var(--qp-accent-soft) !important; color: var(--qp-ink) !important;
 }
