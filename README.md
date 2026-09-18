@@ -3,6 +3,7 @@
 ![Lines of Code](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.codetabs.com%2Fv1%2Floc%3Fgithub%3DKubahihi%2Fquant_sim&query=%240.linesOfCode&label=Lines%20of%20Code&color=blue)
 
 Streamlit aplikace pro vyhodnoceni investicniho portfolia:
+- Laura Gao Plan pro zadání Wharton 2026–2027: pevné vklady a deset provozních plateb, rezerva a flexibilita, společná úspěšnost financování, podmíněné rozpětí pro rok 2031 a kontroly odevzdání; [posouzení mezer a metodika](docs/LAURA_GAO_CASE.md)
 - validace tickeru a vah
 - nacitani trznich dat z Yahoo Finance
 - metriky, score, flagy a rizikovy rozbor

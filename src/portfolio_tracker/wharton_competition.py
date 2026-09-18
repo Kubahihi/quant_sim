@@ -153,14 +153,14 @@ def evaluate_compliance(
         {
             "status": "pending",
             "rule": "2026-2027 trading limits and approved-security lists",
-            "detail": "Wharton currently says 'More information coming soon.' This check will remain pending instead of applying last year's limits.",
+            "detail": "Trading requirements are distributed through SurveyMonkey Apply. A verified current trading-rule and approved-security snapshot is still required; the client assessment does not establish eligibility.",
         }
     )
     checks.append(
         {
             "status": "pending",
-            "rule": "2026-2027 case study and deliverable details",
-            "detail": "The new case objectives, deadlines, and detailed deliverable requirements have not yet been published on the official competition pages.",
+            "rule": "Final Report instructions and school documentation template",
+            "detail": "Laura Gao case inputs, Trading Notes and IPS requirements are available from the supplied 17 September assessment. Final Report instructions are expected 9 November 2026; verify its format and the separate school-documentation template when supplied.",
         }
     )
     return checks

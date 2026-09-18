@@ -158,7 +158,7 @@ CURRENCY_RISK_KEY = "wharton_currency_risk_v1"
 LIVE_PORTFOLIO_ANALYTICS_KEY = "wharton_live_portfolio_analytics_v1"
 COCKPIT_AREAS = {
     "Home": ("Overview & Tasks", "Competition Readiness"),
-    "Client & Policy": ("Mandate & Strategy",),
+    "Client & Policy": ("Laura Gao Plan", "Mandate & Strategy"),
     "Research": ("Research Workspace", "Security Dossiers"),
     "Decisions": ("Investment Committee",),
     "Portfolio": ("Portfolio Overview", "WInS & Reconciliation", "Risk & Scenarios"),
@@ -177,6 +177,7 @@ COCKPIT_AREA_DESCRIPTIONS = {
 COCKPIT_PANEL_DESCRIPTIONS = {
     "Overview & Tasks": "Start here for one clear next action, ownership, blockers, and deadlines.",
     "Competition Readiness": "Close strategy, evidence, governance, report, and pitch gaps before submission.",
+    "Laura Gao Plan": "Apply the client case, test all ten operating payments, and prepare the 2031 contribution range.",
     "Mandate & Strategy": "Maintain the client mandate, behavioral guardrails, strategy rulebook, and alignment in one place.",
     "Research Workspace": "Move from screening to equity, fixed-income, or real-asset research without duplicating dossiers.",
     "Security Dossiers": "Maintain the single canonical investment case and monitoring record per security; no voting happens here.",
@@ -6199,9 +6200,13 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
     st.markdown("#### Client Mandate")
     st.caption(
         "Translate the case study into measurable goals, horizons, liquidity needs, risk tolerance, and constraints. "
-        "These fields are analyst inputs until Wharton publishes the 2026–2027 client case."
+        "Laura Gao's fixed case inputs and dated cash flows are available in Client & Policy → Laura Gao Plan."
     )
-    st.info("The official 2026–2027 client case is still pending. Save assumptions explicitly and replace them when it is released.")
+    st.info(
+        "The supplied 2026–2027 case requires two future deposits (300,000 USD in 2027 and 150,000 USD in 2028), "
+        "then ten 50,000 USD beginning-of-year payments in 2033–2042. Use Laura Gao Plan for the reserve, "
+        "facility contribution and conditional 2031 partner range. Risk limits and allocation remain team choices."
+    )
 
     current_goals = current.get("goals", []) if isinstance(current.get("goals"), list) else []
     current_constraints = current.get("values_constraints", {}) if isinstance(current.get("values_constraints"), dict) else {}
@@ -6474,6 +6479,7 @@ def _render_client_mandate(profile: dict[str, str | int], record: dict[str, Any]
                 "values_constraints_text": values_constraints.strip(),
                 "behavioral_profile": current.get("behavioral_profile", {}),
                 "field_provenance": field_provenance,
+                "laura_case": current.get("laura_case", {}),
             })
             with get_connection() as conn:
                 save_client_mandate(conn, payload, updated_by=str(profile["username"]))
@@ -8193,6 +8199,12 @@ def _render_review_learning(profile: dict[str, str | int], data: dict[str, Any])
                 st.write(f"• {lesson}")
 
 
+def _render_laura_client_plan(profile: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    from ui.laura_plan import render_laura_plan
+
+    render_laura_plan(profile, result, get_connection)
+
+
 def _render_strategy_workspace(profile: dict[str, str | int], result: dict) -> None:
     st.markdown("### Mandate & Strategy")
     st.caption(
@@ -8688,14 +8700,15 @@ def _render_competition_rules(profile: dict[str, str | int]) -> None:
     source_col.link_button("Official 2026–2027 Rules", OFFICIAL_RULES_URL, use_container_width=True)
     overview_col.link_button("Official Competition Overview", COMPETITION_URL, use_container_width=True)
     st.info(
-        "**Currently published assignment:** build a long-term investment strategy for the client and "
-        "manage USD 500,000 of virtual capital in WInS over 10 weeks. The competition evaluates the "
-        "quality and explanation of the strategy, not simply the highest return."
+        "**2026–2027 client: Laura Gao.** Build a plan from 300,000 USD in 2027 and 150,000 USD in 2028, "
+        "fund all ten 50,000 USD operating payments in 2033–2042, then determine an affordable facility "
+        "contribution and a credible 2031 partner range. The 500,000 USD virtual WInS account is separate. "
+        "Open Laura Gao Plan for the cash-flow model and submission deadlines."
     )
     st.warning(
-        "Wharton currently marks the 2026–2027 trading rules as ‘More information coming soon.’ "
-        "The new client case and detailed deliverables have not been published either. These checks "
-        "therefore remain yellow instead of relying on outdated requirements."
+        "Case and deliverable requirements were supplied in the assessment dated 17 September 2026. "
+        "Detailed trading rules and approved-security evidence still need a verified SurveyMonkey Apply "
+        "source. Final Report formatting and the school-documentation template remain to be confirmed."
     )
 
     current = _fetch_competition_settings()
@@ -10442,6 +10455,10 @@ def _render_goal_funding_outlook(result: Mapping[str, Any], current_portfolio_va
     ]
 
     st.markdown("#### Client Goal Outlook")
+    st.info(
+        "Laura Gao's operating obligation needs the dated multi-stage model in Client & Policy → Laura Gao Plan. "
+        "This generic terminal-goal view does not demonstrate that all ten operating payments are funded."
+    )
     if not configured_goals:
         st.info(
             "Add a target amount, horizon, and cash-flow plan in Client & Policy → Mandate & Strategy "
@@ -12652,7 +12669,7 @@ def _render_header(profile: dict[str, str | int]) -> None:
         with st.expander("Account & appearance", expanded=False):
             if st.button("Sign out", use_container_width=True):
                 _logout()
-            st.caption("Change the color theme in ⋮ → Settings.")
+            st.caption("Change the color theme in ⋮ → Theme.")
             _render_build_fingerprint()
 
 
@@ -13541,12 +13558,20 @@ def _render_report_pitch_workspace(profile: Mapping[str, Any]) -> None:
     st.caption("Workflow 5/5 · Reuse governed evidence and reconciled results in both the report and oral defense.")
     deliverable_view = st.radio(
         "Deliverable view",
-        ["Report Evidence Studio", "Q&A Rehearsal"],
+        ["Report Evidence Studio", "Submission Drafts", "Q&A Rehearsal"],
         horizontal=True,
         key="wharton_report_pitch_view",
     )
     if deliverable_view == "Report Evidence Studio":
         _render_ios_report_studio(profile)
+    elif deliverable_view == "Submission Drafts":
+        from src.portfolio_tracker.strategy_store import load_client_mandate
+        from ui.laura_plan import render_deliverables
+
+        with get_connection() as conn:
+            record = load_client_mandate(conn)
+        saved = ((record or {}).get("payload") or {}).get("laura_case") or {}
+        render_deliverables(profile, get_connection, saved.get("deliverables") or {})
     else:
         _render_ios_qa(profile)
 
@@ -13590,6 +13615,7 @@ def render_wharton_cockpit() -> None:
     tab_renderers = [
         ("Overview & Tasks", lambda: _render_overview_action_center(profile)),
         ("Competition Readiness", lambda: _render_competition_readiness(profile)),
+        ("Laura Gao Plan", lambda: _render_laura_client_plan(profile, result)),
         ("Mandate & Strategy", lambda: _render_strategy_workspace(profile, result)),
         ("Research Workspace", lambda: _render_research_workspace(profile)),
         ("Security Dossiers", lambda: _render_ios_security_dossiers(profile)),

@@ -2164,6 +2164,7 @@ def render_report_evidence_studio(
         freeze_report,
         record_report_approval,
         register_report_evidence,
+        register_client_plan_evidence,
         register_report_figure,
         set_performance_attribution,
         set_report_portfolio_snapshot,
@@ -2178,10 +2179,13 @@ def render_report_evidence_studio(
     members = _team_names(team_members)
     st.markdown("### Report Evidence Studio")
     st.caption(
-        "Build the mid-project and final deliverables from linked claims, evidence, figures, decisions, "
-        "performance attribution, and one reconciled as-of portfolio snapshot."
+        "Build working reports from linked claims, evidence, figures, decisions, performance attribution, "
+        "and one reconciled portfolio snapshot. Trading Notes and IPS drafts are in Submission Drafts. "
+        "The page budgets here are team planning templates, not official 2026–2027 limits. "
+        "Final Report formatting is expected on 9 November 2026."
     )
-    report_type = st.radio("Workspace", ["mid_project", "final"], horizontal=True)
+    report_type = st.radio("Workspace", ["mid_project", "final"], horizontal=True,
+                          format_func=lambda value: "Internal progress report" if value == "mid_project" else "Final Report working draft")
     workspace, version = _current_document(
         get_connection, "report_workspace", report_type
     )
@@ -2190,7 +2194,7 @@ def render_report_evidence_studio(
         with st.form(f"ios_create_report_{report_type}"):
             title = st.text_input(
                 "Report title",
-                value="Wharton Mid-Project Report" if report_type == "mid_project" else "Wharton Final Report",
+                value="Internal Progress Report" if report_type == "mid_project" else "Wharton Final Report",
             )
             page_budget = st.number_input(
                 "Total page budget", min_value=1.0,
@@ -2284,6 +2288,20 @@ def render_report_evidence_studio(
         ]), hide_index=True, use_container_width=True)
 
     with evidence_tab:
+        mandate_record = dict((strategy_data or {}).get("mandate_record") or {})
+        mandate_payload = dict(mandate_record.get("payload") or {})
+        client_planning = (mandate_payload.get("laura_case") or {}).get("planning") or {}
+        if client_planning.get("last_run"):
+            with st.expander("Review saved Laura Gao calculation for report evidence"):
+                st.json(client_planning["last_run"])
+                st.caption("This stores an immutable model-output snapshot in this report. Add evidence-backed claims after reviewing its inputs and limitations.")
+                if st.button("Attach reviewed client funding calculation", disabled=workspace["status"] != "draft"):
+                    try:
+                        revised = register_client_plan_evidence(workspace, client_planning, verified_by=actor)
+                    except ValueError as exc:
+                        st.warning(str(exc))
+                    else:
+                        save(revised, "Client funding calculation attached to report evidence.")
         left, right = st.columns(2)
         with left:
             st.markdown("#### Attach verified registry evidence")

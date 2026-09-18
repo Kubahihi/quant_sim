@@ -1,13 +1,14 @@
-/* Colors follow Streamlit's active theme, including native tables and charts. */
+/* Streamlit sets color-scheme on stApp when the user changes the native theme. */
 :root, [data-testid="stApp"], [data-testid="stSidebar"] {
-    --qp-ink: var(--text-color, #24303d);
-    --qp-muted: color-mix(in srgb, var(--text-color, #24303d) 72%, var(--background-color, #f8fafb));
-    --qp-line: color-mix(in srgb, var(--text-color, #24303d) 15%, var(--background-color, #f8fafb));
-    --qp-card: var(--secondary-background-color, #ffffff);
-    --qp-soft: color-mix(in srgb, var(--text-color, #24303d) 5%, var(--background-color, #f8fafb));
-    --qp-accent: var(--primary-color, #167d78);
-    --qp-accent-text: var(--primary-color, #167d78);
-    --qp-accent-soft: color-mix(in srgb, var(--primary-color, #167d78) 9%, var(--background-color, #f8fafb));
+    --qp-ink: light-dark(#24303d, #dce3eb);
+    --qp-background: light-dark(#f8fafb, #151b23);
+    --qp-muted: color-mix(in srgb, var(--qp-ink) 72%, var(--qp-background));
+    --qp-line: color-mix(in srgb, var(--qp-ink) 15%, var(--qp-background));
+    --qp-card: light-dark(#ffffff, #1d2630);
+    --qp-soft: color-mix(in srgb, var(--qp-ink) 5%, var(--qp-background));
+    --qp-accent: light-dark(#167d78, #64b9af);
+    --qp-accent-text: var(--qp-accent);
+    --qp-accent-soft: color-mix(in srgb, var(--qp-accent) 9%, var(--qp-background));
     --qp-radius: 7px;
     --qp-shadow: none;
 }
@@ -16,7 +17,7 @@
     max-width: 1480px;
     padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 2.25rem 4rem;
 }
-[data-testid="stHeader"] { background: var(--background-color); }
+[data-testid="stHeader"] { background: var(--qp-background); }
 [data-testid="stSidebar"][aria-expanded="true"] {
     min-width: 248px;
     max-width: 248px;
@@ -43,7 +44,7 @@ h2 { font-size: 1.4rem !important; }
 h3 { font-size: 1.15rem !important; }
 h4 { font-size: 1.02rem !important; }
 h5, h6 { font-size: 0.95rem !important; }
-[data-testid="stCaptionContainer"] { color: var(--qp-muted); }
+[data-testid="stCaptionContainer"] { color: var(--qp-muted); opacity: 1; }
 hr { border-color: var(--qp-line); margin: 0.65rem 0 !important; }
 
 .qp-brand { display: flex; align-items: center; gap: 0.65rem; padding: 0.2rem 0 0.6rem; }

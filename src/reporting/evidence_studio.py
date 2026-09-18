@@ -352,6 +352,51 @@ def register_report_evidence(
     return result
 
 
+def register_client_plan_evidence(
+    workspace: Mapping[str, Any],
+    planning: Mapping[str, Any],
+    *,
+    verified_by: str,
+    now: date | datetime | str | None = None,
+) -> dict[str, Any]:
+    """Freeze a reviewed Laura model run into the existing report evidence graph.
+
+    The report owns a copy of the assumptions and results. Later client-policy
+    edits cannot silently alter a frozen report or change an existing claim.
+    """
+    snapshot = _json_copy(planning.get("last_run") or {}, "Client plan run")
+    metadata = snapshot.get("metadata") or {}
+    summary = snapshot.get("summary") or {}
+    interval = snapshot.get("partner_interval") or {}
+    if not metadata.get("history_sha256") or not summary or not interval:
+        raise ValueError("Save a complete client funding calculation before attaching evidence.")
+    snapshot["rationale"] = str(planning.get("rationale") or "")
+    digest = _hash(snapshot)
+    identifier = f"laura-plan-{digest[:16]}"
+    notes = (
+        f"Model output, not a guarantee. Run hash: {digest}. "
+        f"All ten payments: {float(summary['all_payments_probability']):.1%}; "
+        f"reserve, flexibility and payments: {float(summary['plan_success_probability']):.1%}. "
+        f"Beginning-of-2031 conditional contribution range for 2033: "
+        f"${float(interval['lower_usd']):,.0f}–${float(interval['upper_usd']):,.0f}; "
+        f"interval coverage {float(interval['empirical_interval_coverage']):.1%}; "
+        f"below lower bound {float(interval['below_lower_probability']):.1%}. "
+        "Review the attached client_plan snapshot for the exact history, costs, allocation and limitations. "
+        "WInS performance is not added to client deposits."
+    )
+    result = register_report_evidence(
+        workspace, identifier, title="Laura Gao dated client funding model",
+        citation="Quant Sim client funding calculation using the supplied Laura Gao assessment and cash-flow workbook.",
+        source_locator=f"client-plan:{digest}", source_type="model_output",
+        verified_by=verified_by, accessed_at=now, notes=notes, now=now,
+    )
+    record = result["evidence"][identifier]
+    record["client_plan"] = snapshot
+    record.pop("record_hash", None)
+    record["record_hash"] = _hash(record)
+    return result
+
+
 def add_report_claim(
     workspace: Mapping[str, Any],
     claim_id: str,
