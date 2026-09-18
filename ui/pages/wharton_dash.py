@@ -42,6 +42,7 @@ for module_name, module_obj in list(sys.modules.items()):
         sys.modules.pop(module_name, None)
 
 import streamlit as st
+from ui.dashboard_shell import render_plotly_chart, THEME_PALETTES, is_dark_mode, theme_color
 
 import src as _src
 
@@ -1177,9 +1178,12 @@ def _render_login() -> None:
 
 def _inject_cockpit_styles() -> None:
     # Also support the standalone cockpit entrypoint with the shared theme.
-    from ui.dashboard_shell import inject_dashboard_styles
+    from ui.dashboard_shell import inject_dashboard_styles, render_theme_toggle
 
     inject_dashboard_styles()
+    with st.sidebar:
+        st.divider()
+        render_theme_toggle()
 
 
 # ─── Task Manager ─────────────────────────────────────────────────────────────
@@ -1502,14 +1506,14 @@ def _render_mindmap() -> None:
             label=str(r["label"]),
             title=f"{r['label']} | {r['type']}",
             size=32,
-            color=NODE_COLORS.get(str(r["type"]), NODE_COLORS["Other"]),
-            font={"color": "#d1d8eb", "size": 18, "face": "Tahoma"},
+            color=theme_color(NODE_COLORS.get(str(r["type"]), NODE_COLORS["Other"])),
+            font={"color": THEME_PALETTES[is_dark_mode()]["text"], "size": 18, "face": "Tahoma"},
             mass=4.0 if str(r["id"]) not in connected_ids else 1.0,
         )
         for r in node_rows
     ]
     graph_edges = [
-        Edge(source=str(r["source"]), target=str(r["target"]), color="#64748b")
+        Edge(source=str(r["source"]), target=str(r["target"]), color=theme_color("#64748b"))
         for r in valid_edges
     ]
     graph_config = Config(
@@ -1525,7 +1529,8 @@ def _render_mindmap() -> None:
         },
         hierarchical=False,
         nodeHighlightBehavior=True,
-        highlightColor="#f59e0b",
+        highlightColor=theme_color("#f59e0b"),
+        backgroundColor=THEME_PALETTES[is_dark_mode()]["background"],
         collapsible=True,
     )
 
@@ -1956,7 +1961,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
 
     for sp in subprojects:
         sp_id = int(sp["id"])
-        status_color = STATUS_COLORS.get(str(sp["status"]), "#64748b")
+        status_color = theme_color(STATUS_COLORS.get(str(sp["status"]), "#64748b"))
         sp_files = _fetch_subproject_files(sp_id)
 
         with st.expander(
@@ -1970,7 +1975,7 @@ def _render_subprojects(profile: dict[str, str | int]) -> None:
                 <div class="subproject-card">
                   <div class="wharton-section-kicker">Created by {escape(str(sp['created_by']))} · {escape(str(sp['created_at']))}</div>
                   <div style="margin-top:0.5rem">{escape(str(sp['description'] or '—'))}</div>
-                  <div style="margin-top:0.5rem;font-size:0.82rem;color:#64748b;">Tags: {escape(str(sp['tags'] or '—'))}</div>
+                  <div style="margin-top:0.5rem;font-size:0.82rem;color:var(--qp-muted);">Tags: {escape(str(sp['tags'] or '—'))}</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -3929,7 +3934,7 @@ def _render_robustness_check(result: dict) -> None:
                         cumulative_evaluation = (1 + aggregate_evaluation).cumprod()
                         import plotly.express as px
                         fig = px.line(cumulative_evaluation, title="Cumulative Evaluation-Segment Growth", labels={"value": "Cumulative Growth", "index": "Date"})
-                        st.plotly_chart(fig, use_container_width=True)
+                        render_plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.error(f"Error running validation: {e}")
 
@@ -4153,7 +4158,7 @@ def _render_monte_carlo(result: dict) -> None:
             yaxis=dict(tickformat="$,.0f"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig_fan, use_container_width=True)
+        render_plotly_chart(fig_fan, use_container_width=True)
 
         # Distribution histogram
         if len(final_values) > 0:
@@ -4174,7 +4179,7 @@ def _render_monte_carlo(result: dict) -> None:
                 xaxis=dict(tickformat="$,.0f"),
                 showlegend=False,
             )
-            st.plotly_chart(fig_dist, use_container_width=True)
+            render_plotly_chart(fig_dist, use_container_width=True)
 
             # VaR / CVaR metrics
             st.markdown("#### Value-at-Risk Analysis")
@@ -4212,7 +4217,7 @@ def _render_monte_carlo(result: dict) -> None:
             xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
             yaxis=dict(tickformat="$,.0f"),
         )
-        st.plotly_chart(fig_paths, use_container_width=True)
+        render_plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
         pcts = {
@@ -4320,7 +4325,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
             yaxis=dict(tickformat="$,.0f"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig_fan, use_container_width=True)
+        render_plotly_chart(fig_fan, use_container_width=True)
 
         # Distribution histogram
         if len(final_values) > 0:
@@ -4341,7 +4346,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
                 xaxis=dict(tickformat="$,.0f"),
                 showlegend=False,
             )
-            st.plotly_chart(fig_dist, use_container_width=True)
+            render_plotly_chart(fig_dist, use_container_width=True)
 
             # VaR / CVaR metrics
             st.markdown("#### Value-at-Risk Analysis")
@@ -4379,7 +4384,7 @@ def _render_advanced_monte_carlo(result: dict) -> None:
             xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
             yaxis=dict(tickformat="$,.0f"),
         )
-        st.plotly_chart(fig_paths, use_container_width=True)
+        render_plotly_chart(fig_paths, use_container_width=True)
     else:
         # Fallback without Plotly
         pcts = {
@@ -4627,7 +4632,7 @@ def _render_efficient_frontier(result: dict) -> None:
             xaxis=dict(tickformat=".1%"), yaxis=dict(tickformat=".1%"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig_2d, use_container_width=True)
+        render_plotly_chart(fig_2d, use_container_width=True)
 
         # 3D surface
         try:
@@ -4648,7 +4653,7 @@ def _render_efficient_frontier(result: dict) -> None:
                         xaxis_title="Volatility", yaxis_title="Return", zaxis_title="Sharpe Ratio",
                     ),
                 )
-                st.plotly_chart(fig_3d, use_container_width=True)
+                render_plotly_chart(fig_3d, use_container_width=True)
         except Exception:
             pass  # Cloud is optional
 
@@ -4680,7 +4685,7 @@ def _render_efficient_frontier(result: dict) -> None:
             yaxis=dict(tickformat=".0%"), yaxis_title="Weight",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig_w, use_container_width=True)
+        render_plotly_chart(fig_w, use_container_width=True)
     else:
         view = wdf.copy()
         for c in view.columns:
@@ -4763,7 +4768,7 @@ def _render_risk_cockpit(result: dict) -> None:
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             title="Underwater Chart (Portfolio Drawdowns)"
         )
-        st.plotly_chart(fig_dd, use_container_width=True)
+        render_plotly_chart(fig_dd, use_container_width=True)
         
         st.markdown("#### Rolling Risk Metrics")
         window = st.slider("Rolling Window (days)", min_value=20, max_value=120, value=60, step=10, key="risk_roll_window")
@@ -4786,7 +4791,7 @@ def _render_risk_cockpit(result: dict) -> None:
         )
         fig_roll.update_yaxes(title_text="Volatility", tickformat='.1%', secondary_y=False)
         fig_roll.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
-        st.plotly_chart(fig_roll, use_container_width=True)
+        render_plotly_chart(fig_roll, use_container_width=True)
     else:
         st.warning("Plotly is required for advanced risk visualizations.")
         st.line_chart(drawdown_series, use_container_width=True)
@@ -4924,7 +4929,7 @@ def _render_factor_exposure(result: dict) -> None:
                 margin=dict(l=40, r=40, t=40, b=40),
                 template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
             )
-            st.plotly_chart(fig, use_container_width=True)
+            render_plotly_chart(fig, use_container_width=True)
             
         with c2:
             st.markdown("#### Factor Loadings")
@@ -5040,7 +5045,7 @@ def _render_regime_detection(result: dict) -> None:
             )
             fig.update_yaxes(title_text="Value", row=1, col=1)
             fig.update_yaxes(title_text="Prob(Stress)", range=[0, 1], row=2, col=1)
-            st.plotly_chart(fig, use_container_width=True)
+            render_plotly_chart(fig, use_container_width=True)
             
             st.markdown("#### Adaptive Strategy Suggestion")
             if current_stress > 0.5:
@@ -5229,7 +5234,7 @@ def _render_advanced_analytics(result: dict) -> None:
                 yaxis=dict(tickformat=".3%"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            st.plotly_chart(fig_forecast, use_container_width=True)
+            render_plotly_chart(fig_forecast, use_container_width=True)
 
             # Cumulative Return / Portfolio Value Forecast
             st.markdown("#### Projected Portfolio Value")
@@ -5273,7 +5278,7 @@ def _render_advanced_analytics(result: dict) -> None:
                 yaxis=dict(tickformat="$,.0f"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            st.plotly_chart(fig_cum, use_container_width=True)
+            render_plotly_chart(fig_cum, use_container_width=True)
 
         # GARCH volatility chart
         garch_res = model_results.get("GARCH(1,1)", {})
@@ -5306,7 +5311,7 @@ def _render_advanced_analytics(result: dict) -> None:
                 xaxis_title="Days (relative)", yaxis_title="Annualized Volatility",
                 yaxis=dict(tickformat=".1%"),
             )
-            st.plotly_chart(fig_garch, use_container_width=True)
+            render_plotly_chart(fig_garch, use_container_width=True)
 
             # VaR Projection Chart
             if vol_path:
@@ -5334,7 +5339,7 @@ def _render_advanced_analytics(result: dict) -> None:
                     yaxis=dict(tickformat="$,.0f"),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
-                st.plotly_chart(fig_var, use_container_width=True)
+                render_plotly_chart(fig_var, use_container_width=True)
 
             vol_cards = st.columns(3)
             vol_cards[0].metric("Conditional Vol (daily)", _fmt_pct(gm.get("conditional_volatility")))
@@ -5371,7 +5376,7 @@ def _render_advanced_analytics(result: dict) -> None:
                 yaxis=dict(tickformat=".2f"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            st.plotly_chart(fig_lr, use_container_width=True)
+            render_plotly_chart(fig_lr, use_container_width=True)
 
             lr_cols = st.columns(3)
             lr_cols[0].metric("Daily Slope", f"{slope:.6f}")
@@ -5483,7 +5488,7 @@ def _render_scenario_playground(result: dict) -> None:
                     xaxis_title="Total Return (%)", yaxis_title="",
                     xaxis=dict(ticksuffix="%"),
                 )
-                st.plotly_chart(fig_stress, use_container_width=True)
+                render_plotly_chart(fig_stress, use_container_width=True)
 
                 # Detailed scenario view
                 st.markdown("#### Detailed Scenario Analysis")
@@ -5525,7 +5530,7 @@ def _render_scenario_playground(result: dict) -> None:
                             yaxis=dict(tickformat="$,.0f"),
                             title=f"{selected_scenario}: Baseline vs Stressed Path",
                         )
-                        st.plotly_chart(fig_paths, use_container_width=True)
+                        render_plotly_chart(fig_paths, use_container_width=True)
 
                     # Drawdown comparison
                     baseline_dd = sc.get("baseline_drawdown", pd.Series(dtype=float))
@@ -5553,7 +5558,7 @@ def _render_scenario_playground(result: dict) -> None:
                             yaxis=dict(ticksuffix="%"),
                             title="Drawdown Comparison",
                         )
-                        st.plotly_chart(fig_dd, use_container_width=True)
+                        render_plotly_chart(fig_dd, use_container_width=True)
 
                     # Per-asset impact
                     impact = sc.get("asset_impact_proxy", pd.Series(dtype=float))
@@ -5571,7 +5576,7 @@ def _render_scenario_playground(result: dict) -> None:
                             template="plotly_dark", height=320,
                             yaxis=dict(tickformat="$,.0f"), yaxis_title="Impact ($)",
                         )
-                        st.plotly_chart(fig_impact, use_container_width=True)
+                        render_plotly_chart(fig_impact, use_container_width=True)
 
                     # Phase breakdown
                     phase_table = sc.get("phase_table", pd.DataFrame())
@@ -5727,7 +5732,7 @@ def _render_stock_screener() -> None:
                     xaxis_title="P/E Ratio", yaxis_title="Market Cap ($B)",
                     title="Valuation Map: P/E vs Market Cap",
                 )
-                st.plotly_chart(fig_scatter, use_container_width=True)
+                render_plotly_chart(fig_scatter, use_container_width=True)
 
             # Sector distribution
             if "Sector" in filtered.columns:
@@ -5743,7 +5748,7 @@ def _render_stock_screener() -> None:
                                            "#f97316", "#64748b", "#84cc16"]),
                     )])
                     fig_sector.update_layout(template="plotly_dark", height=380)
-                    st.plotly_chart(fig_sector, use_container_width=True)
+                    render_plotly_chart(fig_sector, use_container_width=True)
 
 
 # ─── Quant Engine ─────────────────────────────────────────────────────────────
@@ -8471,7 +8476,7 @@ def _render_decision_log(
                 plot_bgcolor='rgba(0,0,0,0)', yaxis_title='Price (USD)',
                 legend_title_text='Team edit markers',
             )
-            st.plotly_chart(fig, use_container_width=True)
+            render_plotly_chart(fig, use_container_width=True)
             chart_count += 1
         if not chart_count:
             st.info('Price charts appear once a decision is logged with live fundamentals enabled.')
@@ -8489,13 +8494,14 @@ def _render_decision_log(
         funds = snap.get('_fundamentals', {})
         action_color = {'Buy': '#10b981', 'Sell': '#ef4444', 'Hold': '#f59e0b',
                         'Rebalance': '#6366f1', 'Other': '#64748b'}.get(str(r['action']), '#64748b')
+        action_color = theme_color(action_color)
         exp_label = f"{r['date'][:10]}  |  {r['action']} {r['ticker']}  |  {r['team_member']}"
         with st.expander(exp_label, expanded=False):
             updated_by = str(r['updated_by'] or '')
             was_edited_by_teammate = bool(updated_by and updated_by != str(r['team_member']))
             if was_edited_by_teammate:
                 st.markdown(
-                    f"<div style='background:#f3e8ff;color:#6b21a8;border-left:4px solid #9333ea;"
+                    f"<div style='background:var(--qp-accent-soft);color:var(--qp-text);border-left:4px solid var(--qp-accent);"
                     f"padding:0.55rem 0.75rem;border-radius:4px;margin-bottom:0.75rem;font-weight:600'>"
                     f"Edited by {escape(updated_by)} on {escape(str(r['updated_at'] or 'an unknown date'))}"
                     f"</div>",
@@ -8504,12 +8510,12 @@ def _render_decision_log(
             elif updated_by:
                 st.caption(f"Last updated by {updated_by} on {r['updated_at']}")
             st.markdown(
-                f"<span style='background:{action_color};color:#fff;padding:2px 10px;"
+                f"<span style='border:1px solid {action_color};color:{action_color};padding:2px 10px;"
                 f"border-radius:4px;font-weight:700'>{r['action']}</span>  "
-                f"<span style='color:#94a3b8'>Goals: {r['client_goal_tags'] or '—'}</span>",
+                f"<span style='color:var(--qp-muted)'>Goals: {r['client_goal_tags'] or '—'}</span>",
                 unsafe_allow_html=True
             )
-            thesis_style = "color:#6b21a8;background:#faf5ff;padding:0.75rem;border-radius:4px;" if was_edited_by_teammate else ""
+            thesis_style = "color:var(--qp-text);background:var(--qp-accent-soft);padding:0.75rem;border-radius:4px;" if was_edited_by_teammate else ""
             st.markdown(
                 f"<p><strong>Journal content:</strong></p><div style='{thesis_style}'>{escape(str(r['thesis']))}</div>",
                 unsafe_allow_html=True,
@@ -8595,7 +8601,7 @@ def _render_decision_log(
                     fig.update_layout(title=f'{tkr} — {metric} over time', height=280,
                                       margin=dict(l=20, r=20, t=40, b=20), template='plotly_dark',
                                       paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig, use_container_width=True)
+                    render_plotly_chart(fig, use_container_width=True)
         if not any_chart:
             st.info('Log the same ticker at least twice to see metric evolution charts.')
     except ImportError:
@@ -11285,7 +11291,7 @@ def _render_geographic_revenue_breakdown(snapshot: dict[str, Any], ticker: str, 
             margin=dict(l=10, r=10, t=60, b=10),
             legend=dict(orientation="h", yanchor="top", y=-0.08),
         )
-        st.plotly_chart(figure, use_container_width=True)
+        render_plotly_chart(figure, use_container_width=True)
     with detail_col:
         st.markdown("##### Regional interpretation")
         st.write(analysis["interpretation"])
@@ -11584,7 +11590,7 @@ def _render_macro_region_drilldown(snapshot: dict[str, Any], ticker: str) -> Non
                 yaxis_title="Percent",
                 legend=dict(orientation="h", yanchor="top", y=-0.18),
             )
-            st.plotly_chart(figure, use_container_width=True)
+            render_plotly_chart(figure, use_container_width=True)
 
     source_url = str(macro_snapshot.get("source_url") or "")
     fetched_at = str(macro_snapshot.get("fetched_at") or "")
@@ -11869,7 +11875,7 @@ def _render_industry_peer_analysis(
         )
         figure.update_traces(textposition="top center")
         figure.update_layout(height=410, yaxis_tickformat=".1%")
-        st.plotly_chart(figure, use_container_width=True)
+        render_plotly_chart(figure, use_container_width=True)
 
     porter = analysis.get("porter_five_forces", {})
     swot = analysis.get("swot", {})
@@ -12669,7 +12675,7 @@ def _render_header(profile: dict[str, str | int]) -> None:
         with st.expander("Account & appearance", expanded=False):
             if st.button("Sign out", use_container_width=True):
                 _logout()
-            st.caption("Change the color theme in ⋮ → Theme.")
+            st.caption("Change the color theme with Dark mode in the sidebar or ⋮ → Theme.")
             _render_build_fingerprint()
 
 

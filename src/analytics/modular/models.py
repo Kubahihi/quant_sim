@@ -442,7 +442,7 @@ def _regime_probability_model(series: pd.Series, _: Dict[str, Any]) -> ModelResu
     )
 
 
-def _bma_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
+def _confidence_weighted_forecast_ensemble_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
     interim = context.get("interim_models", {})
     candidates = [
         interim.get("bayesian_drift"),
@@ -451,7 +451,7 @@ def _bma_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
     ]
     usable = [m for m in candidates if isinstance(m, ModelResult) and m.available]
     if not usable:
-        raise ValueError("bayesian model averaging requires prior model outputs")
+        raise ValueError("confidence weighted forecast ensemble requires prior model outputs")
 
     values = []
     weights = []
@@ -471,11 +471,11 @@ def _bma_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
     disagreement = float(np.std(values)) if len(values) > 1 else 0.0
     conf = float(max(0.0, min(1.0, 1.0 / (1.0 + disagreement * 3.0))))
     return ModelResult(
-        name="bayesian_model_averaging",
-        family="bayesian",
+        name="confidence_weighted_forecast_ensemble",
+        family="ensemble",
         available=True,
         metrics={
-            "bma_expected_annual_return": weighted,
+            "ensemble_expected_annual_return": weighted,
             "disagreement": disagreement,
             "confidence": conf,
         },
@@ -568,20 +568,24 @@ def _ensemble_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
     )
 
 
-def _calibrated_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
+def _probability_shrinkage_model(_: pd.Series, context: Dict[str, Any]) -> ModelResult:
+    """
+    Applies a heuristic shrinkage transformation to the base ensemble probabilities.
+    This is NOT a statistical probability calibration.
+    """
     interim = context.get("interim_models", {})
     base = interim.get("ensemble")
     if not isinstance(base, ModelResult) or not base.available:
-        raise ValueError("calibrated probabilities require ensemble model")
+        raise ValueError("probability shrinkage requires ensemble model")
     p = float(base.metrics.get("probability_up", 0.5))
-    calibrated = float(0.15 * 0.5 + 0.85 * p)
-    conf = float(abs(calibrated - 0.5) * 2.0)
+    shrunk = float(0.15 * 0.5 + 0.85 * p)
+    conf = float(abs(shrunk - 0.5) * 2.0)
     return ModelResult(
-        name="calibrated_probabilities",
+        name="probability_shrinkage",
         family="ml",
         available=True,
         metrics={
-            "probability_up": calibrated,
+            "probability_up": shrunk,
             "confidence": conf,
         },
         confidence=conf,
@@ -715,10 +719,10 @@ def run_model_bundle(series: pd.Series, context: Dict[str, Any] | None = None) -
         interim[entry.name] = entry.runner(series, run_context)
 
     # Dependent bundle models run after base models.
-    interim["bayesian_model_averaging"] = _safe_model(
-        "bayesian_model_averaging",
-        "bayesian",
-        _bma_model,
+    interim["confidence_weighted_forecast_ensemble"] = _safe_model(
+        "confidence_weighted_forecast_ensemble",
+        "ensemble",
+        _confidence_weighted_forecast_ensemble_model,
         series,
         {**run_context, "interim_models": interim},
     )
@@ -729,10 +733,10 @@ def run_model_bundle(series: pd.Series, context: Dict[str, Any] | None = None) -
         series,
         {**run_context, "interim_models": interim},
     )
-    interim["calibrated_probabilities"] = _safe_model(
-        "calibrated_probabilities",
+    interim["probability_shrinkage"] = _safe_model(
+        "probability_shrinkage",
         "ml",
-        _calibrated_model,
+        _probability_shrinkage_model,
         series,
         {**run_context, "interim_models": interim},
     )

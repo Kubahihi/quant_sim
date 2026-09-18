@@ -1,0 +1,16 @@
+button {
+    display: inline-flex; align-items: center; gap: 0.55rem;
+    padding: 0.25rem 0; border: 0; background: transparent;
+    font: inherit; color: var(--st-text-color); cursor: pointer;
+}
+.track {
+    width: 2rem; height: 1.1rem; border-radius: 1rem;
+    background: #526273; display: inline-flex; align-items: center;
+    padding: 0.15rem; box-sizing: border-box;
+}
+.thumb { width: 0.8rem; height: 0.8rem; border-radius: 50%; background: white; }
+[aria-checked="true"] .track { background: #167d78; }
+[aria-checked="true"] .thumb { transform: translateX(0.9rem); }
+button:focus-visible { outline: 2px solid var(--st-text-color); outline-offset: 4px; border-radius: 3px; }
+button:disabled { cursor: wait; }
+[role="status"] { font-size: 0.85rem; color: var(--st-text-color); }
