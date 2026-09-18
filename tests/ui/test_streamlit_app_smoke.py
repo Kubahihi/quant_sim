@@ -423,7 +423,10 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     area_selector = next(item for item in at.sidebar.radio if item.label == "Workspace area")
     area_selector.set_value("Client & Policy").run(timeout=60)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
-    assert panel_selector.options == ["Mandate & Strategy"]
+    assert panel_selector.options == ["Laura Gao Plan", "Mandate & Strategy"]
+    assert any("Laura Gao" in item.value for item in at.markdown)
+    panel_selector.set_value("Mandate & Strategy").run(timeout=60)
+    assert len(at.exception) == 0
     assert any("Mandate & Strategy" in item.value for item in at.markdown)
     strategy_tab_labels = [tab.label for tab in at.tabs]
     assert strategy_tab_labels == [

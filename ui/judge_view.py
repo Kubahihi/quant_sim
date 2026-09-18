@@ -364,23 +364,11 @@ def _inject_styles() -> None:
             position:relative;
             overflow:hidden;
             margin:.15rem 0 1.55rem;
-            padding:2.2rem 2.25rem;
+            padding:1.6rem 1.75rem;
             border:1px solid rgba(255,255,255,.09);
-            border-radius:24px;
+            border-radius:var(--qp-radius, 7px);
             color:var(--qp-text);
             background:var(--qp-surface);
-            box-shadow:0 24px 60px rgba(15,35,55,.16);
-        }
-        .judge-hero:after {
-            content:"";
-            position:absolute;
-            width:22rem;
-            height:22rem;
-            right:-13rem;
-            bottom:-15rem;
-            border:1px solid rgba(255,255,255,.15);
-            border-radius:50%;
-            box-shadow:0 0 0 3rem rgba(255,255,255,.025),0 0 0 7rem rgba(255,255,255,.018);
         }
         .judge-hero-grid {
             position:relative;
@@ -397,17 +385,9 @@ def _inject_styles() -> None:
             margin-bottom:.82rem;
             color:var(--qp-accent-ink);
             font-size:.72rem;
-            font-weight:850;
-            letter-spacing:.14em;
+            font-weight:600;
+            letter-spacing:.06em;
             text-transform:uppercase;
-        }
-        .judge-hero-label:before {
-            content:"";
-            width:.52rem;
-            height:.52rem;
-            border-radius:50%;
-            background:var(--qp-accent-ink);
-            box-shadow:0 0 0 .25rem rgba(45,212,191,.12);
         }
         .judge-hero h1 {
             max-width:52rem;
@@ -437,9 +417,8 @@ def _inject_styles() -> None:
         .judge-score-panel {
             padding:1.2rem 1.15rem;
             border:1px solid rgba(255,255,255,.16);
-            border-radius:19px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
-            backdrop-filter:blur(9px);
             text-align:center;
         }
         .judge-score-ring {
@@ -496,20 +475,10 @@ def _inject_styles() -> None:
             padding:1rem 1.05rem .92rem;
             overflow:hidden;
             border:1px solid var(--judge-line);
-            border-top:3px solid var(--qp-border);
-            border-radius:15px;
+            border-top:3px solid #9aa9b5;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
-            box-shadow:0 7px 22px rgba(16,35,56,.045);
-        }
-        .judge-journey-card:after {
-            content:"";
-            position:absolute;
-            right:-2.2rem;
-            bottom:-2.5rem;
-            width:6.5rem;
-            height:6.5rem;
-            border:1px solid rgba(15,118,110,.08);
-            border-radius:50%;
+            box-shadow:none;
         }
         .judge-journey-card.is-good { border-top-color:var(--qp-success); }
         .judge-journey-card.is-watch { border-top-color:var(--qp-warning); }
@@ -551,9 +520,9 @@ def _inject_styles() -> None:
             min-height:7.2rem;
             padding:.92rem 1rem;
             border:1px solid var(--judge-line);
-            border-radius:15px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
-            box-shadow:0 6px 18px rgba(16,35,56,.04);
+            box-shadow:none;
         }
         .judge-brief-card span { display:block; color:var(--qp-muted); font-size:.67rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
         .judge-brief-card strong { display:block; margin:.48rem 0 .3rem; color:var(--judge-ink); font-size:1.13rem; line-height:1.2; letter-spacing:-.025em; }
@@ -569,9 +538,9 @@ def _inject_styles() -> None:
             margin-bottom:.7rem;
             padding:.88rem .95rem;
             border:1px solid var(--judge-line);
-            border-radius:13px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
-            box-shadow:0 4px 14px rgba(16,35,56,.025);
+            box-shadow:none;
         }
         .judge-fact span,
         .judge-mini-label {
@@ -587,9 +556,9 @@ def _inject_styles() -> None:
         .judge-source {
             padding:.92rem 1rem;
             margin-bottom:.85rem;
-            border:1px solid var(--qp-border);
+            border:1px solid var(--judge-line);
             border-left:4px solid var(--judge-teal);
-            border-radius:13px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
             color:var(--qp-text);
             font-size:.83rem;
@@ -600,7 +569,7 @@ def _inject_styles() -> None:
             margin:.1rem 0 .8rem;
             padding:.88rem .92rem;
             border:1px solid var(--judge-line);
-            border-radius:13px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
         }
         .judge-allocation-card header { display:flex; align-items:baseline; justify-content:space-between; gap:.6rem; }
@@ -611,16 +580,16 @@ def _inject_styles() -> None:
             margin-bottom:.85rem;
             padding:1.15rem 1.2rem;
             border:1px solid var(--judge-line);
-            border-radius:17px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
-            box-shadow:0 8px 26px rgba(16,35,56,.045);
+            box-shadow:none;
         }
         .judge-case-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }
         .judge-case-title small { display:block; margin-bottom:.2rem; color:var(--qp-muted); font-size:.64rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }
         .judge-case h3 { margin:0; color:var(--judge-ink); font-size:1.18rem; letter-spacing:-.025em; }
         .judge-case-score { padding:.28rem .55rem; border-radius:999px; color:var(--qp-success); background:var(--qp-success-soft); font-size:.72rem; font-weight:850; }
         .judge-chip-row { display:flex; flex-wrap:wrap; gap:.4rem; margin:.72rem 0; }
-        .judge-chip { padding:.27rem .52rem; border:1px solid var(--qp-border); border-radius:999px; color:var(--qp-muted); background:var(--qp-background); font-size:.68rem; }
+        .judge-chip { padding:.27rem .52rem; border:1px solid var(--judge-line); border-radius:999px; color:var(--qp-muted); background:var(--qp-background); font-size:.68rem; }
         .judge-case-thesis { margin:.72rem 0 .85rem; color:var(--qp-text); font-size:.91rem; font-weight:620; line-height:1.52; }
         .judge-case-grid,.judge-decision-grid {
             display:grid;
@@ -635,7 +604,7 @@ def _inject_styles() -> None:
         }
         .judge-case-cell span,.judge-decision-cell span { display:block; margin-bottom:.22rem; color:var(--qp-muted); font-size:.61rem; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
         .judge-case-cell strong,.judge-decision-cell strong { color:var(--qp-text); font-size:.74rem; font-weight:650; line-height:1.4; }
-        .judge-case-downside { margin-top:.55rem; padding:.72rem .78rem; border-left:3px solid var(--qp-warning); border-radius:0 10px 10px 0; background:var(--qp-warning-soft); }
+        .judge-case-downside { margin-top:.55rem; padding:.72rem .78rem; border-left:3px solid #d69b32; border-radius:0 10px 10px 0; background:var(--qp-warning-soft); }
         .judge-case-downside span { color:var(--qp-warning); font-size:.64rem; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
         .judge-case-downside strong { display:block; margin-top:.2rem; color:var(--qp-warning); font-size:.77rem; line-height:1.4; }
         .judge-case-meta { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.55rem; margin-top:.7rem; color:var(--qp-muted); font-size:.68rem; }
@@ -643,7 +612,7 @@ def _inject_styles() -> None:
             margin-bottom:.72rem;
             padding:1rem 1.05rem;
             border:1px solid var(--judge-line);
-            border-radius:15px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
         }
         .judge-decision-head { display:flex; align-items:center; justify-content:space-between; gap:.8rem; margin-bottom:.75rem; }
@@ -655,7 +624,7 @@ def _inject_styles() -> None:
             margin-bottom:.7rem;
             padding:.85rem .9rem;
             border:1px solid var(--judge-line);
-            border-radius:13px;
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
         }
         .judge-module-card.is-used { border-color:var(--qp-border); background:var(--qp-success-soft); }
@@ -664,8 +633,8 @@ def _inject_styles() -> None:
         .judge-module-card p { margin:0; color:var(--qp-muted); font-size:.7rem; line-height:1.4; }
         .judge-empty {
             padding:1rem 1.05rem;
-            border:1px dashed var(--qp-border);
-            border-radius:12px;
+            border:1px dashed var(--judge-line);
+            border-radius:var(--qp-radius, 7px);
             color:var(--qp-muted);
             background:var(--qp-background);
             font-size:.84rem;
@@ -677,17 +646,17 @@ def _inject_styles() -> None:
             gap:.8rem;
             margin-bottom:.62rem;
             padding:.9rem 1rem;
-            border:1px solid var(--qp-border);
-            border-radius:13px;
+            border:1px solid var(--judge-line);
+            border-radius:var(--qp-radius, 7px);
             background:var(--qp-surface);
             color:var(--qp-text);
             font-size:.86rem;
             line-height:1.5;
         }
         .judge-question strong { display:grid; place-items:center; width:2rem; height:2rem; border-radius:9px; color:var(--qp-accent-text); background:var(--qp-accent); font-size:.72rem; }
-        div[data-testid="stDataFrame"] { margin:.35rem 0 .75rem; border:1px solid var(--judge-line); border-radius:13px; overflow:hidden; }
-        div[data-testid="stExpander"] { margin-bottom:.5rem; border-color:var(--judge-line); border-radius:12px; background:var(--qp-surface); }
-        div[data-testid="stMetric"] { min-height:7rem; border-radius:15px !important; box-shadow:0 6px 18px rgba(16,35,56,.035) !important; }
+        div[data-testid="stDataFrame"] { margin:.35rem 0 .75rem; border:1px solid var(--judge-line); border-radius:var(--qp-radius, 7px); overflow:hidden; }
+        div[data-testid="stExpander"] { margin-bottom:.5rem; border-color:var(--judge-line); border-radius:var(--qp-radius, 7px); background:var(--qp-surface); }
+        div[data-testid="stMetric"] { min-height:7rem; border-radius:var(--qp-radius, 7px) !important; box-shadow:none !important; }
         div[data-testid="stProgress"] { margin:.7rem 0 .25rem; }
         @media (max-width:1000px) {
             .judge-hero-grid { grid-template-columns:1fr 12rem; gap:1.4rem; }
@@ -695,7 +664,7 @@ def _inject_styles() -> None:
             .judge-case-grid,.judge-decision-grid { grid-template-columns:1fr; }
         }
         @media (max-width:760px) {
-            .judge-hero { padding:1.45rem 1.25rem; border-radius:18px; }
+            .judge-hero { padding:1.25rem; }
             .judge-hero-grid { grid-template-columns:1fr; }
             .judge-score-panel { display:flex; align-items:center; gap:1rem; text-align:left; }
             .judge-score-ring { width:5.2rem; height:5.2rem; flex:0 0 5.2rem; margin:0; }

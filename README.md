@@ -94,6 +94,10 @@ Outputs include wealth distributions, percentile paths, loss probability, termin
 
 Deterministic stress analysis answers a separate question: how would the portfolio or position respond to specified price, yield, spread or currency shocks? These are conditional sensitivities, with results dependent on the entered shock and model assumptions.
 
+### Laura Gao Plan (2026–2027)
+
+The dated client model uses the two specified deposits and ten beginning-of-year operating payments. It evaluates reserve funding, facility contributions, retained flexibility, joint payment success and a conditional partner range from 2031. The workspace also checks Trading Notes and IPS word limits, saves assumptions and exports reproducible model evidence. See the [case gap assessment and methodology](docs/LAURA_GAO_CASE.md).
+
 ### Client Goal Outlook
 
 Goal analysis combines starting capital, target wealth, horizon, contributions or withdrawals, and a nominal or inflation-adjusted wealth basis.
