@@ -12257,6 +12257,11 @@ def _render_company_analysis(profile: dict[str, str | int]) -> None:
     st.caption(f"Data fetched: {snapshot.get('fetched_at', '—')} · Market-data source: Yahoo Finance")
 
     detail_view, detail_tab = _render_company_detail_navigation(selected_ticker)
+    from ui.entry_quality import render_entry_quality
+
+    render_entry_quality(selected_ticker, key_prefix=f"wharton_company_{selected_ticker}",
+        connection_factory=get_connection, scope="wharton_team",
+        actor=str(profile.get("username", "")), can_edit=not _is_judge_profile(profile))
 
     if detail_view == "Overview":
         with detail_tab:
@@ -13508,7 +13513,7 @@ def _render_risk_scenarios_workspace(profile: Mapping[str, Any], result: dict[st
     )
     analytics_view = st.radio(
         "Analytics view",
-        ["Portfolio Risk", "Quant Engine", "FX & Hedging", "Factor Exposure", "Scenarios", "Advanced Lab"],
+        ["Portfolio Risk", "Quant Engine", "Custom data", "FX & Hedging", "Factor Exposure", "Scenarios", "Advanced Lab"],
         horizontal=True,
         key="wharton_risk_scenarios_view",
     )
@@ -13525,6 +13530,10 @@ def _render_risk_scenarios_workspace(profile: Mapping[str, Any], result: dict[st
         render_with_quant_context(_render_risk_cockpit)
     elif analytics_view == "Quant Engine":
         _render_quant_engine(profile)
+    elif analytics_view == "Custom data":
+        from ui.custom_history import render_custom_history
+
+        render_custom_history(embedded=True)
     elif analytics_view == "FX & Hedging":
         _render_currency_risk(profile)
     elif analytics_view == "Factor Exposure":

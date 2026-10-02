@@ -164,9 +164,19 @@ The separate methodology score summarizes evidence quality. Neither it nor the p
 
 Detailed assumptions and interpretation rules:
 
-[Portfolio construction](docs/PORTFOLIO_OPTIMIZATION.md) · [Model validation](docs/MODEL_VALIDATION.md) · [Goal funding](docs/GOAL_FUNDING.md) · [Fixed income](docs/FIXED_INCOME.md) · [Currency risk](docs/CURRENCY_RISK.md) · [Commodities](docs/COMMODITIES.md) · [Behavioral profile](docs/BEHAVIORAL_PROFILE.md)
+[Portfolio construction](docs/PORTFOLIO_OPTIMIZATION.md) · [Model validation](docs/MODEL_VALIDATION.md) · [Entry Quality / Deployment Score](docs/ENTRY_QUALITY.md) · [Deployment planning](docs/DEPLOYMENT_PLANNING.md) · [Goal funding](docs/GOAL_FUNDING.md) · [Fixed income](docs/FIXED_INCOME.md) · [Currency risk](docs/CURRENCY_RISK.md) · [Commodities](docs/COMMODITIES.md) · [Behavioral profile](docs/BEHAVIORAL_PROFILE.md)
 
 ## Quick start
+
+To analyze your own CSV or Excel history, open **Quant Platform → Data source →
+Custom data**. The import workspace supports daily through annual observations,
+explicit column mapping, portfolio analytics, allocation comparisons and joint
+historical simulation. It is also available in **Wharton Cockpit → Portfolio →
+Risk & Scenarios → Custom data**. Enable **Add assets by ticker** to combine
+uploaded assets with downloaded market history at the same observation frequency.
+Assets quoted in another currency are converted to the uploaded data currency
+using historical FX rates.
+See [custom data import](docs/CUSTOM_DATA.md).
 
 Requires Python 3.12.
 

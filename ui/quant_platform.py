@@ -1846,6 +1846,14 @@ def _render_screener_bulk_actions(
                 key=f"{key_prefix}_inspect_ticker",
             )
             history = _fetch_ticker_history_cached(selected_ticker)
+            from ui.entry_quality import render_entry_quality
+
+            from src.auth.database import AUTH_DB_PATH, get_db_connection
+
+            render_entry_quality(selected_ticker, key_prefix=f"{key_prefix}_inspect",
+                connection_factory=lambda: get_db_connection(AUTH_DB_PATH),
+                scope=f"user:{user_id}" if user_id is not None else None,
+                actor=str(user_id) if user_id is not None else None)
             if history.empty:
                 st.warning(f"Could not load historical data for {selected_ticker}.")
             else:
@@ -4476,6 +4484,16 @@ def _render_modular_dashboard(
     elif page_key == "reports":
         _render_reports_page(analysis_result)
 
+
+history_source = st.sidebar.radio(
+    "Data source", ["Market data", "Custom data"], key="quant_history_source",
+    help="Use downloaded market history or import your own CSV / Excel observations.",
+)
+if history_source == "Custom data":
+    from ui.custom_history import render_custom_history
+
+    render_custom_history()
+    st.stop()
 
 if "analysis_result" not in st.session_state:
     st.session_state["analysis_result"] = None

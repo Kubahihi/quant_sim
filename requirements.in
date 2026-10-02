@@ -2,6 +2,7 @@
 # requirements.txt; Streamlit Cloud installs that fully pinned manifest.
 numpy>=1.24.0
 pandas>=2.0.0
+openpyxl==3.1.5
 scipy>=1.10.0
 matplotlib>=3.7.0
 seaborn>=0.12.0

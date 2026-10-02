@@ -557,6 +557,11 @@ def test_wharton_cockpit_groups_and_lazily_renders_panels(monkeypatch, tmp_path)
     panel_selector = next(item for item in at.selectbox if item.label == "Active panel")
     panel_selector.set_value("Risk & Scenarios").run(timeout=60)
     analytics_view = next(item for item in at.radio if item.label == "Analytics view")
+    analytics_view.set_value("Custom data").run(timeout=60)
+    assert len(at.exception) == 0
+    assert any(item.value == "Custom data analysis" for item in at.subheader)
+    assert [item.label for item in at.file_uploader] == ["Historical data"]
+    analytics_view = next(item for item in at.radio if item.label == "Analytics view")
     analytics_view.set_value("FX & Hedging").run(timeout=60)
     assert len(at.exception) == 0
     assert any("Currency Risk & Hedging" in item.value for item in at.markdown)

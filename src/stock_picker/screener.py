@@ -338,14 +338,9 @@ def rank_stocks(
 
 
 def _compute_rsi(close: pd.Series, window: int = 14) -> float:
-    delta = close.diff()
-    gains = delta.clip(lower=0)
-    losses = -delta.clip(upper=0)
-    avg_gain = gains.rolling(window=window, min_periods=window).mean()
-    avg_loss = losses.rolling(window=window, min_periods=window).mean()
-    relative_strength = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + relative_strength))
-    return float(rsi.iloc[-1]) if not rsi.dropna().empty else np.nan
+    from src.analytics.technical import calculate_rsi
+
+    return calculate_rsi(close, window)
 
 
 def _compute_macd(close: pd.Series) -> float:
